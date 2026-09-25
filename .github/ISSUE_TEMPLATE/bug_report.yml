@@ -1,0 +1,29 @@
+name: Bug report
+description: 报告可复现的问题
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: 问题描述
+      description: 请说明你预期发生什么、实际发生了什么。
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: 应用版本
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Windows 版本
+  - type: textarea
+    attributes:
+      label: 复现步骤
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 补充信息
+      description: 请勿上传存档、内存转储或其他敏感数据，除非你已确认可以公开。

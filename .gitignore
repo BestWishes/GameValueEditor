@@ -1,0 +1,29 @@
+## .NET build outputs
+bin/
+obj/
+artifacts/
+dist/
+
+## Visual Studio / Rider
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Test and coverage outputs
+TestResults/
+coverage/
+*.trx
+
+## Local app data and diagnostics
+*.log
+*.dmp
+library.json
+library.backup.json
+
+## OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
