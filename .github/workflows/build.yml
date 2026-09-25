@@ -19,8 +19,11 @@ jobs:
         run: dotnet run --project tests/GameValueEditor.SmokeTests/GameValueEditor.SmokeTests.csproj -c Release --no-build
       - name: Publish portable application
         shell: pwsh
-        run: ./scripts/publish.ps1 -Version 0.1.0
+        run: ./scripts/publish.ps1 -Version 0.1.1
+      - name: Test packaged application startup
+        shell: pwsh
+        run: ./scripts/test-package-startup.ps1 -ArchivePath ./dist/GameValueEditor-v0.1.1-win-x64.zip
       - uses: actions/upload-artifact@v4
         with:
           name: GameValueEditor-win-x64
-          path: dist/GameValueEditor-v0.1.0-win-x64.zip
+          path: dist/GameValueEditor-v0.1.1-win-x64.zip

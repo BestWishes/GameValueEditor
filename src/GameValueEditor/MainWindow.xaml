@@ -154,7 +154,7 @@
                                     <Button Content="清空结果" Click="ResetScan_OnClick"/>
                                 </StackPanel>
                             </Grid>
-                            <ProgressBar Grid.Row="2" Height="3" Value="{Binding ProgressPercentage}" Maximum="100"
+                            <ProgressBar Grid.Row="2" Height="3" Value="{Binding ProgressPercentage, Mode=OneWay}" Maximum="100"
                                          Foreground="{StaticResource AccentBrush}" Background="{StaticResource PanelRaisedBrush}"/>
                             <DataGrid Grid.Row="3" Margin="0,10,0,10" ItemsSource="{Binding VisibleScanResults}"
                                       SelectedItem="{Binding SelectedScanResult}" IsReadOnly="True">
@@ -243,7 +243,7 @@
             <Grid Margin="14,0">
                 <TextBlock Text="{Binding StatusText}" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center"/>
                 <TextBlock HorizontalAlignment="Right" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}"
-                           Text="仅用于离线单机游戏 · v0.1.0"/>
+                           Text="仅用于离线单机游戏 · v0.1.1"/>
             </Grid>
         </Border>
     </Grid>
