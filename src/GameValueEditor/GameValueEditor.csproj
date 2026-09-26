@@ -12,12 +12,13 @@
     <RootNamespace>GameValueEditor</RootNamespace>
     <Product>肝肾大圣-单机游戏数值编辑器</Product>
     <Description>A local-first memory value editor for offline single-player games.</Description>
-    <Version>0.2.0</Version>
+    <Version>0.3.0-preview.1</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>
     <Resource Include="Assets\GameValueEditorIcon.png" />
+    <Compile Remove="Services\Adapters\FzzmlInventoryAdapter.cs" />
   </ItemGroup>
 
 </Project>

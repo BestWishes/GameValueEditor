@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Text.Json.Serialization;
+using System.Windows.Media;
 using GameValueEditor.Infrastructure;
 
 namespace GameValueEditor.Models;
@@ -12,15 +13,35 @@ public sealed class GameProfile : ObservableObject
     private bool _isPinned;
     private bool _isLocked;
     private DateTime _lastUsedUtc = DateTime.UtcNow;
+    private bool _isConnected;
+    private ImageSource? _iconSource;
 
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Name { get => _name; set => SetProperty(ref _name, value); }
     public string ExecutablePath { get => _executablePath; set => SetProperty(ref _executablePath, value); }
     public string ProcessName { get => _processName; set => SetProperty(ref _processName, value); }
+    public string IconFileName { get; set; } = string.Empty;
     public bool IsPinned { get => _isPinned; set { if (SetProperty(ref _isPinned, value)) OnPropertyChanged(nameof(Badges)); } }
     public bool IsLocked { get => _isLocked; set { if (SetProperty(ref _isLocked, value)) OnPropertyChanged(nameof(Badges)); } }
     public DateTime LastUsedUtc { get => _lastUsedUtc; set => SetProperty(ref _lastUsedUtc, value); }
     public ObservableCollection<GameVersionProfile> Versions { get; set; } = [];
+
+    [JsonIgnore]
+    public bool IsConnected
+    {
+        get => _isConnected;
+        set
+        {
+            if (!SetProperty(ref _isConnected, value)) return;
+            OnPropertyChanged(nameof(ConnectionDisplay));
+        }
+    }
+
+    [JsonIgnore]
+    public ImageSource? IconSource { get => _iconSource; set => SetProperty(ref _iconSource, value); }
+
+    [JsonIgnore]
+    public string ConnectionDisplay => IsConnected ? "✓" : "✕";
 
     [JsonIgnore]
     public string Badges => $"{(IsPinned ? "📌 " : string.Empty)}{(IsLocked ? "🔒 " : string.Empty)}";
@@ -47,6 +68,7 @@ public sealed class GameVersionProfile : ObservableObject
     public string MetadataSha256 { get; set; } = string.Empty;
     public long FileSize { get; set; }
     public string Architecture { get; set; } = "Unknown";
+    public DateTime? CollectedUtc { get; set; }
     public DateTime LastVerifiedUtc
     {
         get => _lastVerifiedUtc;
@@ -90,6 +112,9 @@ public sealed class GameVersionProfile : ObservableObject
             return $"程序版本：{rawVersion}\n架构：{Architecture}\n构建指纹：{shortHash}";
         }
     }
+
+    [JsonIgnore]
+    public string CollectedDateDisplay => CollectedUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "未知";
 
     public void NotifyChoiceChanged()
     {

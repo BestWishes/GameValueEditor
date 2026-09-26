@@ -38,13 +38,34 @@
 
 通用套路不得依赖游戏名、硬编码地址、模块 RVA 或某个构建的类布局；这些内容属于专属适配器。
 
-## 添加游戏专属适配器
+## 添加可选游戏专属模块
 
-适配器接口位于 `Services/Adapters/IGameAdapter.cs`：
+从 v0.3 开始，专属适配器不再编译进主程序，而是作为可独立下载、校验和更新的模块安装到 `data/modules`。适配器接口仍位于 `Services/Adapters/IGameAdapter.cs`：
 
 - `IGameAdapter`：按稳定字段键读取和写入。
-- `IInventoryGameAdapter`：额外枚举背包物品，供“专属修改 > 背包物品数量”页面使用。
-- `GameAdapterRegistry`：注册并解析适配器。
+- `IInventoryGameAdapter`：额外枚举背包物品，供“本游专属 > 背包物品数量”页面使用。
+- `GameAdapterRegistry`：从已安装模块加载并按当前进程与构建解析适配器。
+
+一个模块 ZIP 的根目录至少包含：
+
+```text
+module.json
+GameValueEditor.Modules.Example.dll
+```
+
+`module.json` 示例：
+
+```json
+{
+  "id": "game.example.inventory.v1",
+  "version": "1.0.0",
+  "displayName": "示例游戏背包适配器",
+  "assemblyFile": "GameValueEditor.Modules.Example.dll",
+  "hostApiVersion": 1
+}
+```
+
+模块程序集引用主程序提供的接口程序集；打包时不要把另一份 `GameValueEditor.dll` 放进 ZIP。模块 ID 是更新和已保存字段匹配用的稳定身份，发布后不要因显示名称变化而更换。
 
 建议按以下顺序实现。
 
@@ -53,7 +74,7 @@
 - 使用稳定的适配器 ID，例如 `game.example.inventory.v1`。
 - `Supports` 必须严格验证目标构建。至少验证主 EXE 的 SHA-256；Unity IL2CPP 游戏还应验证 `GameAssembly.dll` 和 `global-metadata.dat`。
 - 不要只依赖窗口标题、进程名、Unity 版本字符串或文件时间。
-- 新构建未验证时必须安全失败，并提示更新适配器，不能尝试沿用旧偏移。
+- 新构建未验证时必须安全失败，并提示检查模块更新，不能尝试沿用旧偏移。
 
 ### 2. 定义稳定字段键
 
@@ -93,9 +114,63 @@ Unity/IL2CPP 游戏中的托管对象修改通常要在 Unity 主线程完成。
 
 字段锁定会周期性调用适配器读取真实值，并在偏离目标时走同一个安全写入流程。不要为锁定另写一套绕过缓存或存档的快捷路径。
 
+## 模块清单与兼容规则
+
+仓库根目录的 `modules/catalog.json` 是“检查新有”的服务器清单。每项需要包含：
+
+- 模块 ID、语义化模块版本、显示名称、接口版本。
+- 允许的进程名列表。
+- 一个或多个兼容构建；每个构建可声明 EXE、`GameAssembly.dll`、元数据或组合构建指纹。
+- HTTPS 下载地址和模块 ZIP 的 SHA-256。
+
+兼容构建中填写的每个非空指纹都必须与当前游戏版本完全相同；进程名也必须匹配。因此为 `fzzml` 发布的模块不会出现在 `Long Live The Emperor` 中。不要用通配符放宽尚未实机验证的新构建。
+
+清单示例：
+
+```json
+{
+  "schemaVersion": 1,
+  "hostApiVersion": 1,
+  "modules": [{
+    "id": "game.example.inventory.v1",
+    "version": "1.0.0",
+    "displayName": "示例游戏背包适配器",
+    "hostApiVersion": 1,
+    "processNames": ["ExampleGame"],
+    "compatibleBuilds": [{
+      "executableSha256": "64位十六进制 SHA-256",
+      "gameAssemblySha256": "可选的 SHA-256",
+      "metadataSha256": "可选的 SHA-256"
+    }],
+    "downloadUrl": "https://github.com/组织/仓库/releases/download/模块标签/模块.zip",
+    "sha256": "模块 ZIP 的 SHA-256"
+  }]
+}
+```
+
+安装流程固定为：下载到临时文件、校验 SHA-256、安全解压、核对 `module.json`、原子移动到 `data/modules/packages/{模块ID}/{版本}`，最后更新 `installed.json`。模块 ID、版本、ZIP 路径和程序集路径都必须通过路径边界校验；损坏的可选模块不得阻止主程序启动。
+
+### 打包和发布
+
+官方 fzzml 模块可用以下命令构建：
+
+```powershell
+./scripts/publish-module.ps1 -Version 1.0.0
+```
+
+脚本会创建 `dist/modules/GameValueEditor.Module.Fzzml-v1.0.0.zip`，计算 SHA-256 并更新清单。发布顺序是：
+
+1. 构建模块并完成自动化与实机验证。
+2. 把 ZIP 上传到清单中 `downloadUrl` 指向的 GitHub Release。
+3. 确认 Release 资产下载地址稳定可访问。
+4. 提交更新后的 `modules/catalog.json`。
+5. 用一个已支持构建和一个不支持/错误游戏分别执行“检查新有”，验证前者可见、后者不可见。
+
+不要先发布指向不存在资产的清单；不要在相同模块版本下替换 ZIP 内容。内容变化时必须提升模块版本并生成新 SHA-256。
+
 ## fzzml 示例
 
-`FzzmlInventoryAdapter` 是当前参考实现：
+`GameValueEditor.Modules.Fzzml` 是当前参考模块，核心适配器为 `FzzmlInventoryAdapter`：
 
 1. 同时验证 `fzzml.exe`、`GameAssembly.dll` 和 `global-metadata.dat` 的 SHA-256。
 2. 每次操作从 `SaveManager.Instance` 重新读取 `AllParsedData.inventoryRows`。
@@ -108,16 +183,16 @@ Unity/IL2CPP 游戏中的托管对象修改通常要在 Unity 主线程完成。
 
 同一个适配器 ID 可以包含多个经过验证的构建布局。连接到新布局后，应用会把旧版本中使用相同适配器 ID 的语义字段（例如物品名）复制到新的版本档案；不会复制普通扫描得到的地址或模块偏移。迁移后的字段默认不锁定，避免连接瞬间自动写入旧目标值。
 
-## 专属修改界面接入
+## “本游专属”界面接入
 
-现有主窗口会在当前适配器实现 `IInventoryGameAdapter` 时启用背包页。新增其他专属内容时，优先新增小接口和独立子页，例如角色属性、任务状态或资源表，不要把所有游戏逻辑塞进背包接口。
+“本游专属”Tab 永久可见。没有兼容模块时只显示检查按钮、模块状态和使用“通用扫描”的提示；模块安装并成功解析后才显示其专属内容。现有主窗口会在当前适配器实现 `IInventoryGameAdapter` 时启用背包页。新增其他专属内容时，优先新增小接口和独立子页，例如角色属性、任务状态或资源表，不要把所有游戏逻辑塞进背包接口。
 
 界面至少应提供：
 
 - 明确的刷新动作和状态信息。
 - 按业务名称/数值筛选。
 - Windows 标准多选；批量修改只能执行适配器明确支持的同类值写入。
-- 单项保存到“已保存字段”，备注名称仍由玩家填写。
+- 单项保存到“快捷入口”，备注名称仍由玩家填写。
 - 写入失败时不伪装为成功，也不保留未经复核的显示值。
 
 ## 测试清单
@@ -138,5 +213,7 @@ dotnet run --project tests/GameValueEditor.SmokeTests/GameValueEditor.SmokeTests
 - 正常保存并重启游戏后仍一致。
 - 超范围输入、对象未加载、结构变化和超时均安全失败。
 - 数值锁定解除后不再写入。
+- 模块没有出现在进程名或构建指纹不匹配的其他游戏中。
+- 模块检查、下载和安装按钮在请求中及冷却期间无法重复触发。
 
 自动化实机写入应使用对玩家存档影响很小的数值并设置硬上限。发布说明中要明确新增了哪些写入行为、支持哪个构建，以及是否需要管理员权限。

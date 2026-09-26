@@ -11,6 +11,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\GameValueEditor\GameValueEditor.csproj" />
+    <ProjectReference Include="..\..\src\GameValueEditor.Modules.Fzzml\GameValueEditor.Modules.Fzzml.csproj" />
   </ItemGroup>
 
 </Project>

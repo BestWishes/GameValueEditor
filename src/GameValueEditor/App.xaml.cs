@@ -14,6 +14,19 @@ public partial class App : Application
 {
     protected override void OnStartup(StartupEventArgs e)
     {
+        try
+        {
+            if (ApplicationUpdateService.TryLaunchPendingAtStartup())
+            {
+                Shutdown();
+                return;
+            }
+        }
+        catch (Exception exception)
+        {
+            // A damaged pending update must not prevent the installed version from starting.
+            WriteCrashLog(exception);
+        }
         EventManager.RegisterClassHandler(typeof(Window), FrameworkElement.LoadedEvent,
             new RoutedEventHandler((sender, _) => ThemeService.ApplyWindowChrome((Window)sender)));
         DispatcherUnhandledException += OnDispatcherUnhandledException;

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "hostApiVersion": 1,
+  "modules": [
+    {
+      "id": "game.fzzml.inventory.v1",
+      "version": "1.0.0",
+      "displayName": "放置斩魔录背包实时适配器",
+      "description": "按物品名实时读取和修改放置斩魔录背包物品总数。",
+      "hostApiVersion": 1,
+      "processNames": [
+        "fzzml"
+      ],
+      "compatibleBuilds": [
+        {
+          "executableSha256": "8B476C50395ACF8B4BD32E3DB60E29AC136436A5FADAB0E8D0049CA87CE3AACD",
+          "gameAssemblySha256": "CEC90FD2CCEEBD51637BFAC90C86C6E45D68CC76E6FDB0FAB1430F2A198D7421",
+          "metadataSha256": "EB4D7A29675EC35CDE1106D6AE3C0E22BCA0AEF5C50248C2D42FA139077E446F"
+        },
+        {
+          "executableSha256": "8B476C50395ACF8B4BD32E3DB60E29AC136436A5FADAB0E8D0049CA87CE3AACD",
+          "gameAssemblySha256": "EAE4239F59FD5DB09033C9FE21195A800881267B57833DA2AABB659843F99B27",
+          "metadataSha256": "BCAA6845585DA9920F61F75A04FB70ACB6298D95C94FC545D0C4583C44C88947"
+        }
+      ],
+      "downloadUrl": "https://github.com/BestWishes/GameValueEditor/releases/download/module-fzzml-v1.0.0/GameValueEditor.Module.Fzzml-v1.0.0.zip",
+      "sha256": "AC1F598FACE509CA42429BD34F4724ADB9076D95110849B33A1010615AD24B7C"
+    }
+  ]
+}

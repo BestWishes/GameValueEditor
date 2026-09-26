@@ -22,10 +22,18 @@ public sealed class ProfileStore
         Directory.CreateDirectory(root);
         LibraryPath = Path.Combine(root, "library.json");
         BackupPath = Path.Combine(root, "library.backup.json");
+        RootDirectory = root;
+        IconsDirectory = Path.Combine(root, "icons");
+        ModulesDirectory = Path.Combine(root, "modules");
+        UpdatesDirectory = Path.Combine(root, "updates");
     }
 
+    public string RootDirectory { get; }
     public string LibraryPath { get; }
     public string BackupPath { get; }
+    public string IconsDirectory { get; }
+    public string ModulesDirectory { get; }
+    public string UpdatesDirectory { get; }
 
     public async Task<LibraryDocument> LoadAsync()
     {
@@ -59,7 +67,7 @@ public sealed class ProfileStore
 
     private static LibraryDocument Upgrade(LibraryDocument document)
     {
-        document.SchemaVersion = Math.Max(document.SchemaVersion, 4);
+        document.SchemaVersion = Math.Max(document.SchemaVersion, 5);
         foreach (var field in document.Games.SelectMany(game => game.Versions).SelectMany(version => version.Fields))
         {
             if (string.IsNullOrWhiteSpace(field.Group)) field.Group = "未分组";

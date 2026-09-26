@@ -3,6 +3,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              StartupUri="MainWindow.xaml">
     <Application.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
         <Color x:Key="WindowColor">#F5F7FA</Color>
         <Color x:Key="PanelColor">#FFFFFF</Color>
         <Color x:Key="PanelRaisedColor">#EEF2F7</Color>

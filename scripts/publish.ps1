@@ -1,17 +1,18 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "0.2.0"
+    [string]$Version = "0.3.0-preview.1"
 )
 
 $ErrorActionPreference = "Stop"
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $artifactsRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "artifacts"))
 $publishDir = [System.IO.Path]::GetFullPath((Join-Path $artifactsRoot "win-x64"))
+$updaterPublishDir = [System.IO.Path]::GetFullPath((Join-Path $artifactsRoot "updater-win-x64"))
 $distDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "dist"))
 $packageDir = [System.IO.Path]::GetFullPath((Join-Path $artifactsRoot "package"))
 $archivePath = [System.IO.Path]::GetFullPath((Join-Path $distDir "GameValueEditor-v$Version-win-x64.zip"))
 
-foreach ($path in @($publishDir, $packageDir)) {
+foreach ($path in @($publishDir, $updaterPublishDir, $packageDir)) {
     if (-not $path.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to clean a path outside the repository: $path"
     }
@@ -37,7 +38,21 @@ dotnet publish (Join-Path $repoRoot "src\GameValueEditor\GameValueEditor.csproj"
 
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed." }
 
+dotnet publish (Join-Path $repoRoot "src\GameValueEditor.Updater\GameValueEditor.Updater.csproj") `
+    -c Release `
+    -r win-x64 `
+    --self-contained true `
+    -p:PublishSingleFile=true `
+    -p:IncludeNativeLibrariesForSelfExtract=true `
+    -p:EnableCompressionInSingleFile=true `
+    -p:DebugType=None `
+    -p:DebugSymbols=false `
+    -o $updaterPublishDir
+
+if ($LASTEXITCODE -ne 0) { throw "updater dotnet publish failed." }
+
 Copy-Item -LiteralPath (Join-Path $publishDir "GameValueEditor.exe") -Destination $packageDir
+Copy-Item -LiteralPath (Join-Path $updaterPublishDir "GameValueEditor.Updater.exe") -Destination $packageDir
 Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $packageDir
 Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination $packageDir
 Copy-Item -LiteralPath (Join-Path $repoRoot "CONTRIBUTING.md") -Destination $packageDir

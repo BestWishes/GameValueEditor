@@ -91,6 +91,9 @@ public partial class MainWindow : Window
     private async void AttachSelectedGame_OnClick(object sender, RoutedEventArgs e) =>
         await RunGuardedAsync(_viewModel.AttachSelectedGameAsync);
 
+    private void DisconnectSelectedGame_OnClick(object sender, RoutedEventArgs e) =>
+        RunGuarded(_viewModel.DisconnectSelectedGame);
+
     private async void DeleteGame_OnClick(object sender, RoutedEventArgs e)
     {
         await RunGuardedAsync(async () =>
@@ -122,6 +125,35 @@ public partial class MainWindow : Window
 
     private async void RestoreGameSpeed_OnClick(object sender, RoutedEventArgs e) =>
         await RunGuardedAsync(_viewModel.RestoreGameSpeedAsync);
+
+    private async void CheckGameModules_OnClick(object sender, RoutedEventArgs e) =>
+        await RunGuardedAsync(_viewModel.CheckGameModuleUpdatesAsync);
+
+    private async void InstallGameModule_OnClick(object sender, RoutedEventArgs e) =>
+        await RunGuardedAsync(_viewModel.InstallAvailableGameModuleAsync);
+
+    private async void ApplicationUpdate_OnClick(object sender, RoutedEventArgs e)
+    {
+        await RunGuardedAsync(async () =>
+        {
+            if (!_viewModel.HasApplicationUpdateAvailable)
+            {
+                await _viewModel.CheckApplicationUpdateAsync();
+                return;
+            }
+
+            if (!await _viewModel.DownloadApplicationUpdateAsync()) return;
+            var restartNow = MessageDialog.Confirm(
+                this,
+                "更新已准备完成",
+                "新版本已下载并校验完成。\n\n是否现在关闭肝肾大圣并安装更新？\n选择“取消”将继续使用，下次启动时自动更新。");
+            if (!restartNow) return;
+            if (_viewModel.LaunchPendingApplicationUpdate()) Application.Current.Shutdown();
+        });
+    }
+
+    private void OpenOfficialWebsite_OnClick(object sender, RoutedEventArgs e) =>
+        RunGuarded(_viewModel.OpenOfficialWebsite);
 
     private async void SaveField_OnClick(object sender, RoutedEventArgs e)
     {

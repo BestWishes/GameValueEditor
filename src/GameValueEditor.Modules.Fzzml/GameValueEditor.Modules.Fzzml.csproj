@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <AssemblyName>GameValueEditor.Modules.Fzzml</AssemblyName>
+    <RootNamespace>GameValueEditor.Modules.Fzzml</RootNamespace>
+    <ModuleVersion Condition="'$(ModuleVersion)' == ''">1.0.0</ModuleVersion>
+    <Version>$(ModuleVersion)</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\GameValueEditor\GameValueEditor.csproj" />
+    <Compile Include="..\GameValueEditor\Services\Adapters\FzzmlInventoryAdapter.cs" Link="FzzmlInventoryAdapter.cs" />
+    <None Include="module.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

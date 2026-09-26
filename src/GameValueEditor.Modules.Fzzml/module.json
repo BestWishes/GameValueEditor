@@ -1,0 +1,7 @@
+{
+  "id": "game.fzzml.inventory.v1",
+  "version": "1.0.0",
+  "displayName": "放置斩魔录背包实时适配器",
+  "assemblyFile": "GameValueEditor.Modules.Fzzml.dll",
+  "hostApiVersion": 1
+}

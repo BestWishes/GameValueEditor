@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <AssemblyName>GameValueEditor.Updater</AssemblyName>
+    <RootNamespace>GameValueEditor.Updater</RootNamespace>
+    <Product>肝肾大圣更新程序</Product>
+    <Version>0.3.0-preview.1</Version>
+  </PropertyGroup>
+
+</Project>

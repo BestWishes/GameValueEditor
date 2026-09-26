@@ -1,6 +1,11 @@
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
+using System.Net;
+using System.Net.Http;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -81,6 +86,22 @@ try
     Assert(fingerprint.FileSize > 0, "Executable size is invalid");
     Assert(Path.GetFullPath(ProfileStore.DefaultRoot).StartsWith(Path.GetFullPath(AppContext.BaseDirectory), StringComparison.OrdinalIgnoreCase),
         "Default profile directory must stay beside the application");
+
+    Assert(SemanticVersion.TryParse("0.3.0-preview.1", out var previewVersion), "Preview version parse failed");
+    Assert(SemanticVersion.TryParse("0.3.0", out var formalVersion), "Formal version parse failed");
+    Assert(formalVersion.CompareTo(previewVersion) > 0, "Formal release must supersede its preview");
+    Assert(SemanticVersion.TryParse("1.2.10", out var higherPatch) &&
+           SemanticVersion.TryParse("1.2.9", out var lowerPatch) && higherPatch.CompareTo(lowerPatch) > 0,
+        "Semantic patch comparison failed");
+
+    var connectedGame = new GameProfile { Name = "连接中", IsConnected = true, LastUsedUtc = DateTime.UtcNow.AddDays(-10) };
+    var pinnedGame = new GameProfile { Name = "已置顶", IsPinned = true, LastUsedUtc = DateTime.UtcNow };
+    var recentGame = new GameProfile { Name = "最近使用", LastUsedUtc = DateTime.UtcNow };
+    var orderedGames = new[] { recentGame, pinnedGame, connectedGame }
+        .OrderBy(gameItem => gameItem, new GameProfileConnectionComparer())
+        .ToList();
+    Assert(ReferenceEquals(orderedGames[0], connectedGame) && ReferenceEquals(orderedGames[1], pinnedGame),
+        "Connected games were not sorted before pinned and recent games");
 
     var nativeSpeedTargetPath = Environment.GetEnvironmentVariable("GVE_NATIVE_SPEED_TARGET");
     var speedTargetStart = new ProcessStartInfo(
@@ -215,7 +236,7 @@ try
             "Preferred routine persistence failed");
         Assert(restored.Games.Single().Versions.Single().Fields.Single().AdapterFieldKey == "item-key",
             "Adapter field persistence failed");
-        Assert(restored.SchemaVersion == 4, "Library schema version was not upgraded");
+        Assert(restored.SchemaVersion == 5, "Library schema version was not upgraded");
         Assert(restored.Games.Single().Versions.Single().BuildFingerprint == fingerprint.BuildSha256,
             "Build fingerprint persistence failed");
         Assert(restored.Games.Single().Versions.Single().Fields.Single().LockedValue == "321",
@@ -225,6 +246,98 @@ try
     {
         if (profileTestRoot.StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase))
             Directory.Delete(profileTestRoot, true);
+    }
+
+    var serviceTestRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-ServiceSmoke-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(serviceTestRoot);
+    try
+    {
+        var moduleCatalogJson = """
+        {
+          "schemaVersion": 1,
+          "hostApiVersion": 1,
+          "modules": [{
+            "id": "game.fzzml.inventory.v1",
+            "version": "1.1.0",
+            "displayName": "测试专属模块",
+            "hostApiVersion": 1,
+            "processNames": ["MatchedGame"],
+            "compatibleBuilds": [{"executableSha256": "EXE", "gameAssemblySha256": "ASM", "metadataSha256": "META"}],
+            "downloadUrl": "https://example.invalid/module.zip",
+            "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+          }]
+        }
+        """;
+        using var catalogClient = new HttpClient(new StaticResponseHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(moduleCatalogJson, Encoding.UTF8, "application/json")
+            }));
+        var catalogService = new GameModuleCatalogService(Path.Combine(serviceTestRoot, "modules-check"), catalogClient);
+        var matchingGame = new GameProfile { ProcessName = "MatchedGame" };
+        var matchingVersion = new GameVersionProfile
+        {
+            ExecutableSha256 = "EXE",
+            GameAssemblySha256 = "ASM",
+            MetadataSha256 = "META"
+        };
+        var available = await catalogService.CheckAsync(matchingGame, matchingVersion);
+        Assert(available.Availability == GameModuleAvailability.Available,
+            "Compatible game module was not offered");
+        var wrongGame = new GameProfile { ProcessName = "Long Live The Emperor" };
+        var unavailable = await catalogService.CheckAsync(wrongGame, matchingVersion);
+        Assert(unavailable.Availability == GameModuleAvailability.NotAvailable,
+            "A game-specific module leaked into another game");
+
+        var moduleAssemblyPath = Path.Combine(AppContext.BaseDirectory, "GameValueEditor.Modules.Fzzml.dll");
+        Assert(File.Exists(moduleAssemblyPath), "Built fzzml module assembly was not copied to the smoke output");
+        var moduleArchive = CreateModuleArchive("game.fzzml.inventory.v1", "1.1.0", moduleAssemblyPath);
+        var moduleHash = Convert.ToHexString(SHA256.HashData(moduleArchive));
+        using var moduleClient = new HttpClient(new StaticResponseHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(moduleArchive)
+            }));
+        var installService = new GameModuleCatalogService(Path.Combine(serviceTestRoot, "modules-install"), moduleClient);
+        var remoteModule = available.RemoteModule!;
+        remoteModule.Sha256 = moduleHash;
+        await installService.InstallAsync(remoteModule);
+        Assert(installService.FindInstalled(remoteModule.Id)?.Version == "1.1.0",
+            "Verified module installation was not persisted");
+        using (var installedRegistry = new GameAdapterRegistry(Path.Combine(serviceTestRoot, "modules-install")))
+            Assert(installedRegistry.FindById("game.fzzml.inventory.v1") is IInventoryGameAdapter,
+                "Installed optional module was not dynamically loaded through the host contract");
+        remoteModule.Id = "..\\escape";
+        try
+        {
+            await installService.InstallAsync(remoteModule);
+            throw new InvalidOperationException("Unsafe module ID unexpectedly installed");
+        }
+        catch (InvalidOperationException exception) when (exception.Message.Contains("不安全", StringComparison.Ordinal))
+        {
+        }
+
+        var updateArchive = Encoding.UTF8.GetBytes("verified update archive");
+        var updateHash = Convert.ToHexString(SHA256.HashData(updateArchive));
+        using var updateClient = new HttpClient(new StaticResponseHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(updateArchive)
+            }));
+        var updateService = new ApplicationUpdateService(Path.Combine(serviceTestRoot, "updates"), updateClient);
+        var pending = await updateService.DownloadAsync(new ApplicationUpdateCheckResult(
+            true, "99.0.0", "GameValueEditor-v99.0.0-win-x64.zip",
+            "https://example.invalid/update.zip", updateHash, updateArchive.Length));
+        Assert(File.Exists(pending.ArchivePath) && File.Exists(updateService.PendingManifestPath),
+            "Verified application update was not marked for next startup");
+    }
+    finally
+    {
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        if (serviceTestRoot.StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase))
+            Directory.Delete(serviceTestRoot, true);
     }
 
     Exception? dialogFailure = null;
@@ -316,8 +429,16 @@ try
             StartTimeUtc = liveProcess.StartTime.ToUniversalTime()
         };
         var liveFingerprint = await new VersionFingerprintService().CreateAsync(path);
-        var adapter = new GameAdapterRegistry().Resolve(liveItem, liveFingerprint)
-                      ?? throw new InvalidOperationException("Supported fzzml adapter was not detected");
+        var liveModulesDirectory = Environment.GetEnvironmentVariable("GVE_MODULES_DIRECTORY");
+        using var liveRegistry = new GameAdapterRegistry(liveModulesDirectory);
+        var installedAdapter = liveRegistry.FindById("game.fzzml.inventory.v1")
+                               ?? throw new InvalidOperationException(
+                                   $"Installed fzzml module could not be loaded: {string.Join(" | ", liveRegistry.LoadErrors)}");
+        var adapter = liveRegistry.Resolve(liveItem, liveFingerprint)
+                      ?? throw new InvalidOperationException(
+                          $"Installed fzzml module rejected the current build: exe={liveFingerprint.Sha256}, " +
+                          $"assembly={liveFingerprint.GameAssemblySha256}, metadata={liveFingerprint.MetadataSha256}, " +
+                          $"supports={installedAdapter.Supports(liveItem, liveFingerprint)}");
         var liveValue = adapter.ReadField(liveItem, "赤阳花");
         Assert(long.TryParse(liveValue.DisplayValue, out var liveCount) && liveCount >= 0,
             $"Unexpected live 赤阳花 count: {liveValue.DisplayValue}");
@@ -345,6 +466,24 @@ catch (Exception exception)
 {
     Console.Error.WriteLine(exception);
     return 1;
+}
+
+static byte[] CreateModuleArchive(string id, string version, string assemblyPath)
+{
+    using var stream = new MemoryStream();
+    using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
+    {
+        var manifest = archive.CreateEntry("module.json");
+        using (var writer = new StreamWriter(manifest.Open(), Encoding.UTF8, leaveOpen: false))
+            writer.Write($$"""
+            {"id":"{{id}}","version":"{{version}}","displayName":"测试专属模块","assemblyFile":"GameValueEditor.Modules.Fzzml.dll","hostApiVersion":1}
+            """);
+        var assembly = archive.CreateEntry("GameValueEditor.Modules.Fzzml.dll");
+        using var assemblyStream = assembly.Open();
+        using var source = File.OpenRead(assemblyPath);
+        source.CopyTo(assemblyStream);
+    }
+    return stream.ToArray();
 }
 
 internal static class SpeedStressTarget
@@ -392,4 +531,12 @@ internal static class SpeedStressTarget
             Thread.SpinWait(64);
         }
     }
+}
+
+internal sealed class StaticResponseHandler(Func<HttpRequestMessage, HttpResponseMessage> responseFactory)
+    : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken) => Task.FromResult(responseFactory(request));
 }

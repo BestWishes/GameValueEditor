@@ -3,8 +3,11 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Globalization;
+using System.Net.Http;
 using System.Windows;
 using System.Windows.Data;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using GameValueEditor.Infrastructure;
 using GameValueEditor.Models;
 using GameValueEditor.Services;
@@ -14,18 +17,38 @@ namespace GameValueEditor.ViewModels;
 
 public sealed class MainViewModel : ObservableObject
 {
+    private static readonly Lazy<ImageSource?> DefaultGameIconSource = new(() =>
+    {
+        try
+        {
+            var image = new BitmapImage(new Uri(
+                "pack://application:,,,/GameValueEditor;component/Assets/GameValueEditorIcon.png",
+                UriKind.Absolute));
+            image.Freeze();
+            return image;
+        }
+        catch
+        {
+            return null;
+        }
+    });
     private readonly ProfileStore _profileStore = new();
     private readonly ProcessService _processService = new();
     private readonly VersionFingerprintService _fingerprintService = new();
     private readonly MemoryScanService _scanService = new();
-    private readonly GameAdapterRegistry _adapterRegistry = new();
+    private readonly GameAdapterRegistry _adapterRegistry;
     private readonly ThemeService _themeService = new();
-    private readonly ProcessSpeedService _speedService = new();
+    private readonly ProcessSpeedService _idleSpeedService = new();
+    private ProcessSpeedService _speedService;
+    private readonly GameIconService _gameIconService;
+    private readonly GameModuleCatalogService _moduleCatalogService;
+    private readonly ApplicationUpdateService _applicationUpdateService;
+    private readonly Dictionary<Guid, GameConnectionSession> _sessions = [];
+    private GameConnectionSession? _activeSession;
     private LibraryDocument _document = new();
     private List<ScanCandidate> _scanCandidates = [];
-    private readonly Stack<List<ScanCandidate>> _scanHistory = new();
+    private Stack<List<ScanCandidate>> _scanHistory = new();
     private CancellationTokenSource? _liveRefreshCancellation;
-    private CancellationTokenSource? _lockMaintenanceCancellation;
     private ICollectionView? _gamesView;
     private GameProfile? _selectedGame;
     private GameProfile? _selectedLibraryGame;
@@ -61,6 +84,25 @@ public sealed class MainViewModel : ObservableObject
     private bool _isSpeedControlBlocked;
     private int _scanResultCount;
     private CancellationTokenSource? _scanCancellation;
+    private bool _suppressGameActivation;
+    private string _moduleStatusText = "尚未检查当前游戏的专属模块";
+    private bool _isModuleControlBlocked;
+    private GameModuleCheckResult? _moduleCheckResult;
+    private string _applicationUpdateStatusPrefix = string.Empty;
+    private string _applicationUpdateActionText = "检查更新";
+    private bool _isApplicationUpdateControlBlocked;
+    private ApplicationUpdateCheckResult? _applicationUpdateResult;
+    private bool _applicationUpdateDownloaded;
+    private bool _isOfficialWebsiteControlBlocked;
+
+    public MainViewModel()
+    {
+        _speedService = _idleSpeedService;
+        _gameIconService = new GameIconService(_profileStore.IconsDirectory);
+        _moduleCatalogService = new GameModuleCatalogService(_profileStore.ModulesDirectory);
+        _applicationUpdateService = new ApplicationUpdateService(_profileStore.UpdatesDirectory);
+        _adapterRegistry = new GameAdapterRegistry(_profileStore.ModulesDirectory);
+    }
 
     public ObservableCollection<GameProfile> Games => _document.Games;
     public ObservableCollection<ProcessItem> Processes { get; } = [];
@@ -101,6 +143,8 @@ public sealed class MainViewModel : ObservableObject
         get => _selectedGame;
         set
         {
+            if (ReferenceEquals(_selectedGame, value)) return;
+            if (!_suppressGameActivation) CaptureActiveSession();
             if (!SetProperty(ref _selectedGame, value)) return;
             if (value is null)
             {
@@ -115,9 +159,10 @@ public sealed class MainViewModel : ObservableObject
                 _selectedLibraryGame = value;
                 OnPropertyChanged(nameof(SelectedLibraryGame));
             }
-            SelectedVersion = value?.Versions.OrderByDescending(version => version.LastVerifiedUtc).FirstOrDefault();
+            if (!_suppressGameActivation) ActivateSelectedGameSession(value);
             OnPropertyChanged(nameof(HasSelectedGame));
             OnPropertyChanged(nameof(ActiveGameDisplayName));
+            OnPropertyChanged(nameof(ActiveGameIcon));
         }
     }
     public GameProfile? SelectedLibraryGame
@@ -144,6 +189,7 @@ public sealed class MainViewModel : ObservableObject
             }
             OnPropertyChanged(nameof(SavedFields));
             OnPropertyChanged(nameof(VersionDetails));
+            ResetModuleCheckState();
             RestartLockMaintenance();
         }
     }
@@ -158,6 +204,7 @@ public sealed class MainViewModel : ObservableObject
             OnPropertyChanged(nameof(HasAttachedProcess));
             OnPropertyChanged(nameof(CanAccelerate));
             OnPropertyChanged(nameof(ActiveGameDisplayName));
+            OnPropertyChanged(nameof(ActiveGameIcon));
         }
     }
     public ScanCandidate? SelectedScanResult { get => _selectedScanResult; set => SetProperty(ref _selectedScanResult, value); }
@@ -245,6 +292,7 @@ public sealed class MainViewModel : ObservableObject
     public bool CanUndoScan => !IsBusy && _scanHistory.Count > 0;
     public bool HasActiveAdapter => _activeAdapter is not null;
     public bool HasActiveInventoryAdapter => _activeAdapter is IInventoryGameAdapter;
+    public bool HasNoActiveAdapter => _activeAdapter is null;
     public string ActiveGameDisplayName => !string.IsNullOrWhiteSpace(SelectedGame?.Name)
         ? SelectedGame.Name
         : !string.IsNullOrWhiteSpace(AttachedProcess?.WindowTitle)
@@ -253,12 +301,33 @@ public sealed class MainViewModel : ObservableObject
                 ? AttachedProcess.ProcessName
                 : "尚未选择游戏";
     public string ActiveAdapterText => _activeAdapter is null
-        ? "未检测到适用于当前构建的游戏专属适配器"
+        ? "本地未装配当前游戏和版本的专属修改模块"
         : $"已启用：{_activeAdapter.DisplayName}";
     public string VersionDetails => SelectedVersion is null
         ? "尚未选择版本"
         : $"{SelectedVersion.Architecture} · 构建 {GetVersionIdentity(SelectedVersion)[..Math.Min(12, GetVersionIdentity(SelectedVersion).Length)]}";
     public string LibraryPath => _profileStore.LibraryPath;
+    private static ImageSource? DefaultGameIcon => DefaultGameIconSource.Value;
+    public ImageSource? ActiveGameIcon => SelectedGame?.IconSource ?? AttachedProcess?.Icon ?? DefaultGameIcon;
+    public string CurrentApplicationVersion => ApplicationVersion.Current;
+    public string ModuleStatusText { get => _moduleStatusText; private set => SetProperty(ref _moduleStatusText, value); }
+    public bool CanCheckGameModules => !_isModuleControlBlocked && SelectedGame is not null && SelectedVersion is not null;
+    public bool CanInstallGameModule => !_isModuleControlBlocked && _moduleCheckResult?.Availability is
+        GameModuleAvailability.Available or GameModuleAvailability.UpdateAvailable;
+    public string ApplicationUpdateStatusPrefix
+    {
+        get => _applicationUpdateStatusPrefix;
+        private set => SetProperty(ref _applicationUpdateStatusPrefix, value);
+    }
+    public string ApplicationUpdateActionText
+    {
+        get => _applicationUpdateActionText;
+        private set => SetProperty(ref _applicationUpdateActionText, value);
+    }
+    public bool CanUseApplicationUpdate => !_isApplicationUpdateControlBlocked && !_applicationUpdateDownloaded;
+    public bool HasApplicationUpdateAvailable => _applicationUpdateResult?.IsUpdateAvailable == true && !_applicationUpdateDownloaded;
+    public bool IsApplicationUpdateDownloaded => _applicationUpdateDownloaded;
+    public bool CanOpenOfficialWebsite => !_isOfficialWebsiteControlBlocked;
 
     public void ClearSearch() => SearchText = string.Empty;
 
@@ -273,6 +342,11 @@ public sealed class MainViewModel : ObservableObject
     public async Task InitializeAsync()
     {
         _document = await _profileStore.LoadAsync();
+        foreach (var game in _document.Games)
+        {
+            game.IsConnected = false;
+            game.IconSource = _gameIconService.Load(game.IconFileName) ?? DefaultGameIcon;
+        }
         if (!Enum.TryParse<ApplicationTheme>(_document.Theme, true, out var theme)) theme = ApplicationTheme.Light;
         _selectedTheme = Themes.First(item => item.Value == theme);
         _themeService.Apply(theme);
@@ -287,6 +361,8 @@ public sealed class MainViewModel : ObservableObject
 
     public void RefreshProcesses()
     {
+        foreach (var stale in _sessions.Values.Where(session => !IsProcessRunning(session.Process)).ToList())
+            DisconnectSession(stale, ReferenceEquals(_activeSession, stale));
         var previousId = SelectedProcess?.ProcessId;
         Processes.Clear();
         foreach (var process in _processService.GetProcesses()) Processes.Add(process);
@@ -297,34 +373,43 @@ public sealed class MainViewModel : ObservableObject
 
     public void Attach(ProcessItem process, GameProfile? preferredGame = null)
     {
-        RestoreSpeedCore();
+        CaptureActiveSession();
         StopLiveCandidateRefresh();
-        StopLockMaintenance();
+        if (_activeSession is { GameId: null } transient && transient.Process.ProcessId != process.ProcessId)
+            DisconnectSession(transient, false);
         using var _ = new ProcessMemoryAccessor(process.ProcessId);
-        _activeAdapter = null;
-        _attachedFingerprint = null;
-        _attachedGameId = null;
-        UpdateCurrentVersionMarkers(null, null);
-        OnPropertyChanged(nameof(HasActiveAdapter));
-        OnPropertyChanged(nameof(HasActiveInventoryAdapter));
-        OnPropertyChanged(nameof(ActiveAdapterText));
-        AdapterInventoryItems.Clear();
-        AttachedProcess = process;
+        var matchingGame = ResolveGameForProcess(process, preferredGame);
+        if (matchingGame is not null && _sessions.TryGetValue(matchingGame.Id, out var previous) &&
+            previous.Process.ProcessId != process.ProcessId)
+            DisconnectSession(previous, false);
+
+        var session = matchingGame is not null && _sessions.TryGetValue(matchingGame.Id, out var existing) &&
+                      existing.Process.ProcessId == process.ProcessId
+            ? existing
+            : new GameConnectionSession(process, matchingGame?.Id);
+        if (matchingGame is not null)
+        {
+            _sessions[matchingGame.Id] = session;
+            matchingGame.IsConnected = true;
+        }
+        _activeSession = session;
+
+        _suppressGameActivation = true;
+        try { SelectedGame = matchingGame; }
+        finally { _suppressGameActivation = false; }
+        RestoreSessionIntoView(session, matchingGame);
         SelectedProcess = process;
         ConnectionText = $"已连接 · {process.ProcessName} · PID {process.ProcessId}";
-        StatusText = "进程连接成功，可以开始扫描";
+        StatusText = "进程连接成功，可以开始通用扫描";
 
-        var matchingGame = ResolveGameForProcess(process, preferredGame);
         if (matchingGame is not null)
         {
             _attachedGameId = matchingGame.Id;
-            SelectedGame = matchingGame;
             matchingGame.LastUsedUtc = DateTime.UtcNow;
             GamesView.Refresh();
         }
         else
         {
-            SelectedGame = null;
             SelectedVersion = null;
         }
     }
@@ -332,10 +417,25 @@ public sealed class MainViewModel : ObservableObject
     public async Task AttachSelectedGameAsync()
     {
         var game = SelectedGame ?? throw new InvalidOperationException("请先选择游戏条目。");
+        if (_sessions.TryGetValue(game.Id, out var existing) && IsProcessRunning(existing.Process))
+        {
+            ActivateSelectedGameSession(game);
+            StatusText = $"已切换到正在连接的 {game.Name}";
+            return;
+        }
         var process = _processService.FindRunningGame(game)
                       ?? throw new InvalidOperationException("没有检测到这个游戏正在运行。");
         Attach(process, game);
         await MatchAttachedVersionAsync();
+    }
+
+    public void DisconnectSelectedGame()
+    {
+        var game = SelectedGame ?? throw new InvalidOperationException("请先选择游戏条目。");
+        if (!_sessions.TryGetValue(game.Id, out var session))
+            throw new InvalidOperationException("所选游戏当前未连接。");
+        DisconnectSession(session, true);
+        StatusText = $"已断开 {game.Name} 的连接";
     }
 
     public async Task MatchAttachedVersionAsync()
@@ -351,32 +451,26 @@ public sealed class MainViewModel : ObservableObject
             return;
         }
 
-        SelectedGame = game;
+        _suppressGameActivation = true;
+        try { SelectedGame = game; }
+        finally { _suppressGameActivation = false; }
         _attachedGameId = game.Id;
         var libraryChanged = await UpgradeLegacyVersionFingerprintsAsync(game);
         var fingerprint = await _fingerprintService.CreateAsync(process.ExecutablePath);
         _attachedFingerprint = fingerprint;
+        if (_activeSession is not null) _activeSession.Fingerprint = fingerprint;
         UpdateCurrentVersionMarkers(game, fingerprint.BuildSha256);
         _activeAdapter = _adapterRegistry.Resolve(process, fingerprint);
+        if (_activeSession is not null) _activeSession.Adapter = _activeAdapter;
         OnPropertyChanged(nameof(HasActiveAdapter));
         OnPropertyChanged(nameof(HasActiveInventoryAdapter));
+        OnPropertyChanged(nameof(HasNoActiveAdapter));
         OnPropertyChanged(nameof(ActiveAdapterText));
         var version = FindMatchingVersion(game, fingerprint);
         var migratedFieldCount = 0;
         if (version is null)
         {
-            var sourceVersion = game.Versions.OrderByDescending(item => item.LastVerifiedUtc).FirstOrDefault();
             version = CreateVersionProfile(fingerprint);
-            if (_activeAdapter is not null && sourceVersion is not null)
-            {
-                foreach (var field in CloneAdapterFields(sourceVersion, _activeAdapter.Id))
-                {
-                    version.Fields.Add(field);
-                    migratedFieldCount++;
-                }
-                version.PreferredSearchRoutineId = sourceVersion.PreferredSearchRoutineId;
-                version.PreferredScaleMultiplier = sourceVersion.PreferredScaleMultiplier;
-            }
             game.Versions.Add(version);
             libraryChanged = true;
         }
@@ -384,8 +478,14 @@ public sealed class MainViewModel : ObservableObject
         {
             ApplyFingerprint(version, fingerprint);
         }
+        if (_activeAdapter is not null)
+        {
+            migratedFieldCount += MigrateAdapterFields(game, version, _activeAdapter.Id);
+            libraryChanged |= migratedFieldCount > 0;
+        }
         UpdateCurrentVersionMarkers(game, fingerprint.BuildSha256);
         SelectedVersion = version;
+        if (_activeSession is not null) _activeSession.VersionId = version.Id;
         version.LastVerifiedUtc = DateTime.UtcNow;
         version.NotifyChoiceChanged();
         if (!PathsEqual(game.ExecutablePath, process.ExecutablePath))
@@ -417,8 +517,14 @@ public sealed class MainViewModel : ObservableObject
         var fingerprint = await _fingerprintService.CreateAsync(process.ExecutablePath);
         _attachedFingerprint = fingerprint;
         _activeAdapter = _adapterRegistry.Resolve(process, fingerprint);
+        if (_activeSession is not null)
+        {
+            _activeSession.Fingerprint = fingerprint;
+            _activeSession.Adapter = _activeAdapter;
+        }
         OnPropertyChanged(nameof(HasActiveAdapter));
         OnPropertyChanged(nameof(HasActiveInventoryAdapter));
+        OnPropertyChanged(nameof(HasNoActiveAdapter));
         OnPropertyChanged(nameof(ActiveAdapterText));
 
         var game = _attachedGameId is Guid attachedGameId
@@ -444,6 +550,14 @@ public sealed class MainViewModel : ObservableObject
             game.LastUsedUtc = DateTime.UtcNow;
         }
         _attachedGameId = game.Id;
+        game.IsConnected = true;
+        _gameIconService.Save(game, process.Icon);
+        game.IconSource ??= DefaultGameIcon;
+        if (_activeSession is not null)
+        {
+            _activeSession.GameId = game.Id;
+            _sessions[game.Id] = _activeSession;
+        }
 
         var version = FindMatchingVersion(game, fingerprint);
         if (version is null)
@@ -452,11 +566,14 @@ public sealed class MainViewModel : ObservableObject
             game.Versions.Add(version);
         }
         else ApplyFingerprint(version, fingerprint);
+        if (_activeAdapter is not null) MigrateAdapterFields(game, version, _activeAdapter.Id);
 
         UpdateCurrentVersionMarkers(game, fingerprint.BuildSha256);
 
         SelectedGame = game;
         SelectedVersion = version;
+        if (_activeSession is not null) _activeSession.VersionId = version.Id;
+        OnPropertyChanged(nameof(ActiveGameIcon));
         game.NotifySummaryChanged();
         version.NotifyChoiceChanged();
         GamesView.Refresh();
@@ -486,6 +603,7 @@ public sealed class MainViewModel : ObservableObject
         var game = SelectedGame ?? throw new InvalidOperationException("请先选择游戏条目。");
         if (game.IsPinned) throw new InvalidOperationException("置顶游戏不能删除，请先取消置顶。");
         if (game.IsLocked) throw new InvalidOperationException("锁定游戏不能删除，请先解锁。");
+        if (_sessions.TryGetValue(game.Id, out var session)) DisconnectSession(session, true);
         Games.Remove(game);
         SelectedGame = Games.FirstOrDefault();
         await SaveLibraryAsync();
@@ -950,11 +1068,20 @@ public sealed class MainViewModel : ObservableObject
             {
                 await Task.Run(_speedService.Normalize);
                 IsSpeedActive = false;
+                if (_activeSession is not null) _activeSession.IsSpeedActive = false;
+                OnPropertyChanged(nameof(SpeedStatusText));
                 StatusText = "1 倍就是正常游戏速度";
                 return;
             }
             var result = await Task.Run(() => _speedService.Accelerate(process.ProcessId, multiplier));
             IsSpeedActive = true;
+            if (_activeSession is not null)
+            {
+                _activeSession.IsSpeedActive = true;
+                _activeSession.SpeedMultiplierInput = SpeedMultiplier;
+            }
+            // IsSpeedActive stays true when changing an active multiplier, so notify explicitly.
+            OnPropertyChanged(nameof(SpeedStatusText));
             StatusText = $"游戏已切换为 {multiplier} 倍速度 · 已挂接 {result.PatchedImportCount} 个计时入口";
         }
         finally
@@ -972,11 +1099,13 @@ public sealed class MainViewModel : ObservableObject
             if (!_speedService.HasHooks || _speedService.Multiplier == 1)
             {
                 IsSpeedActive = false;
+                if (_activeSession is not null) _activeSession.IsSpeedActive = false;
                 StatusText = "当前已经是正常倍速";
                 return;
             }
             await Task.Run(_speedService.Normalize);
             IsSpeedActive = false;
+            if (_activeSession is not null) _activeSession.IsSpeedActive = false;
             StatusText = "游戏速度已回正";
         }
         finally
@@ -1065,9 +1194,244 @@ public sealed class MainViewModel : ObservableObject
         await SaveLibraryAsync();
     }
 
-    private IGameAdapter ResolveFieldAdapter(SavedField field)
+    public async Task CheckGameModuleUpdatesAsync()
     {
-        var adapter = _activeAdapter;
+        var game = SelectedGame ?? throw new InvalidOperationException("请先选择游戏。");
+        var version = SelectedVersion ?? throw new InvalidOperationException("请先选择游戏版本。");
+        if (_isModuleControlBlocked) return;
+        _isModuleControlBlocked = true;
+        NotifyModuleControls();
+        var cooldown = Task.Delay(TimeSpan.FromSeconds(3));
+        try
+        {
+            ModuleStatusText = "正在从 GitHub 检查当前游戏的专属模块…";
+            var result = await _moduleCatalogService.CheckAsync(game, version);
+            if (ReferenceEquals(SelectedGame, game) && ReferenceEquals(SelectedVersion, version))
+            {
+                _moduleCheckResult = result;
+                ModuleStatusText = result.StatusText;
+                NotifyModuleControls();
+            }
+        }
+        catch (HttpRequestException exception) when (exception.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            if (ReferenceEquals(SelectedGame, game) && ReferenceEquals(SelectedVersion, version))
+            {
+                _moduleCheckResult = null;
+                ModuleStatusText = "检查失败：服务器暂未发布专属模块清单。";
+                NotifyModuleControls();
+            }
+            throw new InvalidOperationException("服务器暂未发布专属模块清单，请稍后重试。", exception);
+        }
+        catch (Exception exception)
+        {
+            if (ReferenceEquals(SelectedGame, game) && ReferenceEquals(SelectedVersion, version))
+            {
+                _moduleCheckResult = null;
+                ModuleStatusText = $"检查失败：{exception.Message}";
+                NotifyModuleControls();
+            }
+            throw new InvalidOperationException($"检查专属模块失败：{exception.Message}", exception);
+        }
+        finally
+        {
+            ReleaseModuleControlsAfter(cooldown);
+        }
+    }
+
+    public async Task InstallAvailableGameModuleAsync()
+    {
+        var module = _moduleCheckResult?.RemoteModule
+                     ?? throw new InvalidOperationException("请先点击“检查新有”。");
+        var game = SelectedGame ?? throw new InvalidOperationException("请先选择游戏。");
+        var version = SelectedVersion ?? throw new InvalidOperationException("请先选择游戏版本。");
+        var originalSession = _activeSession;
+        if (_moduleCheckResult?.Availability is not (GameModuleAvailability.Available or GameModuleAvailability.UpdateAvailable))
+            throw new InvalidOperationException("当前没有可下载或更新的专属模块。");
+        if (_isModuleControlBlocked) return;
+        _isModuleControlBlocked = true;
+        NotifyModuleControls();
+        var cooldown = Task.Delay(TimeSpan.FromSeconds(3));
+        try
+        {
+            ModuleStatusText = $"正在下载并校验 {module.DisplayName} v{module.Version}…";
+            await _moduleCatalogService.InstallAsync(module);
+            _adapterRegistry.Reload();
+            ReloadAdaptersForSessions();
+            var installedAdapter = originalSession?.Adapter;
+            if (installedAdapter is not null)
+            {
+                var migrated = MigrateAdapterFields(game, version, installedAdapter.Id);
+                if (migrated > 0)
+                {
+                    game.NotifySummaryChanged();
+                    await SaveLibraryAsync();
+                }
+            }
+            if (ReferenceEquals(SelectedGame, game) && ReferenceEquals(SelectedVersion, version))
+            {
+                _moduleCheckResult = new GameModuleCheckResult(GameModuleAvailability.Current, module,
+                    _moduleCatalogService.FindInstalled(module.Id), $"已安装最新专属模块：{module.DisplayName} v{module.Version}");
+                ModuleStatusText = installedAdapter is null
+                    ? $"已安装 {module.DisplayName} v{module.Version}，连接兼容游戏版本后启用。"
+                    : _moduleCheckResult.StatusText;
+            }
+            else ResetModuleCheckState();
+        }
+        finally
+        {
+            ReleaseModuleControlsAfter(cooldown);
+        }
+    }
+
+    public async Task CheckApplicationUpdateAsync()
+    {
+        if (_isApplicationUpdateControlBlocked || _applicationUpdateDownloaded) return;
+        _isApplicationUpdateControlBlocked = true;
+        NotifyApplicationUpdateState();
+        var cooldown = Task.Delay(TimeSpan.FromSeconds(10));
+        try
+        {
+            ApplicationUpdateStatusPrefix = "检查中 ";
+            _applicationUpdateResult = await _applicationUpdateService.CheckAsync();
+            if (_applicationUpdateResult.IsUpdateAvailable)
+            {
+                ApplicationUpdateStatusPrefix = $"v{_applicationUpdateResult.Version} ";
+                ApplicationUpdateActionText = "更新";
+                StatusText = $"发现肝肾大圣新版本 v{_applicationUpdateResult.Version}";
+            }
+            else
+            {
+                ApplicationUpdateStatusPrefix = "已最新 ";
+                ApplicationUpdateActionText = "检查更新";
+                StatusText = "肝肾大圣当前已是最新正式版";
+            }
+        }
+        finally
+        {
+            ReleaseApplicationUpdateControlsAfter(cooldown);
+        }
+    }
+
+    public async Task<bool> DownloadApplicationUpdateAsync()
+    {
+        var update = _applicationUpdateResult;
+        if (update?.IsUpdateAvailable != true) throw new InvalidOperationException("请先检查更新。");
+        if (_isApplicationUpdateControlBlocked || _applicationUpdateDownloaded) return false;
+        _isApplicationUpdateControlBlocked = true;
+        NotifyApplicationUpdateState();
+        var cooldown = Task.Delay(TimeSpan.FromSeconds(10));
+        try
+        {
+            ApplicationUpdateStatusPrefix = $"v{update.Version} 下载中 ";
+            await _applicationUpdateService.DownloadAsync(update);
+            _applicationUpdateDownloaded = true;
+            ApplicationUpdateStatusPrefix = $"v{update.Version} 已下载 ";
+            ApplicationUpdateActionText = "待重启更新";
+            StatusText = $"已下载并校验 v{update.Version}，可立即重启或下次启动时更新";
+            return true;
+        }
+        finally
+        {
+            ReleaseApplicationUpdateControlsAfter(cooldown);
+        }
+    }
+
+    public bool LaunchPendingApplicationUpdate() => _applicationUpdateService.LaunchPendingUpdate(true);
+
+    public void OpenOfficialWebsite()
+    {
+        if (_isOfficialWebsiteControlBlocked) return;
+        _isOfficialWebsiteControlBlocked = true;
+        OnPropertyChanged(nameof(CanOpenOfficialWebsite));
+        var cooldown = Task.Delay(TimeSpan.FromSeconds(2));
+        try
+        {
+            _ = Process.Start(new ProcessStartInfo("https://github.com/BestWishes/GameValueEditor")
+            {
+                UseShellExecute = true
+            }) ?? throw new InvalidOperationException("无法打开默认浏览器。");
+        }
+        finally
+        {
+            ReleaseOfficialWebsiteControlAfter(cooldown);
+        }
+    }
+
+    private async void ReleaseOfficialWebsiteControlAfter(Task cooldown)
+    {
+        try { await cooldown; }
+        finally
+        {
+            _isOfficialWebsiteControlBlocked = false;
+            OnPropertyChanged(nameof(CanOpenOfficialWebsite));
+        }
+    }
+
+    private void ResetModuleCheckState()
+    {
+        _moduleCheckResult = null;
+        ModuleStatusText = _activeAdapter is null
+            ? "本地未装配当前游戏和版本的专属修改模块"
+            : $"本地已装配：{_activeAdapter.DisplayName}（尚未检查更新）";
+        NotifyModuleControls();
+    }
+
+    private void ReloadAdaptersForSessions()
+    {
+        var sessions = _sessions.Values
+            .Append(_activeSession)
+            .Where(session => session is not null)
+            .Cast<GameConnectionSession>()
+            .Distinct()
+            .ToList();
+        foreach (var session in sessions)
+            session.Adapter = session.Fingerprint is null
+                ? null
+                : _adapterRegistry.Resolve(session.Process, session.Fingerprint);
+        _activeAdapter = _activeSession?.Adapter;
+        OnPropertyChanged(nameof(HasActiveAdapter));
+        OnPropertyChanged(nameof(HasActiveInventoryAdapter));
+        OnPropertyChanged(nameof(HasNoActiveAdapter));
+        OnPropertyChanged(nameof(ActiveAdapterText));
+    }
+
+    private void NotifyModuleControls()
+    {
+        OnPropertyChanged(nameof(CanCheckGameModules));
+        OnPropertyChanged(nameof(CanInstallGameModule));
+    }
+
+    private async void ReleaseModuleControlsAfter(Task cooldown)
+    {
+        try { await cooldown; }
+        finally
+        {
+            _isModuleControlBlocked = false;
+            NotifyModuleControls();
+        }
+    }
+
+    private void NotifyApplicationUpdateState()
+    {
+        OnPropertyChanged(nameof(CanUseApplicationUpdate));
+        OnPropertyChanged(nameof(HasApplicationUpdateAvailable));
+        OnPropertyChanged(nameof(IsApplicationUpdateDownloaded));
+    }
+
+    private async void ReleaseApplicationUpdateControlsAfter(Task cooldown)
+    {
+        try { await cooldown; }
+        finally
+        {
+            _isApplicationUpdateControlBlocked = false;
+            NotifyApplicationUpdateState();
+        }
+    }
+
+    private IGameAdapter ResolveFieldAdapter(SavedField field, IGameAdapter? adapterOverride = null)
+    {
+        var adapter = adapterOverride ?? _activeAdapter;
         if (adapter is null || !string.Equals(adapter.Id, field.AdapterId, StringComparison.Ordinal))
             throw new InvalidOperationException("当前进程或游戏构建与该字段保存的专属适配器不匹配。");
         return adapter;
@@ -1091,11 +1455,168 @@ public sealed class MainViewModel : ObservableObject
 
     private async Task SaveLibraryAsync() => await _profileStore.SaveAsync(_document);
 
+    private void CaptureActiveSession()
+    {
+        var session = _activeSession;
+        if (session is null) return;
+        session.Fingerprint = _attachedFingerprint;
+        session.Adapter = _activeAdapter;
+        session.VersionId = SelectedVersion?.Id;
+        session.ScanCandidates = _scanCandidates;
+        session.ScanHistory = _scanHistory;
+        session.VisibleScanResults = VisibleScanResults;
+        session.SelectedScanResult = SelectedScanResult;
+        session.AdapterItems = _adapterInventoryItems.ToList();
+        session.SelectedAdapterFieldKey = SelectedAdapterItem?.FieldKey;
+        session.AdapterItemNameFilter = AdapterItemNameFilter;
+        session.AdapterItemCountFilter = AdapterItemCountFilter;
+        session.ScanValue = ScanValue;
+        session.SelectedValueType = SelectedValueType;
+        session.SelectedComparison = SelectedComparison;
+        session.SelectedSearchRoutineId = SelectedSearchRoutine.Id;
+        session.ScaleMultiplier = ScaleMultiplier;
+        session.SpeedMultiplierInput = SpeedMultiplier;
+        session.IsSpeedActive = IsSpeedActive;
+    }
+
+    private void ActivateSelectedGameSession(GameProfile? game)
+    {
+        CaptureActiveSession();
+        StopLiveCandidateRefresh();
+        _scanCancellation?.Cancel();
+        if (_activeSession is { GameId: null } transient && game is not null)
+            DisconnectSession(transient, false);
+        if (game is not null && _sessions.TryGetValue(game.Id, out var session))
+        {
+            if (IsProcessRunning(session.Process))
+            {
+                RestoreSessionIntoView(session, game);
+                return;
+            }
+            DisconnectSession(session, false);
+        }
+        ClearActiveView(game);
+    }
+
+    private void RestoreSessionIntoView(GameConnectionSession session, GameProfile? game)
+    {
+        _activeSession = session;
+        _speedService = session.SpeedService;
+        _attachedFingerprint = session.Fingerprint;
+        _attachedGameId = session.GameId;
+        _activeAdapter = session.Adapter;
+        AttachedProcess = session.Process;
+        _scanCandidates = session.ScanCandidates;
+        _scanHistory = session.ScanHistory;
+        VisibleScanResults = session.VisibleScanResults;
+        ScanResultCount = _scanCandidates.Count;
+        SelectedScanResult = session.SelectedScanResult ?? VisibleScanResults.FirstOrDefault();
+        _adapterInventoryItems.Clear();
+        foreach (var item in session.AdapterItems) _adapterInventoryItems.Add(item);
+        AdapterItemsView.Refresh();
+        SelectedAdapterItem = _adapterInventoryItems.FirstOrDefault(item =>
+            string.Equals(item.FieldKey, session.SelectedAdapterFieldKey, StringComparison.Ordinal));
+        AdapterItemNameFilter = session.AdapterItemNameFilter;
+        AdapterItemCountFilter = session.AdapterItemCountFilter;
+        ScanValue = session.ScanValue;
+        SelectedValueType = session.SelectedValueType;
+        SelectedComparison = session.SelectedComparison;
+        SelectedSearchRoutine = SearchRoutines.FirstOrDefault(item => item.Id == session.SelectedSearchRoutineId)
+                                ?? SearchRoutines[0];
+        ScaleMultiplier = session.ScaleMultiplier;
+        SpeedMultiplier = session.SpeedMultiplierInput;
+        IsSpeedActive = session.IsSpeedActive && session.SpeedService.Multiplier != 1;
+        var version = game?.Versions.FirstOrDefault(item => item.Id == session.VersionId)
+                      ?? (session.Fingerprint is null || game is null
+                          ? game?.Versions.OrderByDescending(item => item.LastVerifiedUtc).FirstOrDefault()
+                          : FindMatchingVersion(game, session.Fingerprint));
+        SelectedVersion = version;
+        ConnectionText = $"已连接 · {session.Process.ProcessName} · PID {session.Process.ProcessId}";
+        OnPropertyChanged(nameof(HasActiveAdapter));
+        OnPropertyChanged(nameof(HasActiveInventoryAdapter));
+        OnPropertyChanged(nameof(HasNoActiveAdapter));
+        OnPropertyChanged(nameof(ActiveAdapterText));
+        OnPropertyChanged(nameof(SpeedStatusText));
+        OnPropertyChanged(nameof(HasScanSession));
+        OnPropertyChanged(nameof(CanUndoScan));
+        OnPropertyChanged(nameof(ActiveGameIcon));
+        StartLiveCandidateRefresh();
+        RestartLockMaintenance();
+    }
+
+    private void ClearActiveView(GameProfile? selectedGame)
+    {
+        _activeSession = null;
+        _speedService = _idleSpeedService;
+        _attachedFingerprint = null;
+        _attachedGameId = null;
+        _activeAdapter = null;
+        AttachedProcess = null;
+        _scanCandidates = [];
+        _scanHistory = new Stack<List<ScanCandidate>>();
+        VisibleScanResults = [];
+        ScanResultCount = 0;
+        SelectedScanResult = null;
+        _adapterInventoryItems.Clear();
+        SelectedAdapterItem = null;
+        IsSpeedActive = false;
+        SelectedVersion = selectedGame?.Versions.OrderByDescending(item => item.LastVerifiedUtc).FirstOrDefault();
+        ConnectionText = "未连接";
+        OnPropertyChanged(nameof(HasActiveAdapter));
+        OnPropertyChanged(nameof(HasActiveInventoryAdapter));
+        OnPropertyChanged(nameof(HasNoActiveAdapter));
+        OnPropertyChanged(nameof(ActiveAdapterText));
+        OnPropertyChanged(nameof(SpeedStatusText));
+        OnPropertyChanged(nameof(HasScanSession));
+        OnPropertyChanged(nameof(CanUndoScan));
+        OnPropertyChanged(nameof(ActiveGameIcon));
+    }
+
+    private void DisconnectSession(GameConnectionSession session, bool clearActiveView)
+    {
+        StopSessionLockMaintenance(session);
+        if (ReferenceEquals(_activeSession, session))
+        {
+            CaptureActiveSession();
+            StopLiveCandidateRefresh();
+            _scanCancellation?.Cancel();
+        }
+        try { session.SpeedService.DetachSafely(); }
+        finally { session.SpeedService.Dispose(); }
+        if (session.GameId is Guid gameId)
+        {
+            _sessions.Remove(gameId);
+            var game = Games.FirstOrDefault(item => item.Id == gameId);
+            if (game is not null) game.IsConnected = false;
+        }
+        if (ReferenceEquals(_activeSession, session) && clearActiveView) ClearActiveView(SelectedGame);
+        else if (ReferenceEquals(_activeSession, session))
+        {
+            _activeSession = null;
+            _speedService = _idleSpeedService;
+        }
+        UpdateCurrentVersionMarkers(null, null);
+        GamesView.Refresh();
+    }
+
+    private static bool IsProcessRunning(ProcessItem process)
+    {
+        try
+        {
+            using var native = Process.GetProcessById(process.ProcessId);
+            return !native.HasExited && native.StartTime.ToUniversalTime() == process.StartTimeUtc;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private ICollectionView CreateGamesView()
     {
         var view = CollectionViewSource.GetDefaultView(Games);
         view.Filter = item => item is GameProfile game && IsGameVisible(game);
-        if (view is ListCollectionView listView) listView.CustomSort = new GameProfileComparer();
+        if (view is ListCollectionView listView) listView.CustomSort = new GameProfileConnectionComparer();
         return view;
     }
 
@@ -1161,7 +1682,7 @@ public sealed class MainViewModel : ObservableObject
 
     private static GameVersionProfile CreateVersionProfile(VersionFingerprint fingerprint)
     {
-        var version = new GameVersionProfile();
+        var version = new GameVersionProfile { CollectedUtc = DateTime.UtcNow };
         ApplyFingerprint(version, fingerprint);
         return version;
     }
@@ -1202,6 +1723,31 @@ public sealed class MainViewModel : ObservableObject
                 LockedValue = string.Empty
             });
 
+    private static int MigrateAdapterFields(GameProfile game, GameVersionProfile target, string adapterId)
+    {
+        var source = game.Versions
+            .Where(version => !ReferenceEquals(version, target) && version.Fields.Any(field =>
+                field.LocatorKind == "GameAdapter" && string.Equals(field.AdapterId, adapterId, StringComparison.Ordinal)))
+            .OrderByDescending(version => version.LastVerifiedUtc)
+            .FirstOrDefault();
+        if (source is null) return 0;
+
+        var existingKeys = target.Fields
+            .Where(field => field.LocatorKind == "GameAdapter" && string.Equals(field.AdapterId, adapterId, StringComparison.Ordinal))
+            .Select(field => field.AdapterFieldKey)
+            .ToHashSet(StringComparer.Ordinal);
+        var cloned = CloneAdapterFields(source, adapterId)
+            .Where(field => existingKeys.Add(field.AdapterFieldKey))
+            .ToList();
+        foreach (var field in cloned) target.Fields.Add(field);
+        if (cloned.Count > 0)
+        {
+            target.PreferredSearchRoutineId = source.PreferredSearchRoutineId;
+            target.PreferredScaleMultiplier = source.PreferredScaleMultiplier;
+        }
+        return cloned.Count;
+    }
+
     private static string GetVersionIdentity(GameVersionProfile version) =>
         string.IsNullOrWhiteSpace(version.BuildFingerprint) ? version.ExecutableSha256 : version.BuildFingerprint;
 
@@ -1209,15 +1755,13 @@ public sealed class MainViewModel : ObservableObject
     {
         foreach (var game in Games)
         foreach (var version in game.Versions)
-            version.IsCurrentBuild = ReferenceEquals(game, currentGame) &&
-                                     !string.IsNullOrWhiteSpace(buildFingerprint) &&
-                                     string.Equals(GetVersionIdentity(version), buildFingerprint, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private void RestoreSpeedCore()
-    {
-        _speedService.Restore();
-        IsSpeedActive = false;
+        {
+            var sessionFingerprint = _sessions.TryGetValue(game.Id, out var session)
+                ? session.Fingerprint?.BuildSha256
+                : ReferenceEquals(game, currentGame) ? buildFingerprint : null;
+            version.IsCurrentBuild = !string.IsNullOrWhiteSpace(sessionFingerprint) &&
+                                     string.Equals(GetVersionIdentity(version), sessionFingerprint, StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     private ICollectionView CreateAdapterItemsView()
@@ -1295,7 +1839,9 @@ public sealed class MainViewModel : ObservableObject
 
     private void RestartLockMaintenance()
     {
-        StopLockMaintenance();
+        var session = _activeSession;
+        if (session is null) return;
+        StopSessionLockMaintenance(session);
         if (AttachedProcess is null || SelectedVersion?.Fields.Any(field => field.IsValueLocked) != true) return;
         if (SelectedGame is null || _attachedGameId != SelectedGame.Id ||
             _attachedFingerprint is null ||
@@ -1303,20 +1849,26 @@ public sealed class MainViewModel : ObservableObject
         var process = AttachedProcess;
         var version = SelectedVersion;
         var cancellation = new CancellationTokenSource();
-        _lockMaintenanceCancellation = cancellation;
-        _ = Task.Run(() => MaintainLockedValuesAsync(process, version, cancellation.Token));
+        session.LockMaintenanceCancellation = cancellation;
+        _ = Task.Run(() => MaintainLockedValuesAsync(process, version, session.Adapter, cancellation.Token));
     }
 
     private void StopLockMaintenance()
     {
-        _lockMaintenanceCancellation?.Cancel();
-        _lockMaintenanceCancellation?.Dispose();
-        _lockMaintenanceCancellation = null;
+        if (_activeSession is not null) StopSessionLockMaintenance(_activeSession);
+    }
+
+    private static void StopSessionLockMaintenance(GameConnectionSession session)
+    {
+        session.LockMaintenanceCancellation?.Cancel();
+        session.LockMaintenanceCancellation?.Dispose();
+        session.LockMaintenanceCancellation = null;
     }
 
     private async Task MaintainLockedValuesAsync(
         ProcessItem process,
         GameVersionProfile version,
+        IGameAdapter? sessionAdapter,
         CancellationToken cancellationToken)
     {
         try
@@ -1334,7 +1886,7 @@ public sealed class MainViewModel : ObservableObject
                     {
                         if (field.LocatorKind == "GameAdapter")
                         {
-                            var adapter = ResolveFieldAdapter(field);
+                            var adapter = ResolveFieldAdapter(field, sessionAdapter);
                             var current = adapter.ReadField(process, field.AdapterFieldKey);
                             var final = current;
                             if (!string.Equals(current.DisplayValue, field.LockedValue, StringComparison.Ordinal))
@@ -1401,8 +1953,23 @@ public sealed class MainViewModel : ObservableObject
     {
         _scanCancellation?.Cancel();
         StopLiveCandidateRefresh();
-        StopLockMaintenance();
-        RestoreSpeedCore();
+        CaptureActiveSession();
+        var sessions = _sessions.Values
+            .Append(_activeSession)
+            .Where(session => session is not null)
+            .Cast<GameConnectionSession>()
+            .Distinct()
+            .ToList();
+        foreach (var session in sessions)
+        {
+            StopSessionLockMaintenance(session);
+            session.SpeedService.DetachSafely();
+            session.SpeedService.Dispose();
+        }
+        _sessions.Clear();
+        _activeAdapter = null;
+        _adapterRegistry.Dispose();
+        _idleSpeedService.Dispose();
     }
 
     private static bool PathsEqual(string left, string right)
@@ -1411,16 +1978,30 @@ public sealed class MainViewModel : ObservableObject
         catch { return string.Equals(left, right, StringComparison.OrdinalIgnoreCase); }
     }
 
-    private sealed class GameProfileComparer : System.Collections.IComparer
+    private sealed class GameConnectionSession(ProcessItem process, Guid? gameId)
     {
-        public int Compare(object? x, object? y)
-        {
-            if (x is not GameProfile left || y is not GameProfile right) return 0;
-            var pinned = right.IsPinned.CompareTo(left.IsPinned);
-            if (pinned != 0) return pinned;
-            var used = right.LastUsedUtc.CompareTo(left.LastUsedUtc);
-            return used != 0 ? used : string.Compare(left.Name, right.Name, StringComparison.CurrentCultureIgnoreCase);
-        }
+        public ProcessItem Process { get; } = process;
+        public Guid? GameId { get; set; } = gameId;
+        public Guid? VersionId { get; set; }
+        public VersionFingerprint? Fingerprint { get; set; }
+        public IGameAdapter? Adapter { get; set; }
+        public ProcessSpeedService SpeedService { get; } = new();
+        public bool IsSpeedActive { get; set; }
+        public string SpeedMultiplierInput { get; set; } = "2";
+        public List<ScanCandidate> ScanCandidates { get; set; } = [];
+        public Stack<List<ScanCandidate>> ScanHistory { get; set; } = new();
+        public ObservableCollection<ScanCandidate> VisibleScanResults { get; set; } = [];
+        public ScanCandidate? SelectedScanResult { get; set; }
+        public List<AdapterInventoryItem> AdapterItems { get; set; } = [];
+        public string? SelectedAdapterFieldKey { get; set; }
+        public string AdapterItemNameFilter { get; set; } = string.Empty;
+        public string AdapterItemCountFilter { get; set; } = string.Empty;
+        public string ScanValue { get; set; } = string.Empty;
+        public MemoryValueType? SelectedValueType { get; set; }
+        public ScanComparison SelectedComparison { get; set; } = ScanComparison.Exact;
+        public string SelectedSearchRoutineId { get; set; } = SearchRoutineIds.All;
+        public string ScaleMultiplier { get; set; } = "2";
+        public CancellationTokenSource? LockMaintenanceCancellation { get; set; }
     }
 
     private sealed record ScanTarget(
