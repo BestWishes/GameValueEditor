@@ -1,8 +1,8 @@
-# 单机游戏数值编辑器
+# 肝肾大圣-单机游戏数值编辑器
 
 一个面向 Windows 离线单机游戏的本地数值扫描与管理工具。它不仅保存临时地址，还把玩家确认过的字段整理到按游戏、按版本隔离的本地游戏库中。
 
-> 最新稳定版本：`v0.1.1`。当前预览版为 `v0.2.0-preview.9`，尚未作为正式版发布。
+> 最新稳定版本：`v0.2.0`。
 
 ## 主要功能
 
@@ -102,7 +102,7 @@ dotnet run --project tests/GameValueEditor.SmokeTests/GameValueEditor.SmokeTests
 验证最终 ZIP 中的程序能够正常启动：
 
 ```powershell
-./scripts/test-package-startup.ps1 -ArchivePath ./dist/GameValueEditor-v0.2.0-preview.9-win-x64.zip
+./scripts/test-package-startup.ps1 -ArchivePath ./dist/GameValueEditor-v0.2.0-win-x64.zip
 ```
 
 ## 搜索套路与专属适配器

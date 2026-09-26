@@ -1,7 +1,7 @@
 <Window x:Class="GameValueEditor.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="单机游戏数值编辑器" Icon="pack://application:,,,/GameValueEditor;component/Assets/GameValueEditorIcon.png" Height="820" Width="1320"
+        Title="肝肾大圣-单机游戏数值编辑器" Icon="pack://application:,,,/GameValueEditor;component/Assets/GameValueEditorIcon.png" Height="820" Width="1320"
         MinHeight="700" MinWidth="1080" WindowStartupLocation="CenterScreen">
     <Grid Background="{DynamicResource WindowBrush}">
         <Grid.RowDefinitions>
@@ -13,12 +13,12 @@
         <Border Grid.Row="0" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
             <Grid Margin="18,10">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="250"/>
+                    <ColumnDefinition Width="330"/>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <StackPanel VerticalAlignment="Center">
-                    <TextBlock Text="单机游戏数值编辑器" FontSize="19" FontWeight="SemiBold"/>
+                    <TextBlock Text="肝肾大圣-单机游戏数值编辑器" FontSize="19" FontWeight="SemiBold"/>
                     <TextBlock Text="LOCAL GAME VALUE EDITOR" FontSize="10" Foreground="{DynamicResource AccentBrush}"/>
                 </StackPanel>
                 <ComboBox Grid.Column="1" Margin="8,0" ItemsSource="{Binding Processes}"
@@ -360,7 +360,7 @@
             <Grid Margin="14,0">
                 <TextBlock Text="{Binding StatusText}" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
                 <TextBlock HorizontalAlignment="Right" VerticalAlignment="Center" Foreground="{DynamicResource MutedTextBrush}"
-                           Text="仅用于离线单机游戏 · v0.2.0-preview.9"/>
+                           Text="仅用于离线单机游戏 · v0.2.0"/>
             </Grid>
         </Border>
     </Grid>
