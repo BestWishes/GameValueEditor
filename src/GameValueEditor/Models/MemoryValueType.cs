@@ -17,6 +17,15 @@ public enum ScanComparison
     Decreased
 }
 
+public static class SearchRoutineIds
+{
+    public const string All = "all";
+    public const string DirectNumeric = "direct-numeric";
+    public const string ScaledNumeric = "scaled-numeric";
+}
+
+public sealed record SearchRoutineOption(string Id, string DisplayName, string Description);
+
 public static class MemoryValueTypeExtensions
 {
     public static string ToDisplayName(this MemoryValueType type) => type switch

@@ -2,23 +2,26 @@ using System.Windows;
 
 namespace GameValueEditor.Dialogs;
 
-public partial class SaveFieldDialog : Window
+public partial class ModifyFieldDialog : Window
 {
-    public SaveFieldDialog(IEnumerable<string>? groups = null)
+    public ModifyFieldDialog(string name, string group, string currentValue, IEnumerable<string> groups)
     {
         InitializeComponent();
-        GroupComboBoxHelper.Configure(GroupComboBox, groups, "未分组");
+        NameTextBox.Text = name;
+        GroupComboBoxHelper.Configure(GroupComboBox, groups, group);
+        ValueTextBox.Text = currentValue == "—" ? string.Empty : currentValue;
         Loaded += (_, _) => NameTextBox.Focus();
     }
 
     public string FieldName => NameTextBox.Text.Trim();
     public string GroupName => string.IsNullOrWhiteSpace(GroupComboBox.Text) ? "未分组" : GroupComboBox.Text.Trim();
+    public string FieldValue => ValueTextBox.Text.Trim();
 
     private void Save_OnClick(object sender, RoutedEventArgs e)
     {
         if (string.IsNullOrWhiteSpace(FieldName))
         {
-            ErrorText.Text = "请手动输入字段名称。";
+            ErrorText.Text = "备注名称不能为空。";
             NameTextBox.Focus();
             return;
         }

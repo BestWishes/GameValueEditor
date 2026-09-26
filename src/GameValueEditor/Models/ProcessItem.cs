@@ -1,3 +1,7 @@
+using System.Globalization;
+using System.Windows.Media;
+using GameValueEditor.Infrastructure;
+
 namespace GameValueEditor.Models;
 
 public sealed class ProcessItem
@@ -7,22 +11,52 @@ public sealed class ProcessItem
     public string WindowTitle { get; init; } = string.Empty;
     public string ExecutablePath { get; init; } = string.Empty;
     public DateTime StartTimeUtc { get; init; }
+    public ImageSource? Icon { get; init; }
 
     public string DisplayName => string.IsNullOrWhiteSpace(WindowTitle)
         ? $"{ProcessName}  ·  PID {ProcessId}"
         : $"{WindowTitle}  ·  {ProcessName}  ·  PID {ProcessId}";
 }
 
-public sealed class ScanCandidate
+public sealed class ScanCandidate : ObservableObject
 {
+    private byte[] _previousBytes = [];
+    private byte[] _currentBytes = [];
+
     public ulong Address { get; init; }
-    public byte[] PreviousBytes { get; set; } = [];
-    public byte[] CurrentBytes { get; set; } = [];
+    public byte[] FirstBytes { get; init; } = [];
+    public byte[] PreviousBytes
+    {
+        get => _previousBytes;
+        set
+        {
+            if (!SetProperty(ref _previousBytes, value)) return;
+            OnPropertyChanged(nameof(PreviousDisplay));
+        }
+    }
+    public byte[] CurrentBytes
+    {
+        get => _currentBytes;
+        set
+        {
+            if (!SetProperty(ref _currentBytes, value)) return;
+            OnPropertyChanged(nameof(CurrentDisplay));
+            OnPropertyChanged(nameof(RawCurrentDisplay));
+        }
+    }
     public MemoryValueType ValueType { get; init; }
+    public string SearchRoutineId { get; init; } = SearchRoutineIds.DirectNumeric;
+    public string SearchRoutineName { get; init; } = "直接数值";
+    public double ScaleMultiplier { get; init; } = 1d;
 
     public string AddressDisplay => $"0x{Address:X}";
-    public string PreviousDisplay => MemoryValueCodec.Format(PreviousBytes, ValueType);
-    public string CurrentDisplay => MemoryValueCodec.Format(CurrentBytes, ValueType);
+    public string FirstDisplay => MemoryValueCodec.FormatDecoded(FirstBytes, ValueType, ScaleMultiplier);
+    public string PreviousDisplay => MemoryValueCodec.FormatDecoded(PreviousBytes, ValueType, ScaleMultiplier);
+    public string CurrentDisplay => MemoryValueCodec.FormatDecoded(CurrentBytes, ValueType, ScaleMultiplier);
+    public string RawCurrentDisplay => MemoryValueCodec.Format(CurrentBytes, ValueType);
+    public string RoutineDisplay => ScaleMultiplier == 1d
+        ? SearchRoutineName
+        : $"{SearchRoutineName} ×{ScaleMultiplier.ToString("G", CultureInfo.InvariantCulture)}";
 }
 
 public static class MemoryValueCodec
@@ -61,6 +95,45 @@ public static class MemoryValueCodec
             MemoryValueType.Double => BitConverter.ToDouble(bytes).ToString("G17"),
             _ => "?"
         };
+    }
+
+    public static string FormatDecoded(byte[] bytes, MemoryValueType type, double multiplier)
+    {
+        if (multiplier == 0 || double.IsNaN(multiplier) || double.IsInfinity(multiplier)) return "?";
+        if (Math.Abs(multiplier - 1d) < double.Epsilon) return Format(bytes, type);
+        var decoded = ToDouble(bytes, type) / multiplier;
+        return type is MemoryValueType.Int32 or MemoryValueType.Int64
+            ? decoded.ToString("G17", CultureInfo.InvariantCulture)
+            : decoded.ToString("G9", CultureInfo.InvariantCulture);
+    }
+
+    public static bool TryParseEncoded(string text, MemoryValueType type, double multiplier, out byte[] bytes)
+    {
+        bytes = [];
+        if (multiplier <= 0 || double.IsNaN(multiplier) || double.IsInfinity(multiplier) ||
+            !double.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var displayValue))
+        {
+            return false;
+        }
+
+        var encoded = displayValue * multiplier;
+        switch (type)
+        {
+            case MemoryValueType.Int32 when encoded >= int.MinValue && encoded <= int.MaxValue && encoded == Math.Truncate(encoded):
+                bytes = BitConverter.GetBytes((int)encoded);
+                return true;
+            case MemoryValueType.Int64 when encoded >= long.MinValue && encoded <= long.MaxValue && encoded == Math.Truncate(encoded):
+                bytes = BitConverter.GetBytes((long)encoded);
+                return true;
+            case MemoryValueType.Float when encoded is >= -float.MaxValue and <= float.MaxValue:
+                bytes = BitConverter.GetBytes((float)encoded);
+                return true;
+            case MemoryValueType.Double:
+                bytes = BitConverter.GetBytes(encoded);
+                return true;
+            default:
+                return false;
+        }
     }
 
     public static double ToDouble(byte[] bytes, MemoryValueType type) => type switch

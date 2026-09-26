@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Security.Cryptography;
+using System.Text;
 using GameValueEditor.Models;
 
 namespace GameValueEditor.Services;
@@ -12,6 +13,17 @@ public sealed class VersionFingerprintService
         var fileInfo = new FileInfo(executablePath);
         var versionInfo = FileVersionInfo.GetVersionInfo(executablePath);
         var hash = await ComputeSha256Async(executablePath, cancellationToken);
+        var root = Path.GetDirectoryName(executablePath) ?? string.Empty;
+        var executableName = Path.GetFileNameWithoutExtension(executablePath);
+        var gameAssemblyPath = Path.Combine(root, "GameAssembly.dll");
+        var metadataPath = Path.Combine(root, $"{executableName}_Data", "il2cpp_data", "Metadata", "global-metadata.dat");
+        var gameAssemblyHash = File.Exists(gameAssemblyPath)
+            ? await ComputeSha256Async(gameAssemblyPath, cancellationToken)
+            : string.Empty;
+        var metadataHash = File.Exists(metadataPath)
+            ? await ComputeSha256Async(metadataPath, cancellationToken)
+            : string.Empty;
+        var buildHash = CreateBuildFingerprint(hash, gameAssemblyHash, metadataHash);
         var fileVersion = CleanVersion(versionInfo.FileVersion);
         var productVersion = CleanVersion(versionInfo.ProductVersion);
         var display = !string.IsNullOrWhiteSpace(productVersion)
@@ -26,7 +38,18 @@ public sealed class VersionFingerprintService
             productVersion,
             hash,
             fileInfo.Length,
-            ReadArchitecture(executablePath));
+            ReadArchitecture(executablePath),
+            buildHash,
+            gameAssemblyHash,
+            metadataHash);
+    }
+
+    private static string CreateBuildFingerprint(string executableHash, string gameAssemblyHash, string metadataHash)
+    {
+        if (string.IsNullOrWhiteSpace(gameAssemblyHash) && string.IsNullOrWhiteSpace(metadataHash))
+            return executableHash;
+        var components = Encoding.UTF8.GetBytes($"exe:{executableHash}\nassembly:{gameAssemblyHash}\nmetadata:{metadataHash}");
+        return Convert.ToHexString(SHA256.HashData(components));
     }
 
     private static async Task<string> ComputeSha256Async(string path, CancellationToken cancellationToken)

@@ -14,11 +14,11 @@ public sealed class ProfileStore
         Converters = { new JsonStringEnumConverter() }
     };
 
-    public ProfileStore()
+    public static string DefaultRoot => Path.Combine(AppContext.BaseDirectory, "data");
+
+    public ProfileStore(string? root = null)
     {
-        var root = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "GameValueEditor");
+        root ??= DefaultRoot;
         Directory.CreateDirectory(root);
         LibraryPath = Path.Combine(root, "library.json");
         BackupPath = Path.Combine(root, "library.backup.json");
@@ -34,14 +34,14 @@ public sealed class ProfileStore
         try
         {
             await using var stream = File.OpenRead(LibraryPath);
-            return await JsonSerializer.DeserializeAsync<LibraryDocument>(stream, _jsonOptions)
-                   ?? new LibraryDocument();
+            return Upgrade(await JsonSerializer.DeserializeAsync<LibraryDocument>(stream, _jsonOptions)
+                           ?? new LibraryDocument());
         }
         catch when (File.Exists(BackupPath))
         {
             await using var stream = File.OpenRead(BackupPath);
-            return await JsonSerializer.DeserializeAsync<LibraryDocument>(stream, _jsonOptions)
-                   ?? new LibraryDocument();
+            return Upgrade(await JsonSerializer.DeserializeAsync<LibraryDocument>(stream, _jsonOptions)
+                           ?? new LibraryDocument());
         }
     }
 
@@ -55,5 +55,16 @@ public sealed class ProfileStore
 
         if (File.Exists(LibraryPath)) File.Copy(LibraryPath, BackupPath, true);
         File.Move(tempPath, LibraryPath, true);
+    }
+
+    private static LibraryDocument Upgrade(LibraryDocument document)
+    {
+        document.SchemaVersion = Math.Max(document.SchemaVersion, 4);
+        foreach (var field in document.Games.SelectMany(game => game.Versions).SelectMany(version => version.Fields))
+        {
+            if (string.IsNullOrWhiteSpace(field.Group)) field.Group = "未分组";
+            if (!field.IsValueLocked) field.LockedValue = string.Empty;
+        }
+        return document;
     }
 }

@@ -4,7 +4,8 @@ namespace GameValueEditor.Models;
 
 public sealed class LibraryDocument
 {
-    public int SchemaVersion { get; set; } = 1;
+    public int SchemaVersion { get; set; } = 4;
+    public string Theme { get; set; } = "Light";
     public ObservableCollection<GameProfile> Games { get; set; } = [];
 }
 
@@ -14,4 +15,7 @@ public sealed record VersionFingerprint(
     string ProductVersion,
     string Sha256,
     long FileSize,
-    string Architecture);
+    string Architecture,
+    string BuildSha256,
+    string GameAssemblySha256,
+    string MetadataSha256);

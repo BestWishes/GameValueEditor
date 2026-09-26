@@ -12,31 +12,19 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
         <TextBlock FontSize="20" FontWeight="SemiBold" Text="为这个字段命名"/>
-        <TextBlock Grid.Row="1" Margin="0,7,0,18" Foreground="{StaticResource MutedTextBrush}"
+        <TextBlock Grid.Row="1" Margin="0,7,0,18" Foreground="{DynamicResource MutedTextBrush}"
                    Text="名称完全由玩家填写；程序不会猜测这个地址在游戏里的含义。" TextWrapping="Wrap"/>
-        <Label Grid.Row="2" Content="显示名称 *" Padding="0,0,0,5"/>
+        <Label Grid.Row="2" Content="备注名称 *" Padding="0,0,0,5"/>
         <TextBox x:Name="NameTextBox" Grid.Row="3" Margin="0,0,0,12"/>
-        <Grid Grid.Row="4">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="16"/>
-                <ColumnDefinition Width="2*"/>
-            </Grid.ColumnDefinitions>
-            <StackPanel>
-                <Label Content="分组" Padding="0,0,0,5"/>
-                <TextBox x:Name="GroupTextBox" Text="未分组"/>
-            </StackPanel>
-            <StackPanel Grid.Column="2">
-                <Label Content="备注（可选）" Padding="0,0,0,5"/>
-                <TextBox x:Name="NoteTextBox"/>
-            </StackPanel>
-        </Grid>
-        <TextBlock x:Name="ErrorText" Grid.Row="5" Foreground="{StaticResource DangerBrush}" Margin="0,12,0,0"/>
-        <StackPanel Grid.Row="6" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
+        <Label Grid.Row="4" Content="分组" Padding="0,0,0,5"/>
+        <ComboBox x:Name="GroupComboBox" Grid.Row="5" IsEditable="True" IsTextSearchEnabled="False"/>
+        <TextBlock x:Name="ErrorText" Grid.Row="6" Foreground="{DynamicResource DangerBrush}" Margin="0,12,0,0"/>
+        <StackPanel Grid.Row="7" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
             <Button Content="取消" IsCancel="True" MinWidth="80"/>
-            <Button Content="保存字段" Style="{StaticResource PrimaryButton}" MinWidth="100" Click="Save_OnClick"/>
+            <Button Content="保存字段" MinWidth="100" Click="Save_OnClick"/>
         </StackPanel>
     </Grid>
 </Window>

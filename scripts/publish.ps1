@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "0.1.1"
+    [string]$Version = "0.2.0-preview.8"
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,6 +40,9 @@ if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed." }
 Copy-Item -LiteralPath (Join-Path $publishDir "GameValueEditor.exe") -Destination $packageDir
 Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $packageDir
 Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination $packageDir
+Copy-Item -LiteralPath (Join-Path $repoRoot "CONTRIBUTING.md") -Destination $packageDir
+Copy-Item -LiteralPath (Join-Path $repoRoot "SECURITY.md") -Destination $packageDir
+Copy-Item -LiteralPath (Join-Path $repoRoot "docs") -Destination $packageDir -Recurse
 
 if (Test-Path -LiteralPath $archivePath) {
     Remove-Item -LiteralPath $archivePath -Force

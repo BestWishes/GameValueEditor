@@ -47,6 +47,7 @@ public sealed class MemoryScanService
                         results.Add(new ScanCandidate
                         {
                             Address = chunkAddress + (ulong)offset,
+                            FirstBytes = target.ToArray(),
                             PreviousBytes = target.ToArray(),
                             CurrentBytes = target.ToArray(),
                             ValueType = valueType
@@ -78,6 +79,20 @@ public sealed class MemoryScanService
         ScanComparison comparison,
         byte[]? exactTarget,
         IProgress<ScanProgress>? progress,
+        CancellationToken cancellationToken) => NextScanAsync(
+            processId,
+            candidates,
+            comparison,
+            candidate => candidate.ValueType == valueType ? exactTarget : null,
+            progress,
+            cancellationToken);
+
+    public Task<ScanRunResult> NextScanAsync(
+        int processId,
+        IReadOnlyCollection<ScanCandidate> candidates,
+        ScanComparison comparison,
+        Func<ScanCandidate, byte[]?> exactTargetFactory,
+        IProgress<ScanProgress>? progress,
         CancellationToken cancellationToken) => Task.Run(() =>
     {
         using var memory = new ProcessMemoryAccessor(processId);
@@ -93,6 +108,7 @@ public sealed class MemoryScanService
             foreach (var candidate in group)
             {
                 var offset = (int)(candidate.Address - group.Key);
+                var valueType = candidate.ValueType;
                 byte[] current;
                 if (page.Length >= offset + valueType.Size())
                 {
@@ -103,13 +119,17 @@ public sealed class MemoryScanService
                     continue;
                 }
 
-                if (!Matches(candidate.CurrentBytes, current, valueType, comparison, exactTarget)) continue;
+                if (!Matches(candidate.CurrentBytes, current, valueType, comparison, exactTargetFactory(candidate))) continue;
                 results.Add(new ScanCandidate
                 {
                     Address = candidate.Address,
+                    FirstBytes = candidate.FirstBytes.ToArray(),
                     PreviousBytes = candidate.CurrentBytes.ToArray(),
                     CurrentBytes = current,
-                    ValueType = valueType
+                    ValueType = valueType,
+                    SearchRoutineId = candidate.SearchRoutineId,
+                    SearchRoutineName = candidate.SearchRoutineName,
+                    ScaleMultiplier = candidate.ScaleMultiplier
                 });
             }
 

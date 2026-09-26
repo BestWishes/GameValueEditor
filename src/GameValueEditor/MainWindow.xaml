@@ -1,32 +1,43 @@
 <Window x:Class="GameValueEditor.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="单机游戏数值编辑器" Height="820" Width="1320"
+        Title="单机游戏数值编辑器" Icon="pack://application:,,,/GameValueEditor;component/Assets/GameValueEditorIcon.png" Height="820" Width="1320"
         MinHeight="700" MinWidth="1080" WindowStartupLocation="CenterScreen">
-    <Grid>
+    <Grid Background="{DynamicResource WindowBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="68"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="34"/>
         </Grid.RowDefinitions>
 
-        <Border Grid.Row="0" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1">
+        <Border Grid.Row="0" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
             <Grid Margin="18,10">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="270"/>
+                    <ColumnDefinition Width="250"/>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <StackPanel VerticalAlignment="Center">
                     <TextBlock Text="单机游戏数值编辑器" FontSize="19" FontWeight="SemiBold"/>
-                    <TextBlock Text="LOCAL GAME VALUE EDITOR" FontSize="10" Foreground="{StaticResource AccentBrush}"/>
+                    <TextBlock Text="LOCAL GAME VALUE EDITOR" FontSize="10" Foreground="{DynamicResource AccentBrush}"/>
                 </StackPanel>
                 <ComboBox Grid.Column="1" Margin="8,0" ItemsSource="{Binding Processes}"
-                          SelectedItem="{Binding SelectedProcess}" DisplayMemberPath="DisplayName"
-                          MaxWidth="700" HorizontalAlignment="Stretch" VerticalAlignment="Center"/>
+                          SelectedItem="{Binding SelectedProcess}"
+                          MaxWidth="660" HorizontalAlignment="Stretch" VerticalAlignment="Center">
+                    <ComboBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Orientation="Horizontal">
+                                <Image Source="{Binding Icon}" Width="20" Height="20" Margin="0,0,8,0"/>
+                                <TextBlock Text="{Binding DisplayName}" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                </ComboBox>
                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                    <ComboBox Width="82" ItemsSource="{Binding Themes}" SelectedItem="{Binding SelectedTheme}"
+                              DisplayMemberPath="Display" SelectionChanged="Theme_OnSelectionChanged" ToolTip="切换应用主题"/>
                     <Button Content="刷新进程" Click="RefreshProcesses_OnClick"/>
-                    <Button Content="连接" Style="{StaticResource PrimaryButton}" Click="AttachProcess_OnClick"/>
+                    <Button Content="连接" Click="AttachProcess_OnClick"/>
                     <Button Content="保存到游戏库" Click="AddGame_OnClick"/>
                 </StackPanel>
             </Grid>
@@ -38,7 +49,7 @@
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
-            <Border Grid.Column="0" Background="#10161E" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,1,0">
+            <Border Grid.Column="0" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
                 <Grid Margin="12">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -52,10 +63,17 @@
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <TextBlock Text="游戏库" FontSize="18" FontWeight="SemiBold" Margin="7,5"/>
-                        <TextBlock Grid.Column="1" Text="本地" Foreground="{StaticResource MutedTextBrush}" Margin="7"/>
+                        <TextBlock Grid.Column="1" Text="本地" Foreground="{DynamicResource MutedTextBrush}" Margin="7"/>
                     </Grid>
-                    <TextBox Grid.Row="1" Margin="4,8,4,10" Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}"/>
-                    <ListBox Grid.Row="2" ItemsSource="{Binding GamesView}" SelectedItem="{Binding SelectedGame}">
+                    <Grid Grid.Row="1" Margin="4,8,4,10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBox Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}" ToolTip="按游戏名称或进程名搜索"/>
+                        <Button Grid.Column="1" Content="清空" Margin="6,0,0,0" Padding="10,6" Click="ClearGameSearch_OnClick"/>
+                    </Grid>
+                    <ListBox Grid.Row="2" ItemsSource="{Binding GamesView}" SelectedItem="{Binding SelectedLibraryGame}">
                         <ListBox.ItemTemplate>
                             <DataTemplate>
                                 <Grid>
@@ -63,14 +81,14 @@
                                         <ColumnDefinition Width="Auto"/>
                                         <ColumnDefinition Width="*"/>
                                     </Grid.ColumnDefinitions>
-                                    <Border Width="38" Height="38" CornerRadius="9" Background="#243B5A" Margin="0,0,10,0">
+                                    <Border Width="38" Height="38" CornerRadius="9" Background="{DynamicResource AccentSoftBrush}" Margin="0,0,10,0">
                                         <TextBlock Text="🎮" FontSize="18" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                     </Border>
                                     <StackPanel Grid.Column="1">
                                         <TextBlock FontWeight="SemiBold" TextTrimming="CharacterEllipsis">
-                                            <Run Text="{Binding Badges}"/><Run Text="{Binding Name}"/>
+                                            <Run Text="{Binding Badges, Mode=OneWay}"/><Run Text="{Binding Name, Mode=OneWay}"/>
                                         </TextBlock>
-                                        <TextBlock Text="{Binding Summary}" Foreground="{StaticResource MutedTextBrush}" FontSize="11"/>
+                                        <TextBlock Text="{Binding Summary}" Foreground="{DynamicResource MutedTextBrush}" FontSize="11"/>
                                     </StackPanel>
                                 </Grid>
                             </DataTemplate>
@@ -88,15 +106,16 @@
                         </UniformGrid>
                         <UniformGrid Grid.Row="1" Columns="2">
                             <Button Content="连接所选游戏" Click="AttachSelectedGame_OnClick"/>
-                            <Button Content="删除游戏" Style="{StaticResource DangerButton}" Click="DeleteGame_OnClick"/>
+                            <Button Content="删除游戏" Click="DeleteGame_OnClick"/>
                         </UniformGrid>
                     </Grid>
                 </Grid>
             </Border>
 
-            <Grid Grid.Column="1" Margin="18">
+            <Grid Grid.Column="1" Margin="18" Background="{DynamicResource WindowBrush}">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="78"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <Grid Grid.Row="0">
@@ -105,17 +124,90 @@
                         <ColumnDefinition Width="320"/>
                     </Grid.ColumnDefinitions>
                     <StackPanel VerticalAlignment="Center">
-                        <TextBlock Text="{Binding SelectedGame.Name, TargetNullValue=尚未选择游戏}" FontSize="25" FontWeight="SemiBold"/>
-                        <TextBlock Text="{Binding ConnectionText}" Foreground="{StaticResource AccentBrush}" Margin="0,4,0,0"/>
+                        <TextBlock Text="{Binding ActiveGameDisplayName}" FontSize="25" FontWeight="SemiBold"/>
+                        <TextBlock Text="{Binding ConnectionText}" Foreground="{DynamicResource AccentBrush}" Margin="0,4,0,0"/>
                     </StackPanel>
                     <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                        <TextBlock Text="游戏版本" Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,5"/>
-                        <ComboBox ItemsSource="{Binding SelectedGame.Versions}" SelectedItem="{Binding SelectedVersion}"
-                                  DisplayMemberPath="DisplayName"/>
+                        <TextBlock Text="游戏版本" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,5"/>
+                        <ComboBox ItemsSource="{Binding SelectedGame.Versions}" SelectedItem="{Binding SelectedVersion}">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding VersionChoiceText}" ToolTip="{Binding TechnicalDetails}"/>
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
                     </StackPanel>
                 </Grid>
 
-                <TabControl Grid.Row="1">
+                <Border Grid.Row="1" Margin="0,0,0,10" Padding="10,6" Background="{DynamicResource PanelBrush}"
+                        BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6">
+                    <DockPanel LastChildFill="False">
+                        <TextBlock Text="{Binding SpeedStatusText}" FontWeight="SemiBold" VerticalAlignment="Center"
+                                   Margin="2,0,18,0" MinWidth="105"/>
+                        <TextBlock Text="倍数：" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                        <TextBox Text="{Binding SpeedMultiplier, UpdateSourceTrigger=PropertyChanged}" Width="70"
+                                 ToolTip="输入 1 到 100 的整数"/>
+                        <Button Content="加速" IsEnabled="{Binding CanAccelerate}" Click="AccelerateGame_OnClick"/>
+                        <Button Content="回正" IsEnabled="{Binding CanRestoreSpeed}" Click="RestoreGameSpeed_OnClick"/>
+                    </DockPanel>
+                </Border>
+
+                <TabControl Grid.Row="2">
+                    <TabItem Header="专属修改">
+                        <Grid Margin="14">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <Border Padding="12,9" CornerRadius="6" Background="{DynamicResource PanelRaisedBrush}"
+                                    BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                                <TextBlock Text="{Binding ActiveAdapterText}" Foreground="{DynamicResource MutedTextBrush}"/>
+                            </Border>
+                            <TabControl Grid.Row="1" Margin="0,12,0,0">
+                                <TabItem Header="背包物品数量" IsEnabled="{Binding HasActiveInventoryAdapter}">
+                                    <Grid Margin="12">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="*"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="220"/>
+                                                <ColumnDefinition Width="150"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock VerticalAlignment="Center" Foreground="{DynamicResource MutedTextBrush}"
+                                                       Text="读取游戏当前背包；双击物品即可实时修改并调用游戏自身保存流程。"/>
+                                            <TextBox Grid.Column="1" Margin="8,0,0,0"
+                                                     Text="{Binding AdapterItemNameFilter, UpdateSourceTrigger=PropertyChanged}"
+                                                     ToolTip="按物品名称查找"/>
+                                            <TextBox Grid.Column="2" Margin="8,0,0,0"
+                                                     Text="{Binding AdapterItemCountFilter, UpdateSourceTrigger=PropertyChanged}"
+                                                     ToolTip="按物品数量精确查找"/>
+                                            <Button Grid.Column="3" Content="刷新背包" Click="RefreshAdapterInventory_OnClick"/>
+                                        </Grid>
+                                        <DataGrid x:Name="AdapterInventoryGrid" Grid.Row="1" Margin="0,10"
+                                                   ItemsSource="{Binding AdapterItemsView}" SelectedItem="{Binding SelectedAdapterItem}"
+                                                   IsReadOnly="True" SelectionMode="Extended"
+                                                   SelectionChanged="AdapterInventoryGrid_OnSelectionChanged"
+                                                   MouseDoubleClick="AdapterInventoryGrid_OnMouseDoubleClick">
+                                            <DataGrid.Columns>
+                                                <DataGridTextColumn Header="物品名称" Binding="{Binding DisplayName}" Width="2*"/>
+                                                <DataGridTextColumn Header="物品总数" Binding="{Binding CountDisplay}" Width="*"/>
+                                            </DataGrid.Columns>
+                                        </DataGrid>
+                                        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+                                            <Button x:Name="SaveAdapterFieldButton" Content="添加到已保存字段…" IsEnabled="False" Click="SaveAdapterItem_OnClick"/>
+                                            <Button x:Name="WriteAdapterItemsButton" Content="修改选中物品…" IsEnabled="False" Click="WriteAdapterItem_OnClick"/>
+                                        </StackPanel>
+                                    </Grid>
+                                </TabItem>
+                            </TabControl>
+                        </Grid>
+                    </TabItem>
+
                     <TabItem Header="扫描数值">
                         <Grid Margin="14">
                             <Grid.RowDefinitions>
@@ -128,8 +220,11 @@
                             <Grid>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="2*"/>
-                                    <ColumnDefinition Width="160"/>
-                                    <ColumnDefinition Width="160"/>
+                                    <ColumnDefinition Width="135"/>
+                                    <ColumnDefinition Width="135"/>
+                                    <ColumnDefinition Width="170"/>
+                                    <ColumnDefinition Width="100"/>
+                                    <ColumnDefinition Width="Auto"/>
                                     <ColumnDefinition Width="Auto"/>
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
@@ -138,36 +233,54 @@
                                           SelectedValue="{Binding SelectedValueType}" SelectedValuePath="Value" DisplayMemberPath="Display"/>
                                 <ComboBox Grid.Column="2" Margin="8,0,0,0" ItemsSource="{Binding Comparisons}"
                                           SelectedValue="{Binding SelectedComparison}" SelectedValuePath="Value" DisplayMemberPath="Display"/>
-                                <Button Grid.Column="3" Content="首次扫描" Style="{StaticResource PrimaryButton}" Click="NewScan_OnClick"/>
-                                <Button Grid.Column="4" Content="再次扫描" Click="NextScan_OnClick"/>
+                                <ComboBox Grid.Column="3" Margin="8,0,0,0" ItemsSource="{Binding SearchRoutines}"
+                                          SelectedItem="{Binding SelectedSearchRoutine}" DisplayMemberPath="DisplayName"
+                                          ToolTip="搜索套路是可复用的数值编码/定位方式"/>
+                                <Grid Grid.Column="4" Margin="8,0,0,0" ToolTip="按比例存储的倍数；例如界面 10、内存 20 时填 2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="倍数" Margin="0,0,6,0" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource MutedTextBrush}"/>
+                                    <TextBox Grid.Column="1" Text="{Binding ScaleMultiplier, UpdateSourceTrigger=PropertyChanged}"/>
+                                </Grid>
+                                <Button Grid.Column="5" Content="首次扫描" Click="NewScan_OnClick" IsEnabled="{Binding IsNotBusy}"/>
+                                <Button Grid.Column="6" Content="再次扫描" Click="NextScan_OnClick" IsEnabled="{Binding IsNotBusy}"/>
+                                <Button Grid.Column="7" Content="撤销扫描" Click="UndoScan_OnClick" IsEnabled="{Binding CanUndoScan}"/>
                             </Grid>
                             <Grid Grid.Row="1" Margin="2,10,2,8">
                                 <StackPanel Orientation="Horizontal">
                                     <CheckBox Content="仅扫描可写内存" IsChecked="{Binding WritableOnly}" Margin="0,0,18,0"/>
                                     <CheckBox Content="按类型对齐" IsChecked="{Binding AlignedOnly}" Margin="0,0,18,0"/>
-                                    <TextBlock Foreground="{StaticResource MutedTextBrush}">
+                                    <TextBlock Foreground="{DynamicResource MutedTextBrush}">
                                         <Run Text="候选："/><Run Text="{Binding ScanResultCount, Mode=OneWay, StringFormat={}{0:N0}}"/>
                                     </TextBlock>
                                 </StackPanel>
                                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                                    <Button Content="取消扫描" Click="CancelScan_OnClick"/>
-                                    <Button Content="清空结果" Click="ResetScan_OnClick"/>
+                                    <Button Content="取消扫描" Click="CancelScan_OnClick" IsEnabled="{Binding IsBusy}"/>
+                                    <Button Content="清空结果" Click="ResetScan_OnClick" IsEnabled="{Binding IsNotBusy}"/>
                                 </StackPanel>
                             </Grid>
                             <ProgressBar Grid.Row="2" Height="3" Value="{Binding ProgressPercentage, Mode=OneWay}" Maximum="100"
-                                         Foreground="{StaticResource AccentBrush}" Background="{StaticResource PanelRaisedBrush}"/>
-                            <DataGrid Grid.Row="3" Margin="0,10,0,10" ItemsSource="{Binding VisibleScanResults}"
-                                      SelectedItem="{Binding SelectedScanResult}" IsReadOnly="True">
+                                         Foreground="{DynamicResource AccentBrush}" Background="{DynamicResource PanelRaisedBrush}"/>
+                             <DataGrid x:Name="ScanResultsGrid" Grid.Row="3" Margin="0,10,0,10" ItemsSource="{Binding VisibleScanResults}"
+                                       SelectedItem="{Binding SelectedScanResult}" IsReadOnly="True" SelectionMode="Extended"
+                                       SelectionChanged="ScanResultsGrid_OnSelectionChanged"
+                                       MouseDoubleClick="ScanResultsGrid_OnMouseDoubleClick">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Header="地址" Binding="{Binding AddressDisplay}" Width="2*"/>
-                                    <DataGridTextColumn Header="当前值" Binding="{Binding CurrentDisplay}" Width="*"/>
+                                    <DataGridTextColumn Header="地址" Binding="{Binding AddressDisplay}" Width="1.6*"/>
+                                    <DataGridTextColumn Header="界面值" Binding="{Binding CurrentDisplay}" Width="*"/>
+                                    <DataGridTextColumn Header="原始存储值" Binding="{Binding RawCurrentDisplay}" Width="*"/>
+                                    <DataGridTextColumn Header="首次" Binding="{Binding FirstDisplay}" Width="*"/>
                                     <DataGridTextColumn Header="上一次" Binding="{Binding PreviousDisplay}" Width="*"/>
                                     <DataGridTextColumn Header="类型" Binding="{Binding ValueType}" Width="*"/>
+                                    <DataGridTextColumn Header="搜索套路" Binding="{Binding RoutineDisplay}" Width="1.4*"/>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
-                                <Button Content="用选中结果更新字段位置" Click="RelocateField_OnClick"/>
-                                <Button Content="保存选中字段…" Style="{StaticResource PrimaryButton}" Click="SaveField_OnClick"/>
+                             <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
+                                <Button x:Name="WriteScanResultsButton" Content="修改选中结果…" IsEnabled="False" Click="WriteScanResults_OnClick"/>
+                                <Button x:Name="SaveScanFieldButton" Content="保存选中字段…" IsEnabled="False" Click="SaveField_OnClick"/>
                             </StackPanel>
                         </Grid>
                     </TabItem>
@@ -183,23 +296,27 @@
                                 <StackPanel>
                                     <TextBlock Text="玩家命名的字段" FontSize="18" FontWeight="SemiBold"/>
                                     <TextBlock Text="动态地址在游戏重启后会标记为需要重新定位；模块偏移会自动恢复。"
-                                               Foreground="{StaticResource MutedTextBrush}" Margin="0,4,0,10"/>
+                                               Foreground="{DynamicResource MutedTextBrush}" Margin="0,4,0,10"/>
                                 </StackPanel>
                                 <Button Content="刷新数值" HorizontalAlignment="Right" VerticalAlignment="Center" Click="RefreshFields_OnClick"/>
                             </Grid>
-                            <DataGrid Grid.Row="1" ItemsSource="{Binding SavedFields}" SelectedItem="{Binding SelectedSavedField}" IsReadOnly="True">
+                            <DataGrid x:Name="SavedFieldsGrid" Grid.Row="1" ItemsSource="{Binding SavedFields}"
+                                      SelectedItem="{Binding SelectedSavedField}" IsReadOnly="True"
+                                      MouseDoubleClick="SavedFieldsGrid_OnMouseDoubleClick"
+                                      PreviewMouseLeftButtonDown="SavedFieldsGrid_OnPreviewMouseLeftButtonDown">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="2*"/>
+                                    <DataGridTextColumn Header="备注名称" Binding="{Binding Name}" Width="2*"/>
                                     <DataGridTextColumn Header="分组" Binding="{Binding Group}" Width="*"/>
                                     <DataGridTextColumn Header="当前值" Binding="{Binding CurrentValue}" Width="*"/>
+                                    <DataGridTextColumn Header="锁定状态" Binding="{Binding LockDisplay}" Width="*"/>
                                     <DataGridTextColumn Header="类型" Binding="{Binding TypeDisplay}" Width="*"/>
                                     <DataGridTextColumn Header="地址" Binding="{Binding AddressDisplay}" Width="1.5*"/>
                                     <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="1.5*"/>
                                 </DataGrid.Columns>
                             </DataGrid>
                             <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
-                                <Button Content="删除字段" Style="{StaticResource DangerButton}" Click="DeleteField_OnClick"/>
-                                <Button Content="修改数值…" Style="{StaticResource PrimaryButton}" Click="WriteField_OnClick"/>
+                                <Button Content="删除字段" Click="DeleteField_OnClick"/>
+                                <Button Content="修改字段值…" Click="WriteField_OnClick"/>
                             </StackPanel>
                         </Grid>
                     </TabItem>
@@ -218,19 +335,19 @@
                                 <RowDefinition Height="42"/>
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
-                            <Label Content="档案版本"/>
-                            <TextBlock Grid.Column="1" Text="{Binding SelectedVersion.DisplayName}" VerticalAlignment="Center"/>
+                            <Label Content="版本用途"/>
+                            <TextBlock Grid.Column="1" Text="{Binding SelectedVersion.VersionChoiceText}" VerticalAlignment="Center"/>
                             <Label Grid.Row="1" Content="文件版本"/>
                             <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding SelectedVersion.FileVersion}" VerticalAlignment="Center"/>
                             <Label Grid.Row="2" Content="产品版本"/>
                             <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding SelectedVersion.ProductVersion}" VerticalAlignment="Center"/>
                             <Label Grid.Row="3" Content="架构"/>
                             <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding SelectedVersion.Architecture}" VerticalAlignment="Center"/>
-                            <Label Grid.Row="4" Content="版本指纹"/>
+                            <Label Grid.Row="4" Content="版本指纹（技术信息）"/>
                             <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding SelectedVersion.ExecutableSha256}" TextWrapping="Wrap" VerticalAlignment="Center"/>
                             <StackPanel Grid.Row="5" Grid.ColumnSpan="2" Margin="0,20,0,0">
                                 <TextBlock Text="本地数据位置" FontWeight="SemiBold"/>
-                                <TextBlock Text="{Binding LibraryPath}" Foreground="{StaticResource MutedTextBrush}" Margin="0,6,0,12"/>
+                                <TextBlock Text="{Binding LibraryPath}" Foreground="{DynamicResource MutedTextBrush}" Margin="0,6,0,12"/>
                                 <Button Content="在资源管理器中显示" HorizontalAlignment="Left" Click="OpenLibraryFolder_OnClick"/>
                             </StackPanel>
                         </Grid>
@@ -239,11 +356,11 @@
             </Grid>
         </Grid>
 
-        <Border Grid.Row="2" Background="#0A0F15" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0">
+        <Border Grid.Row="2" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0">
             <Grid Margin="14,0">
-                <TextBlock Text="{Binding StatusText}" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center"/>
-                <TextBlock HorizontalAlignment="Right" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}"
-                           Text="仅用于离线单机游戏 · v0.1.1"/>
+                <TextBlock Text="{Binding StatusText}" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
+                <TextBlock HorizontalAlignment="Right" VerticalAlignment="Center" Foreground="{DynamicResource MutedTextBrush}"
+                           Text="仅用于离线单机游戏 · v0.2.0-preview.8"/>
             </Grid>
         </Border>
     </Grid>

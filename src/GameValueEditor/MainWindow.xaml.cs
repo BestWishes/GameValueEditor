@@ -1,6 +1,13 @@
 using System.Diagnostics;
+using System.ComponentModel;
+using System.IO;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
 using GameValueEditor.Dialogs;
+using GameValueEditor.Models;
+using GameValueEditor.Services.Adapters;
 using GameValueEditor.ViewModels;
 
 namespace GameValueEditor;
@@ -14,7 +21,20 @@ public partial class MainWindow : Window
         InitializeComponent();
         DataContext = _viewModel;
         Loaded += async (_, _) => await RunGuardedAsync(_viewModel.InitializeAsync);
-        Closed += (_, _) => _viewModel.CancelScan();
+        Closing += MainWindow_OnClosing;
+    }
+
+    private void MainWindow_OnClosing(object? sender, CancelEventArgs e)
+    {
+        try
+        {
+            _viewModel.Shutdown();
+        }
+        catch (Exception exception)
+        {
+            e.Cancel = true;
+            ShowError(exception);
+        }
     }
 
     private void RefreshProcesses_OnClick(object sender, RoutedEventArgs e) => RunGuarded(_viewModel.RefreshProcesses);
@@ -78,13 +98,11 @@ public partial class MainWindow : Window
             var game = _viewModel.SelectedGame ?? throw new InvalidOperationException("请先选择游戏条目。");
             if (game.IsPinned) throw new InvalidOperationException("置顶游戏不能删除，请先取消置顶。");
             if (game.IsLocked) throw new InvalidOperationException("锁定游戏不能删除，请先解锁。");
-            var answer = MessageBox.Show(
-                this,
-                $"确定删除“{game.Name}”及其全部版本和字段配置吗？\n这个操作不会修改游戏文件。",
-                "删除游戏条目",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning);
-            if (answer == MessageBoxResult.Yes) await _viewModel.DeleteSelectedGameAsync();
+            if (MessageDialog.Confirm(
+                    this,
+                    "删除游戏条目",
+                    $"确定删除“{game.Name}”及其全部版本和字段配置吗？\n这个操作不会修改游戏文件。"))
+                await _viewModel.DeleteSelectedGameAsync();
         });
     }
 
@@ -96,35 +114,204 @@ public partial class MainWindow : Window
 
     private void CancelScan_OnClick(object sender, RoutedEventArgs e) => _viewModel.CancelScan();
     private void ResetScan_OnClick(object sender, RoutedEventArgs e) => _viewModel.ResetScan();
+    private void UndoScan_OnClick(object sender, RoutedEventArgs e) => _viewModel.UndoScan();
+    private void ClearGameSearch_OnClick(object sender, RoutedEventArgs e) => _viewModel.ClearSearch();
+
+    private async void AccelerateGame_OnClick(object sender, RoutedEventArgs e) =>
+        await RunGuardedAsync(_viewModel.AccelerateGameAsync);
+
+    private async void RestoreGameSpeed_OnClick(object sender, RoutedEventArgs e) =>
+        await RunGuardedAsync(_viewModel.RestoreGameSpeedAsync);
 
     private async void SaveField_OnClick(object sender, RoutedEventArgs e)
     {
         await RunGuardedAsync(async () =>
         {
-            if (_viewModel.SelectedScanResult is null) throw new InvalidOperationException("请先选择一个扫描结果。");
+            var selected = ScanResultsGrid.SelectedItems.Cast<ScanCandidate>().ToList();
+            if (selected.Count != 1) throw new InvalidOperationException("保存字段只支持单选，请只选择一个已经验证有效的扫描结果。");
+            _viewModel.SelectedScanResult = selected[0];
             if (_viewModel.SelectedGame is null || _viewModel.SelectedVersion is null)
                 throw new InvalidOperationException("请先点击顶部的“保存到游戏库”，再保存字段。");
-            var dialog = new SaveFieldDialog { Owner = this };
+            var dialog = new SaveFieldDialog(_viewModel.GetAvailableGroups()) { Owner = this };
             if (dialog.ShowDialog() != true) return;
-            await _viewModel.SaveSelectedCandidateAsync(dialog.FieldName, dialog.GroupName, dialog.Note);
+            await _viewModel.SaveSelectedCandidateAsync(dialog.FieldName, dialog.GroupName);
         });
     }
 
-    private async void RelocateField_OnClick(object sender, RoutedEventArgs e) =>
-        await RunGuardedAsync(_viewModel.RelocateSelectedFieldAsync);
+    private async void RefreshFields_OnClick(object sender, RoutedEventArgs e) =>
+        await RunGuardedAsync(_viewModel.RefreshSavedValuesAsync);
 
-    private void RefreshFields_OnClick(object sender, RoutedEventArgs e) => RunGuarded(_viewModel.RefreshSavedValues);
+    private async void AddAdapterField_OnClick(object sender, RoutedEventArgs e)
+    {
+        await RunGuardedAsync(async () =>
+        {
+            if (_viewModel.SelectedGame is null || _viewModel.SelectedVersion is null)
+                throw new InvalidOperationException("请先点击顶部的“保存到游戏库”，再添加专属字段。");
+            var dialog = new AdapterFieldDialog(_viewModel.GetAvailableGroups()) { Owner = this };
+            if (dialog.ShowDialog() != true) return;
+            await _viewModel.AddAdapterFieldAsync(dialog.FieldKey, dialog.DisplayName, dialog.GroupName);
+        });
+    }
+
+    private async void Theme_OnSelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded || _viewModel.SelectedTheme is null) return;
+        await RunGuardedAsync(() => _viewModel.ChangeThemeAsync(_viewModel.SelectedTheme));
+    }
 
     private async void WriteField_OnClick(object sender, RoutedEventArgs e)
     {
         await RunGuardedAsync(async () =>
         {
             var field = _viewModel.SelectedSavedField ?? throw new InvalidOperationException("请先选择一个已保存字段。");
-            var initial = field.CurrentValue == "—" ? string.Empty : field.CurrentValue;
-            var dialog = new TextInputDialog("修改数值", $"输入“{field.Name}”的新值（{field.TypeDisplay}）：", initial) { Owner = this };
+            var dialog = new ModifyFieldDialog(field.Name, field.Group, field.CurrentValue, _viewModel.GetAvailableGroups()) { Owner = this };
             if (dialog.ShowDialog() != true) return;
-            await _viewModel.WriteSelectedFieldAsync(dialog.Value);
+            await _viewModel.UpdateSelectedFieldAsync(dialog.FieldName, dialog.GroupName, dialog.FieldValue);
         });
+    }
+
+    private async void RefreshAdapterInventory_OnClick(object sender, RoutedEventArgs e) =>
+        await RunGuardedAsync(_viewModel.RefreshAdapterInventoryAsync);
+
+    private async void WriteAdapterItem_OnClick(object sender, RoutedEventArgs e) =>
+        await EditSelectedAdapterItemsAsync();
+
+    private async void AdapterInventoryGrid_OnMouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (FindAncestor<DataGridRow>(e.OriginalSource as DependencyObject) is null) return;
+        await EditSelectedAdapterItemsAsync();
+    }
+
+    private async Task EditSelectedAdapterItemsAsync()
+    {
+        await RunGuardedAsync(async () =>
+        {
+            var items = AdapterInventoryGrid.SelectedItems.Cast<AdapterInventoryItem>().ToList();
+            if (items.Count == 0) throw new InvalidOperationException("请至少选择一个背包物品。");
+            var initialValue = items.Count == 1 ? items[0].CountDisplay : string.Empty;
+            var prompt = items.Count == 1
+                ? $"输入“{items[0].DisplayName}”的新物品总数（不限制为 9999）："
+                : $"把选中的 {items.Count:N0} 种物品修改为同一个物品总数（不限制为 9999）：";
+            var dialog = new TextInputDialog(
+                items.Count == 1 ? "修改背包物品数量" : "批量修改背包物品数量",
+                prompt,
+                initialValue) { Owner = this };
+            if (dialog.ShowDialog() != true) return;
+            await _viewModel.WriteAdapterItemsAsync(items, dialog.Value);
+        });
+    }
+
+    private async void SaveAdapterItem_OnClick(object sender, RoutedEventArgs e)
+    {
+        await RunGuardedAsync(async () =>
+        {
+            var selected = AdapterInventoryGrid.SelectedItems.Cast<AdapterInventoryItem>().ToList();
+            if (selected.Count != 1) throw new InvalidOperationException("添加到已保存字段只支持单选，请只选择一种物品。");
+            var item = selected[0];
+            _viewModel.SelectedAdapterItem = item;
+            if (_viewModel.SelectedGame is null || _viewModel.SelectedVersion is null)
+                throw new InvalidOperationException("请先点击顶部的“保存到游戏库”，再保存字段。");
+            var dialog = new AdapterFieldDialog(
+                _viewModel.GetAvailableGroups(), item.FieldKey, item.DisplayName) { Owner = this };
+            if (dialog.ShowDialog() != true) return;
+            await _viewModel.AddAdapterFieldAsync(dialog.FieldKey, dialog.DisplayName, dialog.GroupName);
+        });
+    }
+
+    private async void ScanResultsGrid_OnMouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (FindAncestor<DataGridRow>(e.OriginalSource as DependencyObject) is null) return;
+        await EditSelectedScanResultsAsync();
+    }
+
+    private async void WriteScanResults_OnClick(object sender, RoutedEventArgs e) =>
+        await EditSelectedScanResultsAsync();
+
+    private async Task EditSelectedScanResultsAsync()
+    {
+        await RunGuardedAsync(async () =>
+        {
+            var candidates = ScanResultsGrid.SelectedItems.Cast<ScanCandidate>().ToList();
+            if (candidates.Count == 0) throw new InvalidOperationException("请至少选择一个扫描结果。");
+            var candidate = candidates[0];
+            var prompt = candidates.Count == 1
+                ? $"输入 {candidate.AddressDisplay} 的新界面值（{candidate.RoutineDisplay}）："
+                : $"把选中的 {candidates.Count:N0} 个候选地址修改为同一个界面值：";
+            var dialog = new TextInputDialog(
+                candidates.Count == 1 ? "临时修改候选地址" : "批量修改候选地址",
+                prompt,
+                candidates.Count == 1 ? candidate.CurrentDisplay : string.Empty) { Owner = this };
+            if (dialog.ShowDialog() != true) return;
+            await _viewModel.WriteCandidatesAsync(candidates, dialog.Value);
+        });
+    }
+
+    private void ScanResultsGrid_OnSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        var count = ScanResultsGrid.SelectedItems.Count;
+        if (WriteScanResultsButton is not null) WriteScanResultsButton.IsEnabled = count > 0;
+        if (SaveScanFieldButton is not null) SaveScanFieldButton.IsEnabled = count == 1;
+    }
+
+    private void AdapterInventoryGrid_OnSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        var count = AdapterInventoryGrid.SelectedItems.Count;
+        if (WriteAdapterItemsButton is not null) WriteAdapterItemsButton.IsEnabled = count > 0;
+        if (SaveAdapterFieldButton is not null) SaveAdapterFieldButton.IsEnabled = count == 1;
+    }
+
+    private async void SavedFieldsGrid_OnMouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        var cell = FindAncestor<DataGridCell>(e.OriginalSource as DependencyObject);
+        if (cell?.DataContext is not Models.SavedField field) return;
+        _viewModel.SelectedSavedField = field;
+        var header = cell.Column.Header?.ToString();
+        if (header == "锁定状态") return;
+
+        await RunGuardedAsync(async () =>
+        {
+            switch (header)
+            {
+                case "备注名称":
+                {
+                    var dialog = new TextInputDialog("修改备注名称", "新的备注名称：", field.Name) { Owner = this };
+                    if (dialog.ShowDialog() == true) await _viewModel.RenameSelectedFieldAsync(dialog.Value);
+                    break;
+                }
+                case "分组":
+                {
+                    var dialog = new GroupInputDialog(_viewModel.GetAvailableGroups(), field.Group) { Owner = this };
+                    if (dialog.ShowDialog() == true) await _viewModel.ChangeSelectedFieldGroupAsync(dialog.GroupName);
+                    break;
+                }
+                case "当前值":
+                {
+                    var initial = field.CurrentValue == "—" ? string.Empty : field.CurrentValue;
+                    var dialog = new TextInputDialog("修改字段值", $"输入“{field.Name}”的新值：", initial) { Owner = this };
+                    if (dialog.ShowDialog() == true) await _viewModel.WriteSelectedFieldAsync(dialog.Value);
+                    break;
+                }
+            }
+        });
+    }
+
+    private async void SavedFieldsGrid_OnPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        var cell = FindAncestor<DataGridCell>(e.OriginalSource as DependencyObject);
+        if (cell?.Column.Header?.ToString() != "锁定状态" || cell.DataContext is not Models.SavedField field) return;
+        e.Handled = true;
+        _viewModel.SelectedSavedField = field;
+        await RunGuardedAsync(_viewModel.ToggleSelectedFieldValueLockAsync);
+    }
+
+    private static T? FindAncestor<T>(DependencyObject? source) where T : DependencyObject
+    {
+        while (source is not null)
+        {
+            if (source is T result) return result;
+            source = VisualTreeHelper.GetParent(source);
+        }
+        return null;
     }
 
     private async void DeleteField_OnClick(object sender, RoutedEventArgs e)
@@ -132,16 +319,18 @@ public partial class MainWindow : Window
         await RunGuardedAsync(async () =>
         {
             var field = _viewModel.SelectedSavedField ?? throw new InvalidOperationException("请先选择字段。");
-            var answer = MessageBox.Show(this, $"确定删除字段“{field.Name}”吗？", "删除字段", MessageBoxButton.YesNo, MessageBoxImage.Warning);
-            if (answer == MessageBoxResult.Yes) await _viewModel.DeleteSelectedFieldAsync();
+            if (MessageDialog.Confirm(this, "删除字段", $"确定删除字段“{field.Name}”吗？"))
+                await _viewModel.DeleteSelectedFieldAsync();
         });
     }
 
     private void OpenLibraryFolder_OnClick(object sender, RoutedEventArgs e) => RunGuarded(() =>
     {
+        var directory = Path.GetDirectoryName(_viewModel.LibraryPath)
+                        ?? throw new InvalidOperationException("无法确定本地数据目录。");
+        Directory.CreateDirectory(directory);
         var info = new ProcessStartInfo("explorer.exe") { UseShellExecute = true };
-        info.ArgumentList.Add("/select,");
-        info.ArgumentList.Add(_viewModel.LibraryPath);
+        info.ArgumentList.Add(directory);
         Process.Start(info);
     });
 
@@ -157,10 +346,6 @@ public partial class MainWindow : Window
         catch (Exception exception) { ShowError(exception); }
     }
 
-    private void ShowError(Exception exception) => MessageBox.Show(
-        this,
-        exception.Message,
-        "操作未完成",
-        MessageBoxButton.OK,
-        MessageBoxImage.Information);
+    private void ShowError(Exception exception) =>
+        MessageDialog.ShowInfo(this, "操作未完成", exception.Message);
 }

@@ -3,6 +3,7 @@ bin/
 obj/
 artifacts/
 dist/
+preview/
 
 ## Visual Studio / Rider
 .vs/
