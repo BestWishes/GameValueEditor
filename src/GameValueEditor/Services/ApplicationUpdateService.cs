@@ -9,36 +9,61 @@ namespace GameValueEditor.Services;
 
 public sealed class ApplicationUpdateService
 {
-    private const string LatestReleaseApi = "https://api.github.com/repos/BestWishes/GameValueEditor/releases/latest";
+    private const string ReleasesApi = "https://api.github.com/repos/BestWishes/GameValueEditor/releases?per_page=50";
     private readonly HttpClient _httpClient;
     private readonly string _updatesDirectory;
+    private readonly string _currentVersion;
 
-    public ApplicationUpdateService(string updatesDirectory, HttpClient? httpClient = null)
+    public ApplicationUpdateService(
+        string updatesDirectory,
+        HttpClient? httpClient = null,
+        string? currentVersion = null)
     {
         _updatesDirectory = updatesDirectory;
+        _currentVersion = currentVersion ?? ApplicationVersion.Current;
         _httpClient = httpClient ?? new HttpClient();
-        if (!_httpClient.DefaultRequestHeaders.UserAgent.Any())
+        if (httpClient is null)
+        {
             _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("GameValueEditor-Updater/1.0");
-        _httpClient.Timeout = TimeSpan.FromSeconds(30);
+            _httpClient.Timeout = TimeSpan.FromSeconds(30);
+        }
     }
 
     public string PendingManifestPath => Path.Combine(_updatesDirectory, "pending-update.json");
 
     public async Task<ApplicationUpdateCheckResult> CheckAsync(CancellationToken cancellationToken = default)
     {
-        using var response = await _httpClient.GetAsync(LatestReleaseApi, cancellationToken);
+        using var response = await _httpClient.GetAsync(ReleasesApi, cancellationToken);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        var release = await JsonSerializer.DeserializeAsync<GitHubRelease>(stream, cancellationToken: cancellationToken)
-                      ?? throw new InvalidOperationException("无法读取 GitHub 版本信息。");
-        var latestText = release.TagName.TrimStart('v', 'V');
-        if (!SemanticVersion.TryParse(ApplicationVersion.Current, out var current) ||
-            !SemanticVersion.TryParse(latestText, out var latest))
-            throw new InvalidOperationException("无法比较当前版本与 GitHub 最新版本。");
+        var releases = await JsonSerializer.DeserializeAsync<List<GitHubRelease>>(stream,
+                           cancellationToken: cancellationToken)
+                       ?? throw new InvalidOperationException("无法读取 GitHub 版本信息。");
+        if (!SemanticVersion.TryParse(_currentVersion, out var current))
+            throw new InvalidOperationException($"当前应用版本号无效：{_currentVersion}");
 
-        var asset = release.Assets.FirstOrDefault(item =>
-                        item.Name.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase))
-                    ?? throw new InvalidOperationException("最新正式版没有 Windows x64 发布包。");
+        var acceptPrerelease = !string.IsNullOrEmpty(current.PreRelease);
+        GitHubRelease? latestRelease = null;
+        GitHubAsset? asset = null;
+        SemanticVersion latest = default;
+        var latestText = string.Empty;
+        foreach (var release in releases)
+        {
+            if (release.Draft) continue;
+            var releaseText = release.TagName.TrimStart('v', 'V');
+            if (!SemanticVersion.TryParse(releaseText, out var releaseVersion)) continue;
+            if (!acceptPrerelease && (release.Prerelease || !string.IsNullOrEmpty(releaseVersion.PreRelease)))
+                continue;
+            var releaseAsset = release.Assets.FirstOrDefault(IsApplicationPackage);
+            if (releaseAsset is null || latestRelease is not null && releaseVersion.CompareTo(latest) <= 0) continue;
+            latestRelease = release;
+            asset = releaseAsset;
+            latest = releaseVersion;
+            latestText = releaseText;
+        }
+
+        if (latestRelease is null || asset is null)
+            throw new InvalidOperationException("GitHub 暂无可用的 Windows x64 应用发布包。");
         var digest = asset.Digest?.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) == true
             ? asset.Digest[7..]
             : string.Empty;
@@ -50,6 +75,10 @@ public sealed class ApplicationUpdateService
             digest,
             asset.Size);
     }
+
+    private static bool IsApplicationPackage(GitHubAsset asset) =>
+        asset.Name.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
+        asset.Name.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase);
 
     public async Task<PendingApplicationUpdate> DownloadAsync(
         ApplicationUpdateCheckResult update,
@@ -145,6 +174,8 @@ public sealed class ApplicationUpdateService
     private sealed class GitHubRelease
     {
         [JsonPropertyName("tag_name")] public string TagName { get; set; } = string.Empty;
+        [JsonPropertyName("draft")] public bool Draft { get; set; }
+        [JsonPropertyName("prerelease")] public bool Prerelease { get; set; }
         [JsonPropertyName("assets")] public List<GitHubAsset> Assets { get; set; } = [];
     }
 

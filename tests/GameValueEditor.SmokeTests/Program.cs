@@ -94,6 +94,17 @@ try
            SemanticVersion.TryParse("1.2.9", out var lowerPatch) && higherPatch.CompareTo(lowerPatch) > 0,
         "Semantic patch comparison failed");
 
+    if (args.Contains("--update-live", StringComparer.OrdinalIgnoreCase))
+    {
+        var liveUpdateRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-LiveUpdate-{Guid.NewGuid():N}");
+        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.2");
+        var liveUpdate = await liveUpdateService.CheckAsync();
+        Assert(liveUpdate.AssetName.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
+               liveUpdate.AssetName.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase),
+            $"Live update check selected a non-application release asset: {liveUpdate.AssetName}");
+        Console.WriteLine($"Live application release passed: v{liveUpdate.Version}, {liveUpdate.AssetName}");
+    }
+
     var connectedGame = new GameProfile { Name = "连接中", IsConnected = true, LastUsedUtc = DateTime.UtcNow.AddDays(-10) };
     var pinnedGame = new GameProfile { Name = "已置顶", IsPinned = true, LastUsedUtc = DateTime.UtcNow };
     var recentGame = new GameProfile { Name = "最近使用", LastUsedUtc = DateTime.UtcNow };
@@ -317,6 +328,75 @@ try
         {
         }
 
+        var releasesJson = """
+        [
+          {
+            "tag_name": "module-fzzml-v1.0.0",
+            "draft": false,
+            "prerelease": false,
+            "assets": [{
+              "name": "GameValueEditor.Module.Fzzml-v1.0.0.zip",
+              "browser_download_url": "https://example.invalid/module.zip",
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "size": 123
+            }]
+          },
+          {
+            "tag_name": "v0.3.0-preview.2",
+            "draft": false,
+            "prerelease": true,
+            "assets": [{
+              "name": "GameValueEditor-v0.3.0-preview.2-win-x64.zip",
+              "browser_download_url": "https://example.invalid/preview.zip",
+              "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "size": 456
+            }]
+          },
+          {
+            "tag_name": "v0.2.0",
+            "draft": false,
+            "prerelease": false,
+            "assets": [{
+              "name": "GameValueEditor-v0.2.0-win-x64.zip",
+              "browser_download_url": "https://example.invalid/stable.zip",
+              "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "size": 789
+            }]
+          }
+        ]
+        """;
+        using var releasesClient = new HttpClient(new StaticResponseHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(releasesJson, Encoding.UTF8, "application/json")
+            }));
+        var previewUpdateService = new ApplicationUpdateService(
+            Path.Combine(serviceTestRoot, "preview-updates"), releasesClient, "0.3.0-preview.1");
+        var previewUpdate = await previewUpdateService.CheckAsync();
+        Assert(previewUpdate.IsUpdateAvailable && previewUpdate.Version == "0.3.0-preview.2",
+            "Preview channel did not select the newest application preview after ignoring module releases");
+        var stableUpdateService = new ApplicationUpdateService(
+            Path.Combine(serviceTestRoot, "stable-updates"), releasesClient, "0.2.0");
+        var stableUpdate = await stableUpdateService.CheckAsync();
+        Assert(!stableUpdate.IsUpdateAvailable && stableUpdate.Version == "0.2.0",
+            "Stable channel unexpectedly selected an application preview or a module release");
+
+        using var failingUpdateClient = new HttpClient(new StaticResponseHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)));
+        var failingUpdateViewModel = new MainViewModel(new ApplicationUpdateService(
+            Path.Combine(serviceTestRoot, "failing-updates"), failingUpdateClient, "0.3.0-preview.2"));
+        try
+        {
+            await failingUpdateViewModel.CheckApplicationUpdateAsync();
+            throw new InvalidOperationException("Failed update check unexpectedly succeeded");
+        }
+        catch (HttpRequestException)
+        {
+        }
+        Assert(failingUpdateViewModel.ApplicationUpdateStatusPrefix == "检查失败 " &&
+               failingUpdateViewModel.ApplicationUpdateActionText == "检查更新",
+            "Failed application update check left the footer in its in-progress state");
+
         var updateArchive = Encoding.UTF8.GetBytes("verified update archive");
         var updateHash = Convert.ToHexString(SHA256.HashData(updateArchive));
         using var updateClient = new HttpClient(new StaticResponseHandler(_ =>
@@ -337,7 +417,13 @@ try
         GC.WaitForPendingFinalizers();
         GC.Collect();
         if (serviceTestRoot.StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase))
-            Directory.Delete(serviceTestRoot, true);
+        {
+            try { Directory.Delete(serviceTestRoot, true); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                Console.WriteLine($"Deferred temporary module cleanup: {exception.Message}");
+            }
+        }
     }
 
     Exception? dialogFailure = null;

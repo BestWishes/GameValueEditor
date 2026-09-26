@@ -95,12 +95,12 @@ public sealed class MainViewModel : ObservableObject
     private bool _applicationUpdateDownloaded;
     private bool _isOfficialWebsiteControlBlocked;
 
-    public MainViewModel()
+    public MainViewModel(ApplicationUpdateService? applicationUpdateService = null)
     {
         _speedService = _idleSpeedService;
         _gameIconService = new GameIconService(_profileStore.IconsDirectory);
         _moduleCatalogService = new GameModuleCatalogService(_profileStore.ModulesDirectory);
-        _applicationUpdateService = new ApplicationUpdateService(_profileStore.UpdatesDirectory);
+        _applicationUpdateService = applicationUpdateService ?? new ApplicationUpdateService(_profileStore.UpdatesDirectory);
         _adapterRegistry = new GameAdapterRegistry(_profileStore.ModulesDirectory);
     }
 
@@ -1304,8 +1304,16 @@ public sealed class MainViewModel : ObservableObject
             {
                 ApplicationUpdateStatusPrefix = "已最新 ";
                 ApplicationUpdateActionText = "检查更新";
-                StatusText = "肝肾大圣当前已是最新正式版";
+                StatusText = "肝肾大圣当前已是最新版本";
             }
+        }
+        catch
+        {
+            _applicationUpdateResult = null;
+            ApplicationUpdateStatusPrefix = "检查失败 ";
+            ApplicationUpdateActionText = "检查更新";
+            StatusText = "检查肝肾大圣更新失败，请稍后重试";
+            throw;
         }
         finally
         {
