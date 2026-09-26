@@ -14,6 +14,7 @@
             <Grid Margin="18,10">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="330"/>
+                    <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
@@ -21,7 +22,12 @@
                     <TextBlock Text="肝肾大圣-单机游戏数值编辑器" FontSize="19" FontWeight="SemiBold"/>
                     <TextBlock Text="LOCAL GAME VALUE EDITOR" FontSize="10" Foreground="{DynamicResource AccentBrush}"/>
                 </StackPanel>
-                <ComboBox Grid.Column="1" Margin="8,0" ItemsSource="{Binding Processes}"
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <ComboBox Width="82" ItemsSource="{Binding Themes}" SelectedItem="{Binding SelectedTheme}"
+                              DisplayMemberPath="Display" SelectionChanged="Theme_OnSelectionChanged" ToolTip="切换应用主题"/>
+                    <Button Content="刷新进程" IsEnabled="{Binding CanRefreshProcesses}" Click="RefreshProcesses_OnClick"/>
+                </StackPanel>
+                <ComboBox Grid.Column="2" Margin="8,0" ItemsSource="{Binding Processes}"
                           SelectedItem="{Binding SelectedProcess}"
                           MaxWidth="660" HorizontalAlignment="Stretch" VerticalAlignment="Center">
                     <ComboBox.ItemTemplate>
@@ -33,13 +39,8 @@
                         </DataTemplate>
                     </ComboBox.ItemTemplate>
                 </ComboBox>
-                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                    <ComboBox Width="82" ItemsSource="{Binding Themes}" SelectedItem="{Binding SelectedTheme}"
-                              DisplayMemberPath="Display" SelectionChanged="Theme_OnSelectionChanged" ToolTip="切换应用主题"/>
-                    <Button Content="刷新进程" Click="RefreshProcesses_OnClick"/>
-                    <Button Content="连接" Click="AttachProcess_OnClick"/>
-                    <Button Content="保存到游戏库" Click="AddGame_OnClick"/>
-                </StackPanel>
+                <Button Grid.Column="3" Content="连接" IsEnabled="{Binding CanConnectProcess}" Click="AttachProcess_OnClick"
+                        VerticalAlignment="Center"/>
             </Grid>
         </Border>
 
@@ -108,9 +109,9 @@
                             <Button Content="重命名" Click="RenameGame_OnClick"/>
                         </UniformGrid>
                         <UniformGrid Grid.Row="1" Columns="3">
-                            <Button Content="连接游戏" Click="AttachSelectedGame_OnClick"/>
-                            <Button Content="断开连接" Click="DisconnectSelectedGame_OnClick"/>
-                            <Button Content="删除游戏" Click="DeleteGame_OnClick"/>
+                            <Button Content="连接游戏" IsEnabled="{Binding CanConnectSelectedGame}" Click="AttachSelectedGame_OnClick"/>
+                            <Button Content="断开连接" IsEnabled="{Binding CanDisconnectSelectedGame}" Click="DisconnectSelectedGame_OnClick"/>
+                            <Button Content="从库移出" IsEnabled="{Binding CanRemoveCurrentGame}" Click="DeleteGame_OnClick"/>
                         </UniformGrid>
                     </Grid>
                 </Grid>
@@ -127,15 +128,50 @@
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="320"/>
                     </Grid.ColumnDefinitions>
-                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <Border Width="48" Height="48" CornerRadius="9" Background="{DynamicResource PanelRaisedBrush}" Margin="0,0,12,0">
+                    <Grid VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Border Grid.RowSpan="2" Width="48" Height="48" CornerRadius="9" Background="{DynamicResource PanelRaisedBrush}" Margin="0,0,12,0">
                             <Image Source="{Binding ActiveGameIcon}" Width="38" Height="38" Stretch="Uniform"/>
                         </Border>
-                        <StackPanel VerticalAlignment="Center">
-                            <TextBlock Text="{Binding ActiveGameDisplayName}" FontSize="25" FontWeight="SemiBold"/>
-                            <TextBlock Text="{Binding ConnectionText}" Foreground="{DynamicResource AccentBrush}" Margin="0,4,0,0"/>
-                        </StackPanel>
-                    </StackPanel>
+                        <Grid Grid.Column="1">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="{Binding ActiveGameDisplayName}" FontSize="25" FontWeight="SemiBold"
+                                           TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                                <TextBlock Grid.Column="1" Text="{Binding LibraryStatusText}" FontWeight="SemiBold"
+                                           Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" Margin="24,0,8,0"/>
+                                <Button Grid.Column="2" Content="保存到游戏库" IsEnabled="{Binding CanSaveCurrentGame}"
+                                        Click="AddGame_OnClick" Padding="11,5" Margin="0,0,6,0"/>
+                                <Button Grid.Column="3" Content="从库移出" IsEnabled="{Binding CanRemoveCurrentGame}"
+                                        Click="DeleteGame_OnClick" Padding="11,5"/>
+                            </Grid>
+                            <Grid Grid.Row="1" Margin="0,3,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="{Binding ConnectionText}" Foreground="{DynamicResource AccentBrush}"
+                                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                                <Button Grid.Column="1" Content="连接" IsEnabled="{Binding CanConnectProcess}"
+                                        Click="AttachProcess_OnClick" Padding="11,4" Margin="24,0,6,0"/>
+                                <Button Grid.Column="2" Content="断开" IsEnabled="{Binding CanDisconnectCurrentProcess}"
+                                        Click="DisconnectCurrentProcess_OnClick" Padding="11,4"/>
+                            </Grid>
+                        </Grid>
+                    </Grid>
                     <StackPanel Grid.Column="1" VerticalAlignment="Center">
                         <TextBlock Text="游戏版本" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,5"/>
                         <ComboBox ItemsSource="{Binding SelectedGame.Versions}" SelectedItem="{Binding SelectedVersion}">
@@ -153,10 +189,10 @@
                     <DockPanel LastChildFill="False">
                         <TextBlock Text="{Binding SpeedStatusText}" FontWeight="SemiBold" VerticalAlignment="Center"
                                    Margin="2,0,18,0" MinWidth="105"/>
-                        <TextBlock Text="倍数：" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                        <TextBox Text="{Binding SpeedMultiplier, UpdateSourceTrigger=PropertyChanged}" Width="70"
-                                 ToolTip="输入 1 到 100 的整数"/>
-                        <Button Content="加速" IsEnabled="{Binding CanAccelerate}" Click="AccelerateGame_OnClick"/>
+                        <TextBlock Text="倍数（0.01~100.00）：" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                        <TextBox Text="{Binding SpeedMultiplier, UpdateSourceTrigger=PropertyChanged}" Width="76"
+                                 ToolTip="输入 0.01 到 100.00，最多两位小数"/>
+                        <Button Content="应用倍速" IsEnabled="{Binding CanAccelerate}" Click="AccelerateGame_OnClick"/>
                         <Button Content="回正" IsEnabled="{Binding CanRestoreSpeed}" Click="RestoreGameSpeed_OnClick"/>
                     </DockPanel>
                 </Border>

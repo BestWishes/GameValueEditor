@@ -37,25 +37,18 @@ public partial class MainWindow : Window
         }
     }
 
-    private void RefreshProcesses_OnClick(object sender, RoutedEventArgs e) => RunGuarded(_viewModel.RefreshProcesses);
+    private async void RefreshProcesses_OnClick(object sender, RoutedEventArgs e) =>
+        await RunGuardedAsync(_viewModel.RefreshProcessesWithCooldownAsync);
 
-    private async void AttachProcess_OnClick(object sender, RoutedEventArgs e) => await RunGuardedAsync(async () =>
-    {
-        var process = _viewModel.SelectedProcess ?? throw new InvalidOperationException("请先从顶部选择一个进程。");
-        _viewModel.Attach(process);
-        await _viewModel.MatchAttachedVersionAsync();
-    });
+    private async void AttachProcess_OnClick(object sender, RoutedEventArgs e) =>
+        await RunGuardedAsync(_viewModel.AttachSelectedProcessAsync);
 
     private async void AddGame_OnClick(object sender, RoutedEventArgs e)
     {
         await RunGuardedAsync(async () =>
         {
-            var process = _viewModel.AttachedProcess;
-            if (process is null)
-            {
-                process = _viewModel.SelectedProcess ?? throw new InvalidOperationException("请先选择并连接一个游戏进程。");
-                _viewModel.Attach(process);
-            }
+            var process = _viewModel.AttachedProcess
+                          ?? throw new InvalidOperationException("请先连接一个游戏进程。");
 
             var defaultName = _viewModel.SelectedGame?.Name;
             if (string.IsNullOrWhiteSpace(defaultName))
@@ -65,7 +58,7 @@ public partial class MainWindow : Window
             }
             defaultName = string.IsNullOrWhiteSpace(defaultName) ? process.ProcessName : defaultName;
 
-            var dialog = new TextInputDialog("保存游戏", "游戏在左侧列表中显示的名称：", defaultName) { Owner = this };
+            var dialog = new TextInputDialog("保存到游戏库", "备注名称：", defaultName) { Owner = this };
             if (dialog.ShowDialog() != true) return;
             await _viewModel.AddCurrentProcessToLibraryAsync(dialog.Value);
         });
@@ -91,20 +84,23 @@ public partial class MainWindow : Window
     private async void AttachSelectedGame_OnClick(object sender, RoutedEventArgs e) =>
         await RunGuardedAsync(_viewModel.AttachSelectedGameAsync);
 
-    private void DisconnectSelectedGame_OnClick(object sender, RoutedEventArgs e) =>
-        RunGuarded(_viewModel.DisconnectSelectedGame);
+    private async void DisconnectSelectedGame_OnClick(object sender, RoutedEventArgs e) =>
+        await RunGuardedAsync(_viewModel.DisconnectSelectedGameAsync);
+
+    private async void DisconnectCurrentProcess_OnClick(object sender, RoutedEventArgs e) =>
+        await RunGuardedAsync(_viewModel.DisconnectCurrentProcessAsync);
 
     private async void DeleteGame_OnClick(object sender, RoutedEventArgs e)
     {
         await RunGuardedAsync(async () =>
         {
             var game = _viewModel.SelectedGame ?? throw new InvalidOperationException("请先选择游戏条目。");
-            if (game.IsPinned) throw new InvalidOperationException("置顶游戏不能删除，请先取消置顶。");
-            if (game.IsLocked) throw new InvalidOperationException("锁定游戏不能删除，请先解锁。");
+            if (game.IsPinned) throw new InvalidOperationException("置顶游戏不能从库移出，请先取消置顶。");
+            if (game.IsLocked) throw new InvalidOperationException("锁定游戏不能从库移出，请先解锁。");
             if (MessageDialog.Confirm(
                     this,
-                    "删除游戏条目",
-                    $"确定删除“{game.Name}”及其全部版本和字段配置吗？\n这个操作不会修改游戏文件。"))
+                    "从游戏库移出",
+                    $"确定将“{game.Name}”及其全部版本和字段配置从游戏库移出吗？\n这个操作不会修改游戏文件；如果游戏正在连接，当前连接会继续保留。"))
                 await _viewModel.DeleteSelectedGameAsync();
         });
     }
@@ -163,7 +159,7 @@ public partial class MainWindow : Window
             if (selected.Count != 1) throw new InvalidOperationException("保存字段只支持单选，请只选择一个已经验证有效的扫描结果。");
             _viewModel.SelectedScanResult = selected[0];
             if (_viewModel.SelectedGame is null || _viewModel.SelectedVersion is null)
-                throw new InvalidOperationException("请先点击顶部的“保存到游戏库”，再保存字段。");
+                throw new InvalidOperationException("请先点击游戏名称后的“保存到游戏库”，再保存字段。");
             var dialog = new SaveFieldDialog(_viewModel.GetAvailableGroups()) { Owner = this };
             if (dialog.ShowDialog() != true) return;
             await _viewModel.SaveSelectedCandidateAsync(dialog.FieldName, dialog.GroupName);
@@ -178,7 +174,7 @@ public partial class MainWindow : Window
         await RunGuardedAsync(async () =>
         {
             if (_viewModel.SelectedGame is null || _viewModel.SelectedVersion is null)
-                throw new InvalidOperationException("请先点击顶部的“保存到游戏库”，再添加专属字段。");
+                throw new InvalidOperationException("请先点击游戏名称后的“保存到游戏库”，再添加专属字段。");
             var dialog = new AdapterFieldDialog(_viewModel.GetAvailableGroups()) { Owner = this };
             if (dialog.ShowDialog() != true) return;
             await _viewModel.AddAdapterFieldAsync(dialog.FieldKey, dialog.DisplayName, dialog.GroupName);
@@ -242,7 +238,7 @@ public partial class MainWindow : Window
             var item = selected[0];
             _viewModel.SelectedAdapterItem = item;
             if (_viewModel.SelectedGame is null || _viewModel.SelectedVersion is null)
-                throw new InvalidOperationException("请先点击顶部的“保存到游戏库”，再保存字段。");
+                throw new InvalidOperationException("请先点击游戏名称后的“保存到游戏库”，再保存字段。");
             var dialog = new AdapterFieldDialog(
                 _viewModel.GetAvailableGroups(), item.FieldKey, item.DisplayName) { Owner = this };
             if (dialog.ShowDialog() != true) return;

@@ -97,7 +97,7 @@ try
     if (args.Contains("--update-live", StringComparer.OrdinalIgnoreCase))
     {
         var liveUpdateRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-LiveUpdate-{Guid.NewGuid():N}");
-        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.2");
+        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.3");
         var liveUpdate = await liveUpdateService.CheckAsync();
         Assert(liveUpdate.AssetName.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
                liveUpdate.AssetName.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase),
@@ -128,13 +128,22 @@ try
     {
         var ready = await speedTarget.StandardOutput.ReadLineAsync();
         Assert(ready?.StartsWith("READY ", StringComparison.Ordinal) == true, $"Unexpected speed target handshake: {ready}");
-        var hookResult = speedService.Accelerate(speedTarget.Id, 4);
+        try
+        {
+            speedService.Accelerate(speedTarget.Id, 0.001);
+            throw new InvalidOperationException("Speed multiplier below 0.01 unexpectedly succeeded");
+        }
+        catch (InvalidOperationException exception) when (exception.Message.Contains("0.01", StringComparison.Ordinal))
+        {
+        }
+        var hookResult = speedService.Accelerate(speedTarget.Id, 2.5);
         Assert(hookResult.PatchedImportCount > 0, "No clock imports were patched");
         var acceleratedLine = await speedTarget.StandardOutput.ReadLineAsync();
         Assert(long.TryParse(acceleratedLine, out var acceleratedElapsed),
             $"Speed target returned an invalid sample: {acceleratedLine} ms");
         if (!string.IsNullOrWhiteSpace(nativeSpeedTargetPath))
-            Assert(acceleratedElapsed >= 2500, $"Native speed target did not accelerate: {acceleratedLine} ms");
+            Assert(acceleratedElapsed is >= 1500 and <= 3800,
+                $"Native speed target did not apply 2.5x: {acceleratedLine} ms");
         speedService.DetachSafely();
         Assert(!speedService.HasHooks && speedService.Multiplier == 1,
             "Safe detach kept editor-owned speed state alive");
@@ -145,25 +154,25 @@ try
             Assert(normalizedDelta is >= 500 and <= 1800,
                 $"Closing-time safe detach did not preserve continuous normal speed: delta={normalizedDelta} ms");
 
-        var reattached = speedService.Accelerate(speedTarget.Id, 3);
+        var reattached = speedService.Accelerate(speedTarget.Id, 0.5);
         Assert(reattached.PatchedImportCount > 0, "Could not reattach to persistent normal-speed wrappers");
         var reacceleratedLine = await speedTarget.StandardOutput.ReadLineAsync();
         Assert(long.TryParse(reacceleratedLine, out var reacceleratedElapsed),
             $"Invalid reaccelerated sample: {reacceleratedLine}");
         var reacceleratedDelta = reacceleratedElapsed - normalizedElapsed;
         if (!string.IsNullOrWhiteSpace(nativeSpeedTargetPath))
-            Assert(reacceleratedDelta is >= 1800 and <= 4200,
-                $"Reattaching after editor close lost clock continuity: delta={reacceleratedDelta} ms");
+            Assert(reacceleratedDelta is >= 150 and <= 1100,
+                $"Reattaching at 0.5x lost clock continuity: delta={reacceleratedDelta} ms");
 
-        var changedMultiplier = speedService.Accelerate(speedTarget.Id, 2);
+        var changedMultiplier = speedService.Accelerate(speedTarget.Id, 0.75);
         Assert(changedMultiplier.PatchedImportCount > 0, "Changing an active multiplier did not reattach speed hooks");
         var changedMultiplierLine = await speedTarget.StandardOutput.ReadLineAsync();
         Assert(long.TryParse(changedMultiplierLine, out var changedMultiplierElapsed),
             $"Invalid changed-multiplier sample: {changedMultiplierLine}");
         var changedMultiplierDelta = changedMultiplierElapsed - reacceleratedElapsed;
         if (!string.IsNullOrWhiteSpace(nativeSpeedTargetPath))
-            Assert(changedMultiplierDelta is >= 1200 and <= 3200,
-                $"Changing an active multiplier lost clock continuity: delta={changedMultiplierDelta} ms");
+            Assert(changedMultiplierDelta is >= 300 and <= 1400,
+                $"Changing to 0.75x lost clock continuity: delta={changedMultiplierDelta} ms");
         await speedTarget.WaitForExitAsync();
         Assert(speedTarget.ExitCode == 0, $"Speed target exited with {speedTarget.ExitCode}");
     }
@@ -183,13 +192,15 @@ try
         Assert(ready?.StartsWith("READY ", StringComparison.Ordinal) == true,
             $"Unexpected speed stress target handshake: {ready}");
         speedService.Accelerate(speedStressTarget.Id, 5);
-        for (var transition = 0; transition < 12; transition++)
+        var stressMultipliers = new[] { 0.01d, 0.5d, 0.75d, 2.5d, 20d, 100d, 1d };
+        for (var transition = 0; transition < 21; transition++)
         {
             await Task.Delay(15);
-            if (transition % 3 == 2)
+            var multiplier = stressMultipliers[transition % stressMultipliers.Length];
+            if (multiplier == 1d)
                 speedService.Normalize();
             else
-                speedService.Accelerate(speedStressTarget.Id, transition % 2 == 0 ? 2 : 5);
+                speedService.Accelerate(speedStressTarget.Id, multiplier);
         }
         speedService.DetachSafely();
         await speedStressTarget.StandardInput.WriteLineAsync("STOP");
@@ -211,8 +222,8 @@ try
     Assert(!cooldownViewModel.CanAccelerate && !cooldownViewModel.CanRestoreSpeed,
         "Speed buttons were not disabled during the two-second interaction cooldown");
     await Task.Delay(2200);
-    Assert(cooldownViewModel.CanAccelerate && cooldownViewModel.CanRestoreSpeed,
-        "Speed buttons did not recover after the interaction cooldown");
+    Assert(!cooldownViewModel.CanAccelerate && !cooldownViewModel.CanRestoreSpeed,
+        "Speed buttons became enabled without an attached game after the interaction cooldown");
 
     var profileTestRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-Smoke-{Guid.NewGuid():N}");
     Directory.CreateDirectory(profileTestRoot);

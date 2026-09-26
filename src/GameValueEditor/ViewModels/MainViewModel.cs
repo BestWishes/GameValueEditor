@@ -82,6 +82,9 @@ public sealed class MainViewModel : ObservableObject
     private string _speedMultiplier = "2";
     private bool _isSpeedActive;
     private bool _isSpeedControlBlocked;
+    private bool _isProcessRefreshBlocked;
+    private bool _isConnectionControlBlocked;
+    private bool _isLibraryControlBlocked;
     private int _scanResultCount;
     private CancellationTokenSource? _scanCancellation;
     private bool _suppressGameActivation;
@@ -163,6 +166,8 @@ public sealed class MainViewModel : ObservableObject
             OnPropertyChanged(nameof(HasSelectedGame));
             OnPropertyChanged(nameof(ActiveGameDisplayName));
             OnPropertyChanged(nameof(ActiveGameIcon));
+            NotifyLibraryControls();
+            NotifyConnectionControls();
         }
     }
     public GameProfile? SelectedLibraryGame
@@ -194,7 +199,14 @@ public sealed class MainViewModel : ObservableObject
         }
     }
     public ObservableCollection<SavedField> SavedFields => SelectedVersion?.Fields ?? [];
-    public ProcessItem? SelectedProcess { get => _selectedProcess; set => SetProperty(ref _selectedProcess, value); }
+    public ProcessItem? SelectedProcess
+    {
+        get => _selectedProcess;
+        set
+        {
+            if (SetProperty(ref _selectedProcess, value)) NotifyConnectionControls();
+        }
+    }
     public ProcessItem? AttachedProcess
     {
         get => _attachedProcess;
@@ -203,8 +215,11 @@ public sealed class MainViewModel : ObservableObject
             if (!SetProperty(ref _attachedProcess, value)) return;
             OnPropertyChanged(nameof(HasAttachedProcess));
             OnPropertyChanged(nameof(CanAccelerate));
+            OnPropertyChanged(nameof(CanRestoreSpeed));
             OnPropertyChanged(nameof(ActiveGameDisplayName));
             OnPropertyChanged(nameof(ActiveGameIcon));
+            NotifyLibraryControls();
+            NotifyConnectionControls();
         }
     }
     public ScanCandidate? SelectedScanResult { get => _selectedScanResult; set => SetProperty(ref _selectedScanResult, value); }
@@ -282,12 +297,29 @@ public sealed class MainViewModel : ObservableObject
             OnPropertyChanged(nameof(SpeedStatusText));
         }
     }
-    public bool CanAccelerate => !_isSpeedControlBlocked;
-    public bool CanRestoreSpeed => !_isSpeedControlBlocked;
-    public string SpeedStatusText => IsSpeedActive ? $"{_speedService.Multiplier} 倍加速中" : "正常倍速中";
+    public bool CanAccelerate => !_isSpeedControlBlocked && AttachedProcess is not null;
+    public bool CanRestoreSpeed => !_isSpeedControlBlocked && AttachedProcess is not null;
+    public string SpeedStatusText => _speedService.Multiplier switch
+    {
+        < 1d => $"{FormatSpeedMultiplier(_speedService.Multiplier)} 倍减速中",
+        > 1d => $"{FormatSpeedMultiplier(_speedService.Multiplier)} 倍加速中",
+        _ => "正常倍速中"
+    };
     public int ScanResultCount { get => _scanResultCount; private set => SetProperty(ref _scanResultCount, value); }
     public bool HasSelectedGame => SelectedGame is not null;
     public bool HasAttachedProcess => AttachedProcess is not null;
+    public string LibraryStatusText => SelectedGame is null ? "未入库" : "已入库";
+    public bool CanRefreshProcesses => !_isProcessRefreshBlocked;
+    public bool CanConnectProcess => !_isConnectionControlBlocked && SelectedProcess is not null &&
+        (AttachedProcess is null || AttachedProcess.ProcessId != SelectedProcess.ProcessId ||
+         AttachedProcess.StartTimeUtc != SelectedProcess.StartTimeUtc);
+    public bool CanConnectSelectedGame => !_isConnectionControlBlocked && SelectedGame is not null &&
+        !_sessions.ContainsKey(SelectedGame.Id);
+    public bool CanDisconnectSelectedGame => !_isConnectionControlBlocked && SelectedGame is not null &&
+        _sessions.ContainsKey(SelectedGame.Id);
+    public bool CanDisconnectCurrentProcess => !_isConnectionControlBlocked && AttachedProcess is not null && _activeSession is not null;
+    public bool CanSaveCurrentGame => !_isLibraryControlBlocked && AttachedProcess is not null;
+    public bool CanRemoveCurrentGame => !_isLibraryControlBlocked && SelectedGame is { IsPinned: false, IsLocked: false };
     public bool HasScanSession => _scanCandidates.Count > 0;
     public bool CanUndoScan => !IsBusy && _scanHistory.Count > 0;
     public bool HasActiveAdapter => _activeAdapter is not null;
@@ -371,6 +403,21 @@ public sealed class MainViewModel : ObservableObject
         StatusText = $"发现 {Processes.Count} 个可访问进程";
     }
 
+    public async Task RefreshProcessesWithCooldownAsync()
+    {
+        if (_isProcessRefreshBlocked) throw new InvalidOperationException("正在刷新进程，请稍候再试。");
+        _isProcessRefreshBlocked = true;
+        OnPropertyChanged(nameof(CanRefreshProcesses));
+        var cooldown = Task.Delay(TimeSpan.FromSeconds(2));
+        try { RefreshProcesses(); }
+        finally
+        {
+            await cooldown;
+            _isProcessRefreshBlocked = false;
+            OnPropertyChanged(nameof(CanRefreshProcesses));
+        }
+    }
+
     public void Attach(ProcessItem process, GameProfile? preferredGame = null)
     {
         CaptureActiveSession();
@@ -414,28 +461,61 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
+    public async Task AttachSelectedProcessAsync()
+    {
+        var process = SelectedProcess ?? throw new InvalidOperationException("请先从顶部选择一个进程。");
+        if (!CanConnectProcess) throw new InvalidOperationException("当前进程已经连接，或连接操作尚未完成。");
+        var cooldown = BeginConnectionControlInteraction();
+        try
+        {
+            Attach(process);
+            await MatchAttachedVersionAsync();
+        }
+        finally { ReleaseConnectionControlsAfter(cooldown); }
+    }
+
     public async Task AttachSelectedGameAsync()
     {
         var game = SelectedGame ?? throw new InvalidOperationException("请先选择游戏条目。");
-        if (_sessions.TryGetValue(game.Id, out var existing) && IsProcessRunning(existing.Process))
+        if (!CanConnectSelectedGame) throw new InvalidOperationException("所选游戏已经连接，或连接操作尚未完成。");
+        var cooldown = BeginConnectionControlInteraction();
+        try
         {
-            ActivateSelectedGameSession(game);
-            StatusText = $"已切换到正在连接的 {game.Name}";
-            return;
+            var process = _processService.FindRunningGame(game)
+                          ?? throw new InvalidOperationException("没有检测到这个游戏正在运行。");
+            Attach(process, game);
+            await MatchAttachedVersionAsync();
         }
-        var process = _processService.FindRunningGame(game)
-                      ?? throw new InvalidOperationException("没有检测到这个游戏正在运行。");
-        Attach(process, game);
-        await MatchAttachedVersionAsync();
+        finally { ReleaseConnectionControlsAfter(cooldown); }
     }
 
-    public void DisconnectSelectedGame()
+    public async Task DisconnectSelectedGameAsync()
     {
         var game = SelectedGame ?? throw new InvalidOperationException("请先选择游戏条目。");
         if (!_sessions.TryGetValue(game.Id, out var session))
             throw new InvalidOperationException("所选游戏当前未连接。");
-        DisconnectSession(session, true);
-        StatusText = $"已断开 {game.Name} 的连接";
+        var cooldown = BeginConnectionControlInteraction();
+        try
+        {
+            DisconnectSession(session, true);
+            StatusText = $"已断开 {game.Name} 的连接";
+        }
+        finally { ReleaseConnectionControlsAfter(cooldown); }
+        await Task.CompletedTask;
+    }
+
+    public async Task DisconnectCurrentProcessAsync()
+    {
+        var session = _activeSession ?? throw new InvalidOperationException("当前游戏尚未连接。");
+        var displayName = ActiveGameDisplayName;
+        var cooldown = BeginConnectionControlInteraction();
+        try
+        {
+            DisconnectSession(session, true);
+            StatusText = $"已断开 {displayName} 的连接";
+        }
+        finally { ReleaseConnectionControlsAfter(cooldown); }
+        await Task.CompletedTask;
     }
 
     public async Task MatchAttachedVersionAsync()
@@ -513,7 +593,14 @@ public sealed class MainViewModel : ObservableObject
     public async Task<GameProfile> AddCurrentProcessToLibraryAsync(string userName)
     {
         var process = AttachedProcess ?? throw new InvalidOperationException("请先连接一个游戏进程。");
-        if (string.IsNullOrWhiteSpace(userName)) throw new InvalidOperationException("游戏名称不能为空。");
+        if (string.IsNullOrWhiteSpace(userName)) throw new InvalidOperationException("备注名称不能为空。");
+        var cooldown = BeginLibraryControlInteraction();
+        try { return await AddCurrentProcessToLibraryCoreAsync(userName, process); }
+        finally { ReleaseLibraryControlsAfter(cooldown); }
+    }
+
+    private async Task<GameProfile> AddCurrentProcessToLibraryCoreAsync(string userName, ProcessItem process)
+    {
         var fingerprint = await _fingerprintService.CreateAsync(process.ExecutablePath);
         _attachedFingerprint = fingerprint;
         _activeAdapter = _adapterRegistry.Resolve(process, fingerprint);
@@ -549,6 +636,7 @@ public sealed class MainViewModel : ObservableObject
             game.ProcessName = process.ProcessName;
             game.LastUsedUtc = DateTime.UtcNow;
         }
+        game.Name = userName.Trim();
         _attachedGameId = game.Id;
         game.IsConnected = true;
         _gameIconService.Save(game, process.Icon);
@@ -579,7 +667,7 @@ public sealed class MainViewModel : ObservableObject
         GamesView.Refresh();
         await SaveLibraryAsync();
         RestartLockMaintenance();
-        StatusText = $"已保存 {game.Name} · {version.DisplayName}";
+        StatusText = $"已保存到游戏库：{game.Name} · {version.DisplayName}";
         return game;
     }
 
@@ -588,6 +676,7 @@ public sealed class MainViewModel : ObservableObject
         if (SelectedGame is null) return;
         SelectedGame.IsPinned = !SelectedGame.IsPinned;
         GamesView.Refresh();
+        NotifyLibraryControls();
         await SaveLibraryAsync();
     }
 
@@ -595,26 +684,58 @@ public sealed class MainViewModel : ObservableObject
     {
         if (SelectedGame is null) return;
         SelectedGame.IsLocked = !SelectedGame.IsLocked;
+        NotifyLibraryControls();
         await SaveLibraryAsync();
     }
 
     public async Task DeleteSelectedGameAsync()
     {
         var game = SelectedGame ?? throw new InvalidOperationException("请先选择游戏条目。");
-        if (game.IsPinned) throw new InvalidOperationException("置顶游戏不能删除，请先取消置顶。");
-        if (game.IsLocked) throw new InvalidOperationException("锁定游戏不能删除，请先解锁。");
-        if (_sessions.TryGetValue(game.Id, out var session)) DisconnectSession(session, true);
-        Games.Remove(game);
-        SelectedGame = Games.FirstOrDefault();
-        await SaveLibraryAsync();
+        if (game.IsPinned) throw new InvalidOperationException("置顶游戏不能从库移出，请先取消置顶。");
+        if (game.IsLocked) throw new InvalidOperationException("锁定游戏不能从库移出，请先解锁。");
+        var cooldown = BeginLibraryControlInteraction();
+        try
+        {
+            var keptConnection = _sessions.Remove(game.Id, out var session);
+            if (keptConnection && session is not null)
+            {
+                StopSessionLockMaintenance(session);
+                session.GameId = null;
+                session.VersionId = null;
+                game.IsConnected = false;
+                _activeSession = session;
+                _speedService = session.SpeedService;
+                _attachedGameId = null;
+                _suppressGameActivation = true;
+                try { SelectedGame = null; }
+                finally { _suppressGameActivation = false; }
+                SelectedVersion = null;
+            }
+
+            Games.Remove(game);
+            if (!keptConnection) SelectedGame = Games.FirstOrDefault();
+            GamesView.Refresh();
+            await SaveLibraryAsync();
+            StatusText = keptConnection
+                ? $"已将 {game.Name} 从游戏库移出，当前进程保持连接"
+                : $"已将 {game.Name} 从游戏库移出";
+        }
+        finally { ReleaseLibraryControlsAfter(cooldown); }
     }
 
     public async Task RenameSelectedGameAsync(string name)
     {
         var game = SelectedGame ?? throw new InvalidOperationException("请先选择游戏条目。");
-        if (string.IsNullOrWhiteSpace(name)) throw new InvalidOperationException("游戏名称不能为空。");
-        game.Name = name.Trim();
-        await SaveLibraryAsync();
+        if (string.IsNullOrWhiteSpace(name)) throw new InvalidOperationException("备注名称不能为空。");
+        var cooldown = BeginLibraryControlInteraction();
+        try
+        {
+            game.Name = name.Trim();
+            await SaveLibraryAsync();
+            OnPropertyChanged(nameof(ActiveGameDisplayName));
+            GamesView.Refresh();
+        }
+        finally { ReleaseLibraryControlsAfter(cooldown); }
     }
 
     public async Task RunScanAsync(bool isNewScan)
@@ -1057,20 +1178,19 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task AccelerateGameAsync()
     {
+        var process = AttachedProcess ?? throw new InvalidOperationException("请先连接游戏进程。");
+        var multiplier = ParseSpeedMultiplier(SpeedMultiplier);
         var cooldown = BeginSpeedControlInteraction();
         try
         {
-            var process = AttachedProcess ?? throw new InvalidOperationException("请先连接游戏进程。");
-            if (!int.TryParse(SpeedMultiplier.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var multiplier) ||
-                multiplier is < 1 or > 100)
-                throw new InvalidOperationException("加速倍数必须是 1 到 100 的整数。");
-            if (multiplier == 1)
+            SpeedMultiplier = FormatSpeedMultiplier(multiplier);
+            if (multiplier == 1d)
             {
                 await Task.Run(_speedService.Normalize);
                 IsSpeedActive = false;
                 if (_activeSession is not null) _activeSession.IsSpeedActive = false;
                 OnPropertyChanged(nameof(SpeedStatusText));
-                StatusText = "1 倍就是正常游戏速度";
+                StatusText = "游戏已切换为正常倍速";
                 return;
             }
             var result = await Task.Run(() => _speedService.Accelerate(process.ProcessId, multiplier));
@@ -1082,7 +1202,8 @@ public sealed class MainViewModel : ObservableObject
             }
             // IsSpeedActive stays true when changing an active multiplier, so notify explicitly.
             OnPropertyChanged(nameof(SpeedStatusText));
-            StatusText = $"游戏已切换为 {multiplier} 倍速度 · 已挂接 {result.PatchedImportCount} 个计时入口";
+            var mode = multiplier < 1d ? "减速" : "加速";
+            StatusText = $"游戏已切换为 {FormatSpeedMultiplier(multiplier)} 倍{mode} · 已挂接 {result.PatchedImportCount} 个计时入口";
         }
         finally
         {
@@ -1092,20 +1213,23 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task RestoreGameSpeedAsync()
     {
+        _ = AttachedProcess ?? throw new InvalidOperationException("请先连接游戏进程。");
         var cooldown = BeginSpeedControlInteraction();
         try
         {
-            _ = AttachedProcess ?? throw new InvalidOperationException("请先连接游戏进程。");
-            if (!_speedService.HasHooks || _speedService.Multiplier == 1)
+            if (!_speedService.HasHooks || _speedService.Multiplier == 1d)
             {
                 IsSpeedActive = false;
                 if (_activeSession is not null) _activeSession.IsSpeedActive = false;
+                SpeedMultiplier = "1";
                 StatusText = "当前已经是正常倍速";
                 return;
             }
             await Task.Run(_speedService.Normalize);
             IsSpeedActive = false;
             if (_activeSession is not null) _activeSession.IsSpeedActive = false;
+            SpeedMultiplier = "1";
+            OnPropertyChanged(nameof(SpeedStatusText));
             StatusText = "游戏速度已回正";
         }
         finally
@@ -1136,6 +1260,71 @@ public sealed class MainViewModel : ObservableObject
             OnPropertyChanged(nameof(CanRestoreSpeed));
         }
     }
+
+    private Task BeginConnectionControlInteraction()
+    {
+        if (_isConnectionControlBlocked) throw new InvalidOperationException("连接状态正在切换，请稍候再试。");
+        _isConnectionControlBlocked = true;
+        NotifyConnectionControls();
+        return Task.Delay(TimeSpan.FromSeconds(2));
+    }
+
+    private async void ReleaseConnectionControlsAfter(Task cooldown)
+    {
+        try { await cooldown; }
+        finally
+        {
+            _isConnectionControlBlocked = false;
+            NotifyConnectionControls();
+        }
+    }
+
+    private Task BeginLibraryControlInteraction()
+    {
+        if (_isLibraryControlBlocked) throw new InvalidOperationException("游戏库正在更新，请稍候再试。");
+        _isLibraryControlBlocked = true;
+        NotifyLibraryControls();
+        return Task.Delay(TimeSpan.FromSeconds(2));
+    }
+
+    private async void ReleaseLibraryControlsAfter(Task cooldown)
+    {
+        try { await cooldown; }
+        finally
+        {
+            _isLibraryControlBlocked = false;
+            NotifyLibraryControls();
+        }
+    }
+
+    private void NotifyConnectionControls()
+    {
+        OnPropertyChanged(nameof(CanConnectProcess));
+        OnPropertyChanged(nameof(CanConnectSelectedGame));
+        OnPropertyChanged(nameof(CanDisconnectSelectedGame));
+        OnPropertyChanged(nameof(CanDisconnectCurrentProcess));
+    }
+
+    private void NotifyLibraryControls()
+    {
+        OnPropertyChanged(nameof(LibraryStatusText));
+        OnPropertyChanged(nameof(CanSaveCurrentGame));
+        OnPropertyChanged(nameof(CanRemoveCurrentGame));
+    }
+
+    private static double ParseSpeedMultiplier(string text)
+    {
+        var valueText = text.Trim();
+        var decimalPoint = valueText.IndexOf('.');
+        if (decimalPoint >= 0 && (valueText.LastIndexOf('.') != decimalPoint || valueText.Length - decimalPoint - 1 > 2) ||
+            !decimal.TryParse(valueText, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var value) ||
+            value is < 0.01m or > 100m)
+            throw new InvalidOperationException("倍数必须是 0.01 到 100.00 之间、最多两位小数的数字。");
+        return decimal.ToDouble(value);
+    }
+
+    private static string FormatSpeedMultiplier(double multiplier) =>
+        multiplier.ToString("0.##", CultureInfo.InvariantCulture);
 
     public async Task RenameSelectedFieldAsync(string name)
     {
@@ -1605,6 +1794,8 @@ public sealed class MainViewModel : ObservableObject
         }
         UpdateCurrentVersionMarkers(null, null);
         GamesView.Refresh();
+        NotifyConnectionControls();
+        NotifyLibraryControls();
     }
 
     private static bool IsProcessRunning(ProcessItem process)

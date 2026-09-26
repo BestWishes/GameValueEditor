@@ -15,9 +15,13 @@ public sealed class ProcessSpeedService : IDisposable
 {
     private const int StateSize = 96;
     private const int StateMultiplierOffset = 8;
+    private const int MultiplierScale = 100;
+    private const int MinimumScaledMultiplier = 1;
+    private const int MaximumScaledMultiplier = 10_000;
     private const int RemoteUpdateTimeoutMilliseconds = 1500;
     private static readonly byte[] LegacyWrapperMagic = "GVESPD01"u8.ToArray();
-    private static readonly byte[] StableWrapperMagic = "GVESPD02"u8.ToArray();
+    private static readonly byte[] IntegerWrapperMagic = "GVESPD02"u8.ToArray();
+    private static readonly byte[] StableWrapperMagic = "GVESPD03"u8.ToArray();
     private static readonly byte[] StateMagic = "GVESTATE"u8.ToArray();
 
     private readonly List<PatchedSlot> _patchedSlots = [];
@@ -31,14 +35,13 @@ public sealed class ProcessSpeedService : IDisposable
         _patchedSlots.Count > 0 && _stateAddress != 0 && _updaterAddress != 0;
 
     public int ActiveProcessId { get; private set; }
-    public int Multiplier { get; private set; } = 1;
+    public double Multiplier { get; private set; } = 1d;
 
-    public SpeedHookResult Accelerate(int processId, int multiplier)
+    public SpeedHookResult Accelerate(int processId, double multiplier)
     {
-        if (multiplier is < 1 or > 100)
-            throw new InvalidOperationException("加速倍数必须是 1 到 100 的整数。");
-        if (multiplier == 1)
-            throw new InvalidOperationException("1 倍就是正常速度，不需要加速。");
+        var scaledMultiplier = ToScaledMultiplier(multiplier);
+        if (scaledMultiplier == MultiplierScale)
+            throw new InvalidOperationException("1 倍就是正常速度，请使用回正。");
 
         if (HasHooks)
         {
@@ -57,12 +60,12 @@ public sealed class ProcessSpeedService : IDisposable
             var imports = FindClockImports(handle, process);
             if (imports.Count == 0)
                 throw new InvalidOperationException("目标进程没有找到可挂接的计时 API，暂时无法使用通用游戏加速。");
-            if (imports.Any(import => import.PreviousWrapper?.Version == 1))
+            if (imports.Any(import => import.PreviousWrapper?.Version is 1 or 2))
                 throw new InvalidOperationException(
-                    "目标游戏仍保留旧版加速挂钩。请先退出并重新启动游戏，再使用新版加速功能。");
+                    "目标游戏仍保留不支持小数倍速的旧版加速挂钩。请先退出并重新启动游戏，再使用新版倍速功能。");
 
             var stableWrappers = imports
-                .Where(import => import.PreviousWrapper?.Version == 2)
+                .Where(import => import.PreviousWrapper?.Version == 3)
                 .Select(import => import.PreviousWrapper!)
                 .ToList();
 
@@ -89,22 +92,22 @@ public sealed class ProcessSpeedService : IDisposable
     {
         if (!HasHooks)
         {
-            Multiplier = 1;
+            Multiplier = 1d;
             return new SpeedHookResult(0, 0);
         }
         var result = new SpeedHookResult(_patchedSlots.Count, _wrapperCount);
-        if (Multiplier != 1) SetMultiplierCore(1);
+        if (Multiplier != 1d) SetMultiplierCore(1d);
         return result;
     }
 
     public void DetachSafely()
     {
         var handle = _processHandle;
-        if (HasHooks && Multiplier != 1)
+        if (HasHooks && Multiplier != 1d)
         {
             try
             {
-                SetMultiplierCore(1);
+                SetMultiplierCore(1d);
             }
             catch (Exception exception) when (!IsActiveProcessRunning())
             {
@@ -125,7 +128,7 @@ public sealed class ProcessSpeedService : IDisposable
         _updaterAddress = 0;
         _wrapperCount = 0;
         ActiveProcessId = 0;
-        Multiplier = 1;
+        Multiplier = 1d;
     }
 
     public void Restore() => DetachSafely();
@@ -182,7 +185,7 @@ public sealed class ProcessSpeedService : IDisposable
             newlyPatched.Add(new PatchedSlot(import.Kind, import.SlotAddress, import.OriginalPointer, import.CurrentPointer));
         }
 
-        AdoptHooks(handle, processId, imports, stateAddress, updaterAddress, wrappers.Count, 1);
+        AdoptHooks(handle, processId, imports, stateAddress, updaterAddress, wrappers.Count, MultiplierScale);
     }
 
     private void AttachExistingStableHooks(
@@ -202,16 +205,16 @@ public sealed class ProcessSpeedService : IDisposable
         var existing = stateGroups[0].First();
         var state = ReadStableState(handle, existing.StateAddress);
         var currentMultiplier = BitConverter.ToInt32(state, StateMultiplierOffset);
-        if (currentMultiplier is < 1 or > 100)
+        if (currentMultiplier is < MinimumScaledMultiplier or > MaximumScaledMultiplier)
             throw new InvalidOperationException("目标游戏中的加速状态已损坏，请重启游戏。");
 
         AdoptHooks(handle, processId, imports, existing.StateAddress, existing.UpdaterAddress,
             stableWrappers.Select(wrapper => (wrapper.Kind, wrapper.OriginalPointer)).Distinct().Count(), currentMultiplier);
 
-        if (Multiplier != 1) SetMultiplierCore(1);
+        if (Multiplier != 1d) SetMultiplierCore(1d);
 
         var wrapperAddresses = imports
-            .Where(import => import.PreviousWrapper is { Version: 2 } wrapper &&
+            .Where(import => import.PreviousWrapper is { Version: 3 } wrapper &&
                              wrapper.StateAddress == existing.StateAddress &&
                              wrapper.UpdaterAddress == existing.UpdaterAddress)
             .GroupBy(import => (import.Kind, import.OriginalPointer))
@@ -219,7 +222,7 @@ public sealed class ProcessSpeedService : IDisposable
 
         foreach (var import in imports)
         {
-            if (import.PreviousWrapper is { Version: 2 } wrapper &&
+            if (import.PreviousWrapper is { Version: 3 } wrapper &&
                 wrapper.StateAddress == existing.StateAddress && wrapper.UpdaterAddress == existing.UpdaterAddress)
                 continue;
 
@@ -243,7 +246,7 @@ public sealed class ProcessSpeedService : IDisposable
         ulong stateAddress,
         ulong updaterAddress,
         int wrapperCount,
-        int multiplier)
+        int scaledMultiplier)
     {
         _patchedSlots.Clear();
         _patchedSlots.AddRange(imports.Select(import =>
@@ -253,17 +256,18 @@ public sealed class ProcessSpeedService : IDisposable
         _updaterAddress = updaterAddress;
         _wrapperCount = wrapperCount;
         ActiveProcessId = processId;
-        Multiplier = multiplier;
+        Multiplier = FromScaledMultiplier(scaledMultiplier);
     }
 
-    private void SetMultiplierCore(int multiplier)
+    private void SetMultiplierCore(double multiplier)
     {
         var handle = _processHandle ?? throw new InvalidOperationException("游戏加速状态已经失效。");
         if (_updaterAddress == 0) throw new InvalidOperationException("目标进程内的倍速更新函数已失效。");
-        if (Multiplier == multiplier) return;
+        var scaledMultiplier = ToScaledMultiplier(multiplier);
+        if (ToScaledMultiplier(Multiplier) == scaledMultiplier) return;
 
         var thread = SpeedNativeMethods.CreateRemoteThread(handle, IntPtr.Zero, 0,
-            unchecked((IntPtr)(long)_updaterAddress), new IntPtr(multiplier), 0, out _);
+            unchecked((IntPtr)(long)_updaterAddress), new IntPtr(scaledMultiplier), 0, out _);
         if (thread == IntPtr.Zero)
             throw new Win32Exception(Marshal.GetLastWin32Error(), "无法在目标进程内切换游戏倍速。");
 
@@ -290,8 +294,20 @@ public sealed class ProcessSpeedService : IDisposable
         {
             _ = SpeedNativeMethods.CloseHandle(thread);
         }
-        Multiplier = multiplier;
+        Multiplier = FromScaledMultiplier(scaledMultiplier);
     }
+
+    private static int ToScaledMultiplier(double multiplier)
+    {
+        if (double.IsNaN(multiplier) || double.IsInfinity(multiplier) || multiplier is < 0.01d or > 100d)
+            throw new InvalidOperationException("倍数必须在 0.01 到 100.00 之间。");
+        var scaled = checked((int)Math.Round(multiplier * MultiplierScale, MidpointRounding.AwayFromZero));
+        if (Math.Abs(multiplier - FromScaledMultiplier(scaled)) > 0.0000001d)
+            throw new InvalidOperationException("倍数最多只能输入两位小数。");
+        return scaled;
+    }
+
+    private static double FromScaledMultiplier(int multiplier) => multiplier / (double)MultiplierScale;
 
     private bool IsActiveProcessRunning()
     {
@@ -411,10 +427,29 @@ public sealed class ProcessSpeedService : IDisposable
                 var updaterAddress = BitConverter.ToUInt64(bytes, stableOffset + 25);
                 var stableState = ReadStableState(handle, stateAddress);
                 var multiplier = BitConverter.ToInt32(stableState, StateMultiplierOffset);
+                if (original == 0 || stateAddress == 0 || updaterAddress == 0 ||
+                    multiplier is < MinimumScaledMultiplier or > MaximumScaledMultiplier)
+                    return false;
+                state = new WrapperState(3, kind, original,
+                    BitConverter.ToUInt64(stableState, 16), BitConverter.ToUInt64(stableState, 24),
+                    multiplier, stateAddress, updaterAddress);
+                return true;
+            }
+
+            var integerOffset = FindSequence(bytes, IntegerWrapperMagic);
+            if (integerOffset >= 0 && integerOffset + 33 <= bytes.Length)
+            {
+                var kind = (ClockKind)bytes[integerOffset + 8];
+                if (kind != expectedKind) return false;
+                var original = BitConverter.ToUInt64(bytes, integerOffset + 9);
+                var stateAddress = BitConverter.ToUInt64(bytes, integerOffset + 17);
+                var updaterAddress = BitConverter.ToUInt64(bytes, integerOffset + 25);
+                var integerState = ReadStableState(handle, stateAddress);
+                var multiplier = BitConverter.ToInt32(integerState, StateMultiplierOffset);
                 if (original == 0 || stateAddress == 0 || updaterAddress == 0 || multiplier is < 1 or > 100)
                     return false;
                 state = new WrapperState(2, kind, original,
-                    BitConverter.ToUInt64(stableState, 16), BitConverter.ToUInt64(stableState, 24),
+                    BitConverter.ToUInt64(integerState, 16), BitConverter.ToUInt64(integerState, 24),
                     multiplier, stateAddress, updaterAddress);
                 return true;
             }
@@ -455,7 +490,7 @@ public sealed class ProcessSpeedService : IDisposable
         ulong originalQpc, ulong originalTick64, ulong originalTick32)
     {
         var state = new byte[StateSize];
-        BitConverter.GetBytes(1).CopyTo(state, StateMultiplierOffset);
+        BitConverter.GetBytes(MultiplierScale).CopyTo(state, StateMultiplierOffset);
         BitConverter.GetBytes(baseRealQpc).CopyTo(state, 16);
         BitConverter.GetBytes(baseVirtualQpc).CopyTo(state, 24);
         BitConverter.GetBytes(baseRealTick64).CopyTo(state, 32);
@@ -492,7 +527,11 @@ public sealed class ProcessSpeedService : IDisposable
         code.Emit(0x49, 0x2B, 0x43, 0x10);
         code.Emit(0x49, 0x63, 0x4B, 0x08);
         code.Emit(0x48, 0x0F, 0xAF, 0xC1);
+        code.Emit(0x48, 0x99);
+        code.Emit(0xB9, MultiplierScale, 0, 0, 0);
+        code.Emit(0x48, 0xF7, 0xF9);
         code.Emit(0x49, 0x03, 0x43, 0x18);
+        code.Emit(0x48, 0x8B, 0x54, 0x24, 0x30);
         code.Emit(0x48, 0x89, 0x02);
         EmitReleaseLock(code, 0, 88);
         code.Emit(0xB8, 0x01, 0, 0, 0);
@@ -517,6 +556,9 @@ public sealed class ProcessSpeedService : IDisposable
         code.Emit(0x49, 0x2B, 0x43, 0x20);
         code.Emit(0x49, 0x63, 0x4B, 0x08);
         code.Emit(0x48, 0x0F, 0xAF, 0xC1);
+        code.Emit(0x48, 0x99);
+        code.Emit(0xB9, MultiplierScale, 0, 0, 0);
+        code.Emit(0x48, 0xF7, 0xF9);
         code.Emit(0x49, 0x03, 0x43, 0x28);
         EmitReleaseLock(code, 4, 92);
         code.Emit(0x48, 0x83, 0xC4, 0x28, 0xC3);
@@ -533,7 +575,11 @@ public sealed class ProcessSpeedService : IDisposable
         code.Emit(0xFF, 0xD0);
         EmitMovR11(code, stateAddress);
         code.Emit(0x41, 0x2B, 0x43, 0x30);
-        code.Emit(0x41, 0x0F, 0xAF, 0x43, 0x08);
+        code.Emit(0x49, 0x63, 0x4B, 0x08);
+        code.Emit(0x48, 0x0F, 0xAF, 0xC1);
+        code.Emit(0x31, 0xD2);
+        code.Emit(0xB9, MultiplierScale, 0, 0, 0);
+        code.Emit(0x48, 0xF7, 0xF1);
         code.Emit(0x41, 0x03, 0x43, 0x34);
         EmitReleaseLock(code, 4, 92);
         code.Emit(0x48, 0x83, 0xC4, 0x28, 0xC3);
@@ -556,13 +602,19 @@ public sealed class ProcessSpeedService : IDisposable
             code.Emit(0xFF, 0xD0, 0x85, 0xC0);
             var skipQpc = code.EmitJz();
             code.Emit(0x48, 0x8B, 0x44, 0x24, 0x48);
+            code.Emit(0x49, 0x89, 0xC2);
             EmitMovR11(code, stateAddress);
             code.Emit(0x48, 0x89, 0xC2);
             code.Emit(0x49, 0x2B, 0x53, 0x10);
             code.Emit(0x49, 0x63, 0x4B, 0x08);
-            code.Emit(0x48, 0x0F, 0xAF, 0xD1);
+            code.Emit(0x48, 0x89, 0xD0);
+            code.Emit(0x48, 0x0F, 0xAF, 0xC1);
+            code.Emit(0x48, 0x99);
+            code.Emit(0xB9, MultiplierScale, 0, 0, 0);
+            code.Emit(0x48, 0xF7, 0xF9);
+            code.Emit(0x48, 0x89, 0xC2);
             code.Emit(0x49, 0x03, 0x53, 0x18);
-            code.Emit(0x49, 0x89, 0x43, 0x10);
+            code.Emit(0x4D, 0x89, 0x53, 0x10);
             code.Emit(0x49, 0x89, 0x53, 0x18);
             code.PatchRelative(skipQpc, code.Position);
         }
@@ -571,13 +623,19 @@ public sealed class ProcessSpeedService : IDisposable
         {
             EmitMovRax(code, originalTick64);
             code.Emit(0xFF, 0xD0);
+            code.Emit(0x49, 0x89, 0xC2);
             EmitMovR11(code, stateAddress);
             code.Emit(0x48, 0x89, 0xC2);
             code.Emit(0x49, 0x2B, 0x53, 0x20);
             code.Emit(0x49, 0x63, 0x4B, 0x08);
-            code.Emit(0x48, 0x0F, 0xAF, 0xD1);
+            code.Emit(0x48, 0x89, 0xD0);
+            code.Emit(0x48, 0x0F, 0xAF, 0xC1);
+            code.Emit(0x48, 0x99);
+            code.Emit(0xB9, MultiplierScale, 0, 0, 0);
+            code.Emit(0x48, 0xF7, 0xF9);
+            code.Emit(0x48, 0x89, 0xC2);
             code.Emit(0x49, 0x03, 0x53, 0x28);
-            code.Emit(0x49, 0x89, 0x43, 0x20);
+            code.Emit(0x4D, 0x89, 0x53, 0x20);
             code.Emit(0x49, 0x89, 0x53, 0x28);
         }
 
@@ -585,12 +643,19 @@ public sealed class ProcessSpeedService : IDisposable
         {
             EmitMovRax(code, originalTick32);
             code.Emit(0xFF, 0xD0);
+            code.Emit(0x41, 0x89, 0xC2);
             EmitMovR11(code, stateAddress);
             code.Emit(0x89, 0xC2);
             code.Emit(0x41, 0x2B, 0x53, 0x30);
-            code.Emit(0x41, 0x0F, 0xAF, 0x53, 0x08);
+            code.Emit(0x89, 0xD0);
+            code.Emit(0x49, 0x63, 0x4B, 0x08);
+            code.Emit(0x48, 0x0F, 0xAF, 0xC1);
+            code.Emit(0x31, 0xD2);
+            code.Emit(0xB9, MultiplierScale, 0, 0, 0);
+            code.Emit(0x48, 0xF7, 0xF1);
+            code.Emit(0x89, 0xC2);
             code.Emit(0x41, 0x03, 0x53, 0x34);
-            code.Emit(0x41, 0x89, 0x43, 0x30);
+            code.Emit(0x45, 0x89, 0x53, 0x30);
             code.Emit(0x41, 0x89, 0x53, 0x34);
         }
 
