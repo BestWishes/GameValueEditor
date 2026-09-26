@@ -969,7 +969,7 @@ public sealed class MainViewModel : ObservableObject
         try
         {
             _ = AttachedProcess ?? throw new InvalidOperationException("请先连接游戏进程。");
-            if (!_speedService.HasHooks)
+            if (!_speedService.HasHooks || _speedService.Multiplier == 1)
             {
                 IsSpeedActive = false;
                 StatusText = "当前已经是正常倍速";

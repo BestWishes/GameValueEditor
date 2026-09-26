@@ -360,7 +360,7 @@
             <Grid Margin="14,0">
                 <TextBlock Text="{Binding StatusText}" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
                 <TextBlock HorizontalAlignment="Right" VerticalAlignment="Center" Foreground="{DynamicResource MutedTextBrush}"
-                           Text="仅用于离线单机游戏 · v0.2.0-preview.8"/>
+                           Text="仅用于离线单机游戏 · v0.2.0-preview.9"/>
             </Grid>
         </Border>
     </Grid>
