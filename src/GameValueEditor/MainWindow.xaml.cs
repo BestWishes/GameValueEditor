@@ -58,7 +58,7 @@ public partial class MainWindow : Window
             }
             defaultName = string.IsNullOrWhiteSpace(defaultName) ? process.ProcessName : defaultName;
 
-            var dialog = new TextInputDialog("保存到游戏库", "备注名称：", defaultName) { Owner = this };
+            var dialog = new TextInputDialog("保存入库", "备注名称：", defaultName) { Owner = this };
             if (dialog.ShowDialog() != true) return;
             await _viewModel.AddCurrentProcessToLibraryAsync(dialog.Value);
         });
@@ -159,7 +159,7 @@ public partial class MainWindow : Window
             if (selected.Count != 1) throw new InvalidOperationException("保存字段只支持单选，请只选择一个已经验证有效的扫描结果。");
             _viewModel.SelectedScanResult = selected[0];
             if (_viewModel.SelectedGame is null || _viewModel.SelectedVersion is null)
-                throw new InvalidOperationException("请先点击游戏名称后的“保存到游戏库”，再保存字段。");
+                throw new InvalidOperationException("请先点击游戏名称后的“保存入库”，再保存字段。");
             var dialog = new SaveFieldDialog(_viewModel.GetAvailableGroups()) { Owner = this };
             if (dialog.ShowDialog() != true) return;
             await _viewModel.SaveSelectedCandidateAsync(dialog.FieldName, dialog.GroupName);
@@ -174,7 +174,7 @@ public partial class MainWindow : Window
         await RunGuardedAsync(async () =>
         {
             if (_viewModel.SelectedGame is null || _viewModel.SelectedVersion is null)
-                throw new InvalidOperationException("请先点击游戏名称后的“保存到游戏库”，再添加专属字段。");
+                throw new InvalidOperationException("请先点击游戏名称后的“保存入库”，再添加专属字段。");
             var dialog = new AdapterFieldDialog(_viewModel.GetAvailableGroups()) { Owner = this };
             if (dialog.ShowDialog() != true) return;
             await _viewModel.AddAdapterFieldAsync(dialog.FieldKey, dialog.DisplayName, dialog.GroupName);
@@ -238,7 +238,7 @@ public partial class MainWindow : Window
             var item = selected[0];
             _viewModel.SelectedAdapterItem = item;
             if (_viewModel.SelectedGame is null || _viewModel.SelectedVersion is null)
-                throw new InvalidOperationException("请先点击游戏名称后的“保存到游戏库”，再保存字段。");
+                throw new InvalidOperationException("请先点击游戏名称后的“保存入库”，再保存字段。");
             var dialog = new AdapterFieldDialog(
                 _viewModel.GetAvailableGroups(), item.FieldKey, item.DisplayName) { Owner = this };
             if (dialog.ShowDialog() != true) return;

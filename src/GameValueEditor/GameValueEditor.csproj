@@ -12,8 +12,9 @@
     <RootNamespace>GameValueEditor</RootNamespace>
     <Product>肝肾大圣-单机游戏数值编辑器</Product>
     <Description>A local-first memory value editor for offline single-player games.</Description>
-    <Version>0.3.0-preview.3</Version>
+    <Version>0.3.0-preview.4</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\GameValueEditorIcon.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>

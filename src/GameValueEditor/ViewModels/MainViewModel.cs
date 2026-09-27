@@ -527,7 +527,7 @@ public sealed class MainViewModel : ObservableObject
         if (game is null)
         {
             SelectedVersion = null;
-            StatusText = "这个游戏尚未进入游戏库；扫描后可点击“保存到游戏库”";
+            StatusText = "这个游戏尚未进入游戏库；扫描后可点击“保存入库”";
             return;
         }
 
@@ -667,7 +667,7 @@ public sealed class MainViewModel : ObservableObject
         GamesView.Refresh();
         await SaveLibraryAsync();
         RestartLockMaintenance();
-        StatusText = $"已保存到游戏库：{game.Name} · {version.DisplayName}";
+        StatusText = $"已保存入库：{game.Name} · {version.DisplayName}";
         return game;
     }
 
@@ -925,7 +925,7 @@ public sealed class MainViewModel : ObservableObject
     public async Task<SavedField> SaveSelectedCandidateAsync(string name, string group)
     {
         var candidate = SelectedScanResult ?? throw new InvalidOperationException("请先选择一个扫描结果。");
-        var game = SelectedGame ?? throw new InvalidOperationException("请先把当前进程保存到游戏库。");
+        var game = SelectedGame ?? throw new InvalidOperationException("请先把当前进程保存入库。");
         var version = SelectedVersion ?? throw new InvalidOperationException("请先选择游戏版本。");
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
         EnsureSelectedVersionMatchesAttached();
@@ -1111,7 +1111,7 @@ public sealed class MainViewModel : ObservableObject
     {
         var adapter = _activeAdapter ?? throw new InvalidOperationException("当前游戏构建没有可用的专属适配器。");
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
-        var game = SelectedGame ?? throw new InvalidOperationException("请先把当前进程保存到游戏库。");
+        var game = SelectedGame ?? throw new InvalidOperationException("请先把当前进程保存入库。");
         var version = SelectedVersion ?? throw new InvalidOperationException("请先保存并选择当前游戏版本。");
         EnsureSelectedVersionMatchesAttached();
         if (string.IsNullOrWhiteSpace(fieldKey)) throw new InvalidOperationException("请填写游戏内的精确字段键，例如物品名“赤阳花”。");

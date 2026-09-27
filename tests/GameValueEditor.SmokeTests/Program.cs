@@ -97,7 +97,7 @@ try
     if (args.Contains("--update-live", StringComparer.OrdinalIgnoreCase))
     {
         var liveUpdateRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-LiveUpdate-{Guid.NewGuid():N}");
-        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.3");
+        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.4");
         var liveUpdate = await liveUpdateService.CheckAsync();
         Assert(liveUpdate.AssetName.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
                liveUpdate.AssetName.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase),
@@ -498,8 +498,38 @@ try
                 var snapshotPath = Path.GetFullPath(Path.Combine("artifacts", "ui-dark-smoke.png"));
                 Directory.CreateDirectory(Path.GetDirectoryName(snapshotPath)!);
                 using (var snapshot = File.Create(snapshotPath)) encoder.Save(snapshot);
+
+                var mainTabs = (TabControl?)mainWindow.FindName("MainTabs")
+                               ?? throw new InvalidOperationException("Main tab control was not created");
+                var renderViewModel = (MainViewModel)mainWindow.DataContext;
+                var renderVersion = new GameVersionProfile
+                {
+                    DisplayName = "1.2.3",
+                    FileVersion = "1.2.3.4",
+                    ProductVersion = "1.2.3",
+                    Architecture = "x64",
+                    CollectedUtc = new DateTime(2026, 9, 27, 12, 30, 0, DateTimeKind.Local),
+                    ExecutableSha256 = new string('a', 64),
+                    LastVerifiedUtc = new DateTime(2026, 9, 27, 12, 30, 0, DateTimeKind.Local),
+                    IsCurrentBuild = true
+                };
+                var renderGame = new GameProfile { Name = "排版验证游戏" };
+                renderGame.Versions.Add(renderVersion);
+                renderViewModel.Games.Add(renderGame);
+                renderViewModel.SelectedGame = renderGame;
+                renderViewModel.SelectedVersion = renderVersion;
+                mainTabs.SelectedIndex = 3;
+                mainWindow.UpdateLayout();
+                root.UpdateLayout();
+                var versionBitmap = new RenderTargetBitmap(1320, 820, 96, 96, PixelFormats.Pbgra32);
+                versionBitmap.Render(root);
+                var versionEncoder = new PngBitmapEncoder();
+                versionEncoder.Frames.Add(BitmapFrame.Create(versionBitmap));
+                var versionSnapshotPath = Path.GetFullPath(Path.Combine("artifacts", "ui-version-dark-smoke.png"));
+                using (var snapshot = File.Create(versionSnapshotPath)) versionEncoder.Save(snapshot);
                 mainWindow.Close();
                 Console.WriteLine($"Rendered dark UI: {snapshotPath}");
+                Console.WriteLine($"Rendered version UI: {versionSnapshotPath}");
             }
             application.Shutdown();
         }
