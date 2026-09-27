@@ -8,6 +8,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using GameValueEditor;
@@ -97,7 +98,7 @@ try
     if (args.Contains("--update-live", StringComparer.OrdinalIgnoreCase))
     {
         var liveUpdateRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-LiveUpdate-{Guid.NewGuid():N}");
-        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.5");
+        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.6");
         var liveUpdate = await liveUpdateService.CheckAsync();
         Assert(liveUpdate.AssetName.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
                liveUpdate.AssetName.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase),
@@ -513,6 +514,18 @@ try
                 };
                 mainWindow.Show();
                 mainWindow.UpdateLayout();
+                var topProcessConnectButton = (Button?)mainWindow.FindName("TopProcessConnectButton")
+                                              ?? throw new InvalidOperationException("Top process connect button was not created");
+                var editorGameConnectButton = (Button?)mainWindow.FindName("EditorGameConnectButton")
+                                              ?? throw new InvalidOperationException("Editor game connect button was not created");
+                var editorGameDisconnectButton = (Button?)mainWindow.FindName("EditorGameDisconnectButton")
+                                                 ?? throw new InvalidOperationException("Editor game disconnect button was not created");
+                Assert(BindingOperations.GetBinding(topProcessConnectButton, UIElement.IsEnabledProperty)?.Path.Path == nameof(MainViewModel.CanConnectProcess),
+                    "Top connect button must follow the selected process");
+                Assert(BindingOperations.GetBinding(editorGameConnectButton, UIElement.IsEnabledProperty)?.Path.Path == nameof(MainViewModel.CanConnectSelectedGame),
+                    "Editor connect button must follow the selected library game");
+                Assert(BindingOperations.GetBinding(editorGameDisconnectButton, UIElement.IsEnabledProperty)?.Path.Path == nameof(MainViewModel.CanDisconnectSelectedGame),
+                    "Editor disconnect button must follow the selected library game");
                 var root = (FrameworkElement)mainWindow.Content;
                 root.Measure(new Size(1320, 820));
                 root.Arrange(new Rect(0, 0, 1320, 820));

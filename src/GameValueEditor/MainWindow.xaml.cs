@@ -103,9 +103,6 @@ public partial class MainWindow : Window
     private async void DisconnectSelectedGame_OnClick(object sender, RoutedEventArgs e) =>
         await RunGuardedAsync(_viewModel.DisconnectSelectedGameAsync);
 
-    private async void DisconnectCurrentProcess_OnClick(object sender, RoutedEventArgs e) =>
-        await RunGuardedAsync(_viewModel.DisconnectCurrentProcessAsync);
-
     private async void DeleteGame_OnClick(object sender, RoutedEventArgs e)
     {
         await RunGuardedAsync(async () =>

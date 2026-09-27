@@ -40,7 +40,7 @@
                         </DataTemplate>
                     </ComboBox.ItemTemplate>
                 </ComboBox>
-                <Button Grid.Column="4" Content="连接" Width="88" Height="32" Margin="6,0,0,0"
+                <Button x:Name="TopProcessConnectButton" Grid.Column="4" Content="连接" Width="88" Height="32" Margin="6,0,0,0"
                         IsEnabled="{Binding CanConnectProcess}" Click="AttachProcess_OnClick" VerticalAlignment="Center"/>
             </Grid>
         </Border>
@@ -168,10 +168,12 @@
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Text="{Binding ConnectionText}" Foreground="{DynamicResource AccentBrush}"
                                            VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
-                                <Button Grid.Column="1" Content="连接" IsEnabled="{Binding CanConnectProcess}"
-                                        Click="AttachProcess_OnClick" Width="64" Height="26" Padding="8,2" Margin="18,0,6,0"/>
-                                <Button Grid.Column="2" Content="断开" IsEnabled="{Binding CanDisconnectCurrentProcess}"
-                                        Click="DisconnectCurrentProcess_OnClick" Width="64" Height="26" Padding="8,2" Margin="0"/>
+                                <Button x:Name="EditorGameConnectButton" Grid.Column="1" Content="连接"
+                                        IsEnabled="{Binding CanConnectSelectedGame}" Click="AttachSelectedGame_OnClick"
+                                        Width="64" Height="26" Padding="8,2" Margin="18,0,6,0"/>
+                                <Button x:Name="EditorGameDisconnectButton" Grid.Column="2" Content="断开"
+                                        IsEnabled="{Binding CanDisconnectSelectedGame}" Click="DisconnectSelectedGame_OnClick"
+                                        Width="64" Height="26" Padding="8,2" Margin="0"/>
                             </Grid>
                         </Grid>
                     </Grid>
