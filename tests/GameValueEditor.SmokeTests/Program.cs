@@ -15,6 +15,7 @@ using System.Windows.Media.Imaging;
 using GameValueEditor;
 using GameValueEditor.Dialogs;
 using GameValueEditor.Models;
+using GameValueEditor.ModuleSdk;
 using GameValueEditor.Services;
 using GameValueEditor.Services.Adapters;
 using GameValueEditor.ViewModels;
@@ -99,7 +100,7 @@ try
     if (args.Contains("--update-live", StringComparer.OrdinalIgnoreCase))
     {
         var liveUpdateRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-LiveUpdate-{Guid.NewGuid():N}");
-        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.7");
+        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.8");
         var liveUpdate = await liveUpdateService.CheckAsync();
         Assert(liveUpdate.AssetName.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
                liveUpdate.AssetName.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase),
@@ -300,12 +301,12 @@ try
         var moduleCatalogJson = """
         {
           "schemaVersion": 1,
-          "hostApiVersion": 1,
+          "hostApiVersion": 2,
           "modules": [{
-            "id": "game.fzzml.inventory.v1",
+            "id": "game.test.multi-editor",
             "version": "1.1.0",
             "displayName": "测试专属模块",
-            "hostApiVersion": 1,
+            "hostApiVersion": 2,
             "processNames": ["MatchedGame"],
             "compatibleBuilds": [{"executableSha256": "EXE", "gameAssemblySha256": "ASM", "metadataSha256": "META"}],
             "downloadUrl": "https://example.invalid/module.zip",
@@ -334,9 +335,9 @@ try
         Assert(unavailable.Availability == GameModuleAvailability.NotAvailable,
             "A game-specific module leaked into another game");
 
-        var moduleAssemblyPath = Path.Combine(AppContext.BaseDirectory, "GameValueEditor.Modules.Fzzml.dll");
-        Assert(File.Exists(moduleAssemblyPath), "Built fzzml module assembly was not copied to the smoke output");
-        var moduleArchive = CreateModuleArchive("game.fzzml.inventory.v1", "1.1.0", moduleAssemblyPath);
+        var moduleAssemblyPath = Assembly.GetExecutingAssembly().Location;
+        Assert(File.Exists(moduleAssemblyPath), "Smoke module assembly is unavailable");
+        var moduleArchive = CreateModuleArchive("game.test.multi-editor", "1.1.0", moduleAssemblyPath);
         var moduleHash = Convert.ToHexString(SHA256.HashData(moduleArchive));
         using var moduleClient = new HttpClient(new StaticResponseHandler(_ =>
             new HttpResponseMessage(HttpStatusCode.OK)
@@ -350,8 +351,11 @@ try
         Assert(installService.FindInstalled(remoteModule.Id)?.Version == "1.1.0",
             "Verified module installation was not persisted");
         using (var installedRegistry = new GameAdapterRegistry(Path.Combine(serviceTestRoot, "modules-install")))
-            Assert(installedRegistry.FindById("game.fzzml.inventory.v1") is IInventoryGameAdapter,
-                "Installed optional module was not dynamically loaded through the host contract");
+        {
+            var loaded = installedRegistry.FindById("game.test.multi-editor");
+            Assert(loaded is IInventoryGameAdapter && loaded is ICharacterAttributesGameAdapter && loaded.Editors.Count == 2,
+                "Installed multi-editor module was not dynamically loaded through Host API v2");
+        }
         remoteModule.Id = "..\\escape";
         try
         {
@@ -718,7 +722,7 @@ try
         var liveFingerprint = await new VersionFingerprintService().CreateAsync(path);
         var liveModulesDirectory = Environment.GetEnvironmentVariable("GVE_MODULES_DIRECTORY");
         using var liveRegistry = new GameAdapterRegistry(liveModulesDirectory);
-        var installedAdapter = liveRegistry.FindById("game.fzzml.inventory.v1")
+        var installedAdapter = liveRegistry.FindById("game.fzzml")
                                ?? throw new InvalidOperationException(
                                    $"Installed fzzml module could not be loaded: {string.Join(" | ", liveRegistry.LoadErrors)}");
         var adapter = liveRegistry.Resolve(liveItem, liveFingerprint)
@@ -734,6 +738,19 @@ try
         var liveInventoryItem = inventory.Single(item => item.FieldKey == "赤阳花");
         Assert(liveInventoryItem.Count == liveCount, "Inventory enumeration and keyed read disagree");
         Console.WriteLine($"Live adapter passed: {adapter.DisplayName}, 赤阳花={liveValue.DisplayValue}, {liveValue.Status}.");
+        var characterAdapter = adapter as ICharacterAttributesGameAdapter;
+        Assert(characterAdapter is not null && characterAdapter.SupportsCharacterAttributes(liveItem),
+            "fzzml adapter does not expose the character-attributes editor for this build");
+        var characters = characterAdapter!.ReadCharacters(liveItem);
+        Assert(characters.Count > 0 && characters.All(character => character.Attributes.Count == 5),
+            "Character editor did not enumerate five writable dimensions per character");
+        var firstCharacter = characters[0];
+        var firstAttribute = firstCharacter.Attributes[0];
+        var sameValue = characterAdapter!.WriteCharacterAttribute(
+            liveItem, firstCharacter.CharacterId, firstAttribute.Key, firstAttribute.RawValue);
+        Assert(sameValue.Attributes.Single(attribute => attribute.Key == firstAttribute.Key).RawValue == firstAttribute.RawValue,
+            "Character editor same-value main-thread validation failed");
+        Console.WriteLine($"Live character editor passed: {characters.Count} characters, same-value write {firstCharacter.DisplayName}/{firstAttribute.DisplayName}={firstAttribute.RawValue}.");
         var setArgument = args.FirstOrDefault(argument => argument.StartsWith("--fzzml-set=", StringComparison.OrdinalIgnoreCase));
         if (setArgument is not null)
         {
@@ -763,14 +780,35 @@ static byte[] CreateModuleArchive(string id, string version, string assemblyPath
         var manifest = archive.CreateEntry("module.json");
         using (var writer = new StreamWriter(manifest.Open(), Encoding.UTF8, leaveOpen: false))
             writer.Write($$"""
-            {"id":"{{id}}","version":"{{version}}","displayName":"测试专属模块","assemblyFile":"GameValueEditor.Modules.Fzzml.dll","hostApiVersion":1}
+            {"id":"{{id}}","version":"{{version}}","displayName":"测试专属模块","assemblyFile":"{{Path.GetFileName(assemblyPath)}}","hostApiVersion":2,"editors":[{"id":"test.inventory","displayName":"背包物品","kind":"collection","order":100},{"id":"test.characters","displayName":"人物属性","kind":"master-detail","order":200}]}
             """);
-        var assembly = archive.CreateEntry("GameValueEditor.Modules.Fzzml.dll");
+        var assembly = archive.CreateEntry(Path.GetFileName(assemblyPath));
         using var assemblyStream = assembly.Open();
         using var source = File.OpenRead(assemblyPath);
         source.CopyTo(assemblyStream);
     }
     return stream.ToArray();
+}
+
+public sealed class SmokeTestModuleAdapter : IInventoryGameAdapter, ICharacterAttributesGameAdapter
+{
+    public string Id => "game.test.multi-editor";
+    public string DisplayName => "测试多编辑器游戏模块";
+    public string Description => "仅用于宿主接口冒烟测试。";
+    public IReadOnlyList<GameEditorDescriptor> Editors =>
+    [
+        new("test.inventory", "背包物品", GameEditorKind.Collection, 100, "测试集合编辑器"),
+        new("test.characters", "人物属性", GameEditorKind.MasterDetail, 200, "测试主从编辑器", true)
+    ];
+    public bool Supports(GameProcessContext process, GameBuildIdentity fingerprint) => true;
+    public AdapterFieldValue ReadField(GameProcessContext process, string fieldKey) => new(fieldKey, "1", "测试");
+    public AdapterFieldValue WriteField(GameProcessContext process, string fieldKey, string displayValue) => new(fieldKey, displayValue, "测试");
+    public IReadOnlyList<AdapterInventoryItem> ReadInventory(GameProcessContext process) => [new("test", "测试物品", 1)];
+    public bool SupportsCharacterAttributes(GameProcessContext process) => true;
+    public IReadOnlyList<AdapterCharacterItem> ReadCharacters(GameProcessContext process) =>
+        [new("test", "测试人物", 1, [new("strength", "力道", 1, 1, 1f)])];
+    public AdapterCharacterItem WriteCharacterAttribute(GameProcessContext process, string characterId, string attributeKey, int targetValue) =>
+        new(characterId, "测试人物", 1, [new(attributeKey, "力道", targetValue, targetValue, 1f)]);
 }
 
 internal static class SpeedStressTarget

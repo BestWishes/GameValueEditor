@@ -10,6 +10,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using GameValueEditor.Infrastructure;
 using GameValueEditor.Models;
+using GameValueEditor.ModuleSdk;
 using GameValueEditor.Services;
 using GameValueEditor.Services.Adapters;
 
@@ -59,8 +60,11 @@ public sealed class MainViewModel : ObservableObject
     private SavedField? _selectedSavedField;
     private ObservableCollection<ScanCandidate> _visibleScanResults = [];
     private readonly ObservableCollection<AdapterInventoryItem> _adapterInventoryItems = [];
+    private readonly ObservableCollection<AdapterCharacterItem> _adapterCharacters = [];
     private ICollectionView? _adapterItemsView;
     private AdapterInventoryItem? _selectedAdapterItem;
+    private AdapterCharacterItem? _selectedAdapterCharacter;
+    private AdapterCharacterAttribute? _selectedCharacterAttribute;
     private string _adapterItemNameFilter = string.Empty;
     private string _adapterItemCountFilter = string.Empty;
     private string _searchText = string.Empty;
@@ -144,6 +148,7 @@ public sealed class MainViewModel : ObservableObject
     public ICollectionView GamesView => _gamesView ??= CreateGamesView();
     public ICollectionView AdapterItemsView => _adapterItemsView ??= CreateAdapterItemsView();
     public ObservableCollection<AdapterInventoryItem> AdapterInventoryItems => _adapterInventoryItems;
+    public ObservableCollection<AdapterCharacterItem> AdapterCharacters => _adapterCharacters;
     public ObservableCollection<ScanCandidate> VisibleScanResults { get => _visibleScanResults; private set => SetProperty(ref _visibleScanResults, value); }
     public GameProfile? SelectedGame
     {
@@ -170,6 +175,9 @@ public sealed class MainViewModel : ObservableObject
             OnPropertyChanged(nameof(HasSelectedGame));
             OnPropertyChanged(nameof(ActiveGameDisplayName));
             OnPropertyChanged(nameof(ActiveGameIcon));
+            OnPropertyChanged(nameof(HasCharacterEditor));
+            OnPropertyChanged(nameof(HasActiveCharacterAdapter));
+            OnPropertyChanged(nameof(HasUnsupportedCharacterAdapter));
             NotifyLibraryControls();
             NotifyConnectionControls();
         }
@@ -229,6 +237,20 @@ public sealed class MainViewModel : ObservableObject
     public ScanCandidate? SelectedScanResult { get => _selectedScanResult; set => SetProperty(ref _selectedScanResult, value); }
     public SavedField? SelectedSavedField { get => _selectedSavedField; set => SetProperty(ref _selectedSavedField, value); }
     public AdapterInventoryItem? SelectedAdapterItem { get => _selectedAdapterItem; set => SetProperty(ref _selectedAdapterItem, value); }
+    public AdapterCharacterItem? SelectedAdapterCharacter
+    {
+        get => _selectedAdapterCharacter;
+        set
+        {
+            if (!SetProperty(ref _selectedAdapterCharacter, value)) return;
+            SelectedCharacterAttribute = value?.Attributes.FirstOrDefault();
+        }
+    }
+    public AdapterCharacterAttribute? SelectedCharacterAttribute
+    {
+        get => _selectedCharacterAttribute;
+        set => SetProperty(ref _selectedCharacterAttribute, value);
+    }
     public string AdapterItemNameFilter
     {
         get => _adapterItemNameFilter;
@@ -328,6 +350,12 @@ public sealed class MainViewModel : ObservableObject
     public bool CanUndoScan => !IsBusy && _scanHistory.Count > 0;
     public bool HasActiveAdapter => _activeAdapter is not null;
     public bool HasActiveInventoryAdapter => _activeAdapter is IInventoryGameAdapter;
+    public bool HasCharacterEditor => _activeAdapter is ICharacterAttributesGameAdapter;
+    public bool HasActiveCharacterAdapter =>
+        _activeAdapter is ICharacterAttributesGameAdapter adapter && AttachedProcess is not null &&
+        adapter.SupportsCharacterAttributes(AttachedProcess);
+    public bool HasUnsupportedCharacterAdapter =>
+        _activeAdapter is ICharacterAttributesGameAdapter && !HasActiveCharacterAdapter;
     public bool HasNoActiveAdapter => _activeAdapter is null;
     public string ActiveGameDisplayName => !string.IsNullOrWhiteSpace(SelectedGame?.Name)
         ? SelectedGame.Name
@@ -582,6 +610,9 @@ public sealed class MainViewModel : ObservableObject
         if (_activeSession is not null) _activeSession.Adapter = _activeAdapter;
         OnPropertyChanged(nameof(HasActiveAdapter));
         OnPropertyChanged(nameof(HasActiveInventoryAdapter));
+        OnPropertyChanged(nameof(HasCharacterEditor));
+        OnPropertyChanged(nameof(HasActiveCharacterAdapter));
+        OnPropertyChanged(nameof(HasUnsupportedCharacterAdapter));
         OnPropertyChanged(nameof(HasNoActiveAdapter));
         OnPropertyChanged(nameof(ActiveAdapterText));
         var version = FindMatchingVersion(game, fingerprint);
@@ -649,6 +680,9 @@ public sealed class MainViewModel : ObservableObject
         }
         OnPropertyChanged(nameof(HasActiveAdapter));
         OnPropertyChanged(nameof(HasActiveInventoryAdapter));
+        OnPropertyChanged(nameof(HasCharacterEditor));
+        OnPropertyChanged(nameof(HasActiveCharacterAdapter));
+        OnPropertyChanged(nameof(HasUnsupportedCharacterAdapter));
         OnPropertyChanged(nameof(HasNoActiveAdapter));
         OnPropertyChanged(nameof(ActiveAdapterText));
 
@@ -1214,6 +1248,56 @@ public sealed class MainViewModel : ObservableObject
             : $"已把 {items.Count:N0} 种物品的物品总数批量修改并保存为 {value.Trim()}";
     }
 
+    public async Task RefreshAdapterCharactersAsync()
+    {
+        var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
+        if (_activeAdapter is not ICharacterAttributesGameAdapter adapter || !adapter.SupportsCharacterAttributes(process))
+            throw new InvalidOperationException("当前游戏构建没有可用的人物属性编辑模块。");
+
+        var selectedId = SelectedAdapterCharacter?.CharacterId;
+        var selectedAttribute = SelectedCharacterAttribute?.Key;
+        StatusText = "正在读取游戏人物与属性…";
+        var characters = await Task.Run(() => adapter.ReadCharacters(process));
+        _adapterCharacters.Clear();
+        foreach (var character in characters) _adapterCharacters.Add(character);
+        SelectedAdapterCharacter = _adapterCharacters.FirstOrDefault(item =>
+            string.Equals(item.CharacterId, selectedId, StringComparison.Ordinal)) ?? _adapterCharacters.FirstOrDefault();
+        if (SelectedAdapterCharacter is not null && !string.IsNullOrWhiteSpace(selectedAttribute))
+            SelectedCharacterAttribute = SelectedAdapterCharacter.Attributes.FirstOrDefault(item =>
+                string.Equals(item.Key, selectedAttribute, StringComparison.Ordinal)) ?? SelectedAdapterCharacter.Attributes.FirstOrDefault();
+        StatusText = $"已读取 {_adapterCharacters.Count:N0} 个人物；属性修改仅本次游戏运行有效";
+    }
+
+    public async Task WriteSelectedCharacterAttributeAsync(string value)
+    {
+        var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
+        if (_activeAdapter is not ICharacterAttributesGameAdapter adapter || !adapter.SupportsCharacterAttributes(process))
+            throw new InvalidOperationException("当前游戏构建没有可用的人物属性编辑模块。");
+        var character = SelectedAdapterCharacter ?? throw new InvalidOperationException("请先选择一个人物。");
+        var attribute = SelectedCharacterAttribute ?? throw new InvalidOperationException("请先选择一个人物属性。");
+        if (!int.TryParse(value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var target) || target < 0)
+            throw new InvalidOperationException("人物属性必须是 0 到 2147483647 之间的整数。");
+
+        StatusText = $"正在修改 {character.DisplayName} 的{attribute.DisplayName}…";
+        await Task.Run(() => adapter.WriteCharacterAttribute(process, character.CharacterId, attribute.Key, target));
+        await RefreshAdapterCharactersAsync();
+        SelectedAdapterCharacter = _adapterCharacters.FirstOrDefault(item =>
+            string.Equals(item.CharacterId, character.CharacterId, StringComparison.Ordinal));
+        SelectedCharacterAttribute = SelectedAdapterCharacter?.Attributes.FirstOrDefault(item =>
+            string.Equals(item.Key, attribute.Key, StringComparison.Ordinal));
+        StatusText = $"已实时修改 {character.DisplayName} 的{attribute.DisplayName}；关闭游戏后会失效";
+    }
+
+    public async Task<SavedField> AddCharacterAttributeFieldAsync(string displayName, string group)
+    {
+        var adapter = _activeAdapter ?? throw new InvalidOperationException("当前游戏构建没有可用的专属适配器。");
+        var character = SelectedAdapterCharacter ?? throw new InvalidOperationException("请先选择一个人物。");
+        var attribute = SelectedCharacterAttribute ?? throw new InvalidOperationException("请先选择一个人物属性。");
+        var editorId = adapter.Editors.First(editor => editor.Kind == GameEditorKind.MasterDetail).Id;
+        var fieldKey = ModuleFieldKey.Create(editorId, character.CharacterId, attribute.Key);
+        return await AddAdapterFieldAsync(fieldKey, displayName, group);
+    }
+
     public async Task AccelerateGameAsync()
     {
         var process = AttachedProcess ?? throw new InvalidOperationException("请先连接游戏进程。");
@@ -1399,6 +1483,8 @@ public sealed class MainViewModel : ObservableObject
         var field = SelectedSavedField ?? throw new InvalidOperationException("请先选择字段。");
         if (!field.IsValueLocked)
         {
+            if (IsSessionOnlyCharacterField(field))
+                throw new InvalidOperationException("人物属性模块仅本次游戏运行有效，不支持锁定或在重启后自动重应用。");
             if (string.IsNullOrWhiteSpace(field.CurrentValue) || field.CurrentValue == "—")
                 throw new InvalidOperationException("请先刷新或修改字段数值，再启用锁定。");
             field.LockedValue = field.CurrentValue;
@@ -1636,6 +1722,9 @@ public sealed class MainViewModel : ObservableObject
         _activeAdapter = _activeSession?.Adapter;
         OnPropertyChanged(nameof(HasActiveAdapter));
         OnPropertyChanged(nameof(HasActiveInventoryAdapter));
+        OnPropertyChanged(nameof(HasCharacterEditor));
+        OnPropertyChanged(nameof(HasActiveCharacterAdapter));
+        OnPropertyChanged(nameof(HasUnsupportedCharacterAdapter));
         OnPropertyChanged(nameof(HasNoActiveAdapter));
         OnPropertyChanged(nameof(ActiveAdapterText));
     }
@@ -1676,7 +1765,9 @@ public sealed class MainViewModel : ObservableObject
     private IGameAdapter ResolveFieldAdapter(SavedField field, IGameAdapter? adapterOverride = null)
     {
         var adapter = adapterOverride ?? _activeAdapter;
-        if (adapter is null || !string.Equals(adapter.Id, field.AdapterId, StringComparison.Ordinal))
+        if (adapter is null ||
+            (!string.Equals(adapter.Id, field.AdapterId, StringComparison.Ordinal) &&
+             !adapter.LegacyIds.Any(alias => string.Equals(alias, field.AdapterId, StringComparison.Ordinal))))
             throw new InvalidOperationException("当前进程或游戏构建与该字段保存的专属适配器不匹配。");
         return adapter;
     }
@@ -1711,7 +1802,10 @@ public sealed class MainViewModel : ObservableObject
         session.VisibleScanResults = VisibleScanResults;
         session.SelectedScanResult = SelectedScanResult;
         session.AdapterItems = _adapterInventoryItems.ToList();
+        session.AdapterCharacters = _adapterCharacters.ToList();
         session.SelectedAdapterFieldKey = SelectedAdapterItem?.FieldKey;
+        session.SelectedCharacterId = SelectedAdapterCharacter?.CharacterId;
+        session.SelectedCharacterAttributeKey = SelectedCharacterAttribute?.Key;
         session.AdapterItemNameFilter = AdapterItemNameFilter;
         session.AdapterItemCountFilter = AdapterItemCountFilter;
         session.ScanValue = ScanValue;
@@ -1760,6 +1854,12 @@ public sealed class MainViewModel : ObservableObject
         AdapterItemsView.Refresh();
         SelectedAdapterItem = _adapterInventoryItems.FirstOrDefault(item =>
             string.Equals(item.FieldKey, session.SelectedAdapterFieldKey, StringComparison.Ordinal));
+        _adapterCharacters.Clear();
+        foreach (var character in session.AdapterCharacters) _adapterCharacters.Add(character);
+        SelectedAdapterCharacter = _adapterCharacters.FirstOrDefault(item =>
+            string.Equals(item.CharacterId, session.SelectedCharacterId, StringComparison.Ordinal));
+        SelectedCharacterAttribute = SelectedAdapterCharacter?.Attributes.FirstOrDefault(item =>
+            string.Equals(item.Key, session.SelectedCharacterAttributeKey, StringComparison.Ordinal));
         AdapterItemNameFilter = session.AdapterItemNameFilter;
         AdapterItemCountFilter = session.AdapterItemCountFilter;
         ScanValue = session.ScanValue;
@@ -1778,6 +1878,9 @@ public sealed class MainViewModel : ObservableObject
         ConnectionText = $"已连接 · {session.Process.ProcessName} · PID {session.Process.ProcessId}";
         OnPropertyChanged(nameof(HasActiveAdapter));
         OnPropertyChanged(nameof(HasActiveInventoryAdapter));
+        OnPropertyChanged(nameof(HasCharacterEditor));
+        OnPropertyChanged(nameof(HasActiveCharacterAdapter));
+        OnPropertyChanged(nameof(HasUnsupportedCharacterAdapter));
         OnPropertyChanged(nameof(HasNoActiveAdapter));
         OnPropertyChanged(nameof(ActiveAdapterText));
         OnPropertyChanged(nameof(SpeedStatusText));
@@ -1803,11 +1906,16 @@ public sealed class MainViewModel : ObservableObject
         SelectedScanResult = null;
         _adapterInventoryItems.Clear();
         SelectedAdapterItem = null;
+        _adapterCharacters.Clear();
+        SelectedAdapterCharacter = null;
         IsSpeedActive = false;
         SelectedVersion = selectedGame?.Versions.OrderByDescending(item => item.LastVerifiedUtc).FirstOrDefault();
         ConnectionText = "未连接";
         OnPropertyChanged(nameof(HasActiveAdapter));
         OnPropertyChanged(nameof(HasActiveInventoryAdapter));
+        OnPropertyChanged(nameof(HasCharacterEditor));
+        OnPropertyChanged(nameof(HasActiveCharacterAdapter));
+        OnPropertyChanged(nameof(HasUnsupportedCharacterAdapter));
         OnPropertyChanged(nameof(HasNoActiveAdapter));
         OnPropertyChanged(nameof(ActiveAdapterText));
         OnPropertyChanged(nameof(SpeedStatusText));
@@ -2122,7 +2230,8 @@ public sealed class MainViewModel : ObservableObject
             while (!cancellationToken.IsCancellationRequested)
             {
                 IReadOnlyList<SavedField> lockedFields = [];
-                await RunOnUiAsync(() => lockedFields = version.Fields.Where(field => field.IsValueLocked).ToList());
+                await RunOnUiAsync(() => lockedFields = version.Fields
+                    .Where(field => field.IsValueLocked && !IsSessionOnlyCharacterField(field)).ToList());
                 if (lockedFields.Count == 0) return;
 
                 foreach (var field in lockedFields)
@@ -2174,6 +2283,11 @@ public sealed class MainViewModel : ObservableObject
         {
         }
     }
+
+    private static bool IsSessionOnlyCharacterField(SavedField field) =>
+        string.Equals(field.LocatorKind, "GameAdapter", StringComparison.Ordinal) &&
+        ModuleFieldKey.TryParse(field.AdapterFieldKey, out var editorId, out _, out _) &&
+        string.Equals(editorId, "game.fzzml.character-attributes", StringComparison.Ordinal);
 
     private static async Task RunOnUiAsync(Action action)
     {
@@ -2239,7 +2353,10 @@ public sealed class MainViewModel : ObservableObject
         public ObservableCollection<ScanCandidate> VisibleScanResults { get; set; } = [];
         public ScanCandidate? SelectedScanResult { get; set; }
         public List<AdapterInventoryItem> AdapterItems { get; set; } = [];
+        public List<AdapterCharacterItem> AdapterCharacters { get; set; } = [];
         public string? SelectedAdapterFieldKey { get; set; }
+        public string? SelectedCharacterId { get; set; }
+        public string? SelectedCharacterAttributeKey { get; set; }
         public string AdapterItemNameFilter { get; set; } = string.Empty;
         public string AdapterItemCountFilter { get; set; } = string.Empty;
         public string ScanValue { get; set; } = string.Empty;

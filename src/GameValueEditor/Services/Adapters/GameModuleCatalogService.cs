@@ -5,13 +5,14 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using GameValueEditor.Models;
+using GameValueEditor.ModuleSdk;
 
 namespace GameValueEditor.Services.Adapters;
 
 public sealed class GameModuleCatalogService
 {
     public const string DefaultCatalogUrl =
-        "https://raw.githubusercontent.com/BestWishes/GameValueEditor/main/modules/catalog.json";
+        "https://raw.githubusercontent.com/BestWishes/GameValueEditor-Modules/main/catalog.json";
 
     private readonly string _modulesDirectory;
     private readonly HttpClient _httpClient;
@@ -45,11 +46,12 @@ public sealed class GameModuleCatalogService
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         var catalog = await JsonSerializer.DeserializeAsync<GameModuleCatalog>(stream, _jsonOptions, cancellationToken)
                       ?? throw new InvalidOperationException("无法读取游戏专属模块清单。");
-        if (catalog.HostApiVersion != 1)
-            throw new InvalidOperationException($"服务器模块清单需要接口版本 {catalog.HostApiVersion}，当前应用仅支持 1。");
+        if (catalog.HostApiVersion > ModuleHostApi.CurrentVersion)
+            throw new InvalidOperationException(
+                $"服务器模块清单需要接口版本 {catalog.HostApiVersion}，当前应用最高支持 {ModuleHostApi.CurrentVersion}。");
 
         var compatible = catalog.Modules
-            .Where(module => module.HostApiVersion == 1 && Matches(module, game, version))
+            .Where(module => module.HostApiVersion is >= 1 and <= ModuleHostApi.CurrentVersion && Matches(module, game, version))
             .OrderByDescending(module => ParseVersion(module.Version))
             .FirstOrDefault();
         if (compatible is null)
@@ -115,6 +117,8 @@ public sealed class GameModuleCatalogService
 
             var document = LoadInstalled();
             document.Modules.RemoveAll(item => string.Equals(item.Id, module.Id, StringComparison.Ordinal));
+            foreach (var legacyId in module.LegacyIds)
+                document.Modules.RemoveAll(item => string.Equals(item.Id, legacyId, StringComparison.Ordinal));
             document.Modules.Add(new InstalledModuleRecord(module.Id, module.Version, DateTime.UtcNow));
             SaveInstalled(document);
         }
@@ -156,7 +160,8 @@ public sealed class GameModuleCatalogService
                        ?? throw new InvalidOperationException("专属模块包的 module.json 无效。");
         if (!string.Equals(manifest.Id, catalogEntry.Id, StringComparison.Ordinal) ||
             !string.Equals(manifest.Version, catalogEntry.Version, StringComparison.OrdinalIgnoreCase) ||
-            manifest.HostApiVersion != 1)
+            manifest.HostApiVersion != catalogEntry.HostApiVersion ||
+            manifest.HostApiVersion is < 1 or > ModuleHostApi.CurrentVersion)
             throw new InvalidOperationException("专属模块包与服务器清单不一致。");
         var assemblyPath = Path.GetFullPath(Path.Combine(directory, manifest.AssemblyFile));
         if (!assemblyPath.StartsWith(Path.GetFullPath(directory), StringComparison.OrdinalIgnoreCase) || !File.Exists(assemblyPath))
@@ -228,7 +233,7 @@ public sealed record GameModuleCheckResult(
 public sealed class GameModuleCatalog
 {
     public int SchemaVersion { get; set; } = 1;
-    public int HostApiVersion { get; set; } = 1;
+    public int HostApiVersion { get; set; } = ModuleHostApi.CurrentVersion;
     public List<GameModuleCatalogEntry> Modules { get; set; } = [];
 }
 
@@ -239,10 +244,21 @@ public sealed class GameModuleCatalogEntry
     public string DisplayName { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
     public int HostApiVersion { get; set; } = 1;
+    public List<string> LegacyIds { get; set; } = [];
+    public List<GameModuleEditorEntry> Editors { get; set; } = [];
     public List<string> ProcessNames { get; set; } = [];
     public List<GameModuleBuildMatch> CompatibleBuilds { get; set; } = [];
     public string DownloadUrl { get; set; } = string.Empty;
     public string Sha256 { get; set; } = string.Empty;
+}
+
+public sealed class GameModuleEditorEntry
+{
+    public string Id { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+    public string Kind { get; set; } = string.Empty;
+    public int Order { get; set; }
+    public bool SessionOnly { get; set; }
 }
 
 public sealed class GameModuleBuildMatch

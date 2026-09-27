@@ -1,219 +1,157 @@
-# 新游戏搜索套路与专属适配器扩展指南
+# 新游戏搜索套路与专属模块扩展指南
 
-这份文档说明如何为新游戏扩展“肝肾大圣-单机游戏数值编辑器”。先判断问题属于**通用搜索套路**还是**游戏专属适配器**，不要因为一款游戏的细微差异就新增一个难以复用的套路。
+这份文档说明如何扩展“肝肾大圣-单机游戏数值编辑器”。先判断需求属于通用搜索套路，还是必须调用游戏运行时对象与函数的游戏专属模块。完整两层模型见 [游戏专属模块与游戏内编辑模块设计](GAME_MODULE_AND_EDITOR_MODULE_DESIGN.md)。
 
 ## 先做分类
 
-适合通用搜索套路的情况：
+适合通用搜索套路：
 
 - 数值仍以普通内存数据存在，只是经过可参数化的编码或换算。
-- 同一种规则可能出现在多个游戏，例如“界面值乘以任意倍数后存储”。
-- 写入候选地址后，游戏会直接读取并生效，不要求调用游戏自己的对象、缓存或保存函数。
+- 规则能跨游戏复用，例如“界面值乘任意倍数后存储”。
+- 写入候选地址后游戏会直接读取，不要求调用业务对象、缓存或保存函数。
 
-适合游戏专属适配器的情况：
+适合游戏专属模块：
 
-- 搜到的数字只是副本、缓存或 UI 文本，直接写入不会影响真实游戏状态。
-- 正确写入必须按业务键（物品 ID、物品名等）重新定位运行时对象。
-- 必须在游戏主线程调用自身函数，刷新缓存、UI 或存档。
-- 数据结构、函数偏移和类布局只对某个确定构建有效。
+- 搜到的数字只是副本、缓存或 UI 文本。
+- 必须按物品名、人物 ID 等稳定业务键重新定位运行时对象。
+- 必须在游戏主线程调用缓存、事件或保存函数。
+- 数据结构、函数偏移和类布局只对经过验证的构建有效。
 
-如果尚未证明一套规则可以跨游戏复用，先实现严格匹配构建的专属适配器；拿到多个独立游戏的共同证据后，再抽象成通用套路。
+尚未证明可跨游戏复用时，先做严格匹配构建的专属模块，不能把某个游戏的 RVA 伪装成通用套路。
 
-## 添加通用搜索套路
+## 通用搜索套路
 
-相关代码：
+相关代码在 `Models/MemoryValueType.cs`、`Models/ProcessItem.cs` 和 `ViewModels/MainViewModel.cs`。新增套路时：
 
-- `Models/MemoryValueType.cs`：套路 ID 和数值编码工具。
-- `ViewModels/MainViewModel.cs`：套路列表、参数输入和扫描目标构造。
-- `Models/ProcessItem.cs`：`ScanCandidate` 保存套路 ID、显示名、参数、首次值和当前值。
+1. 使用稳定且不可随意改名的套路 ID。
+2. 把可变化部分保存为参数；2 倍、3 倍和 100 倍属于同一个“按比例存储”套路。
+3. 首次扫描、再次扫描、临时写入和已保存字段必须使用相同的编码/解码规则。
+4. 候选保留原始类型、套路 ID、参数、首次/上次/当前字节，显示值只是派生信息。
+5. 为溢出、非法参数、编码、解码和扫描回归添加测试。
 
-实现步骤：
+## 两层专属模块模型
 
-1. 为规则添加稳定且不可随意改名的套路 ID。
-2. 把可变化部分保存为参数，不要为每个参数值创建新套路。例如 2 倍、3 倍和 100 倍都属于同一个“按比例存储”套路。
-3. 在首次扫描时把界面值编码为原始字节；再次精确扫描和临时写入必须使用完全相同的逆向规则。
-4. `ScanCandidate` 必须保留原始类型、套路 ID、参数以及首次/上次/当前字节，显示值只是派生信息。
-5. 保存字段时，把套路 ID 和参数写入 `SavedField` 与对应 `GameVersionProfile`。
-6. 为编码、解码、溢出、非法参数和扫描回归添加自动化测试。
+主程序仓库 [GameValueEditor](https://github.com/BestWishes/GameValueEditor) 负责宿主、统一界面、Host API 和安全安装；独立模块中心 [GameValueEditor-Modules](https://github.com/BestWishes/GameValueEditor-Modules) 负责各游戏源码、清单、文档和发行包。
 
-通用套路不得依赖游戏名、硬编码地址、模块 RVA 或某个构建的类布局；这些内容属于专属适配器。
+- 游戏专属模块代表一个游戏，例如 `game.fzzml`。
+- 游戏内编辑模块代表该游戏的一种功能，例如 `game.fzzml.inventory` 和 `game.fzzml.character-attributes`。
+- 一个游戏使用一个 ZIP/DLL，可以注册多个编辑模块。
+- “本游专属”顶部状态属于整个游戏包，下方使用竖向导航切换各编辑模块。
+- 宿主统一渲染 `collection`、`master-detail` 和 `property-grid` 等标准界面；游戏模块返回数据和操作能力。
 
-## 添加可选游戏专属模块
+Host API v2 契约位于 `src/GameValueEditor.ModuleSdk`。模块中心保存同版本 SDK 源码快照；发布模块 ZIP 时只放游戏模块 DLL 和 `module.json`，不要把另一份 SDK DLL 或主程序 DLL 放入 ZIP。
 
-从 v0.3 开始，专属适配器不再编译进主程序，而是作为可独立下载、校验和更新的模块安装到 `data/modules`。适配器接口仍位于 `Services/Adapters/IGameAdapter.cs`：
+## 创建游戏模块
 
-- `IGameAdapter`：按稳定字段键读取和写入。
-- `IInventoryGameAdapter`：额外枚举背包物品，供“本游专属 > 背包物品数量”页面使用。
-- `GameAdapterRegistry`：从已安装模块加载并按当前进程与构建解析适配器。
-
-一个模块 ZIP 的根目录至少包含：
+建议目录：
 
 ```text
-module.json
-GameValueEditor.Modules.Example.dll
+games/example/
+  GameValueEditor.Modules.Example.csproj
+  module.json
+  src/
+    ExampleGameAdapter.cs
+    Shared/
+    Editors/
+      Inventory/
+      CharacterAttributes/
+  docs/
 ```
+
+游戏适配器实现 `IGameAdapter`，并根据编辑能力实现 `IInventoryGameAdapter`、`ICharacterAttributesGameAdapter` 等小接口。`Editors` 返回稳定编辑器 ID、显示名称、类型、排序和是否仅会话有效。
 
 `module.json` 示例：
 
 ```json
 {
-  "id": "game.example.inventory.v1",
+  "id": "game.example",
   "version": "1.0.0",
-  "displayName": "示例游戏背包适配器",
+  "displayName": "示例游戏专属模块",
   "assemblyFile": "GameValueEditor.Modules.Example.dll",
-  "hostApiVersion": 1
+  "hostApiVersion": 2,
+  "editors": [
+    {
+      "id": "game.example.inventory",
+      "displayName": "背包物品",
+      "kind": "collection",
+      "order": 100
+    }
+  ]
 }
 ```
 
-模块程序集引用主程序提供的接口程序集；打包时不要把另一份 `GameValueEditor.dll` 放进 ZIP。模块 ID 是更新和已保存字段匹配用的稳定身份，发布后不要因显示名称变化而更换。
+稳定 ID 发布后不得因中文名称变化而更换。同一游戏只启用一个游戏包版本；同一包内编辑器 ID 不得重复。
 
-建议按以下顺序实现。
+## 构建身份与兼容范围
 
-### 1. 定义身份和支持范围
+`Supports` 必须严格验证目标构建：至少验证主 EXE SHA-256；Unity IL2CPP 游戏还应验证 `GameAssembly.dll` 和 `global-metadata.dat`。不得只依赖窗口标题、进程名、Unity 版本、文件时间或相似的显示版本。
 
-- 使用稳定的适配器 ID，例如 `game.example.inventory.v1`。
-- `Supports` 必须严格验证目标构建。至少验证主 EXE 的 SHA-256；Unity IL2CPP 游戏还应验证 `GameAssembly.dll` 和 `global-metadata.dat`。
-- 不要只依赖窗口标题、进程名、Unity 版本字符串或文件时间。
-- 新构建未验证时必须安全失败，并提示检查模块更新，不能尝试沿用旧偏移。
+每个编辑模块可以比整个游戏包支持更窄的构建范围。整个包支持当前构建时，某个未适配的编辑器应显示“当前构建暂不支持”，其他编辑器仍可使用。未知构建必须安全失败，不能猜偏移。
 
-### 2. 定义稳定字段键
+## 稳定字段键与快捷入口
 
-字段键用于重新定位真实数据，不等于玩家填写的“备注名称”。可选键包括物品配置 ID、唯一内部名称或可验证的复合键。
+快捷入口保存语义键，不保存本次会话的指针。Host API v2 提供 `ModuleFieldKey.Create(editorId, entityId, fieldId)`，把编辑器、实体和字段组合成稳定键。每次读取或写入都重新定位真实对象。
 
-每次读取或写入都应从当前进程重新定位对象。除非定位器本身能跨会话验证，否则不要把堆地址保存到游戏库。
+玩家填写的“备注名称”只用于显示，不能作为对象身份。发布新构建布局后，语义键相同的专属字段可以迁移；普通扫描地址不能跨构建复制。
 
-### 3. 分离读取、写入和界面
+如果编辑器声明 `SessionOnly`：
 
-- 读取返回游戏当前真实值和简短状态。
-- 写入先验证输入范围和结构，再执行最小修改。
-- 写入后重新读取真实对象并核对结果。
-- 如果游戏有缓存、索引、UI 整理或保存函数，应按游戏正常流程调用。
-- UI 只展示适配器返回的字段和结果，不在界面层猜测堆叠、上限或内部布局。
+- UI 必须明确说明关闭游戏后失效。
+- 不得把修改描述成已写入存档。
+- 不启用锁定，也不在重启或重新连接时自动重应用。
 
-### 4. 主线程和托管对象安全
+## 安全读取与写入生命周期
 
-Unity/IL2CPP 游戏中的托管对象修改通常要在 Unity 主线程完成。不要在任意远程线程中直接执行要求主线程上下文的业务函数。
+每次操作按以下顺序执行：
 
-修改 `System.String` 字段时，应创建新的托管字符串并通过运行时写屏障替换引用；不要原地改写可能被共享或不可变的字符串字符。
+1. 验证进程仍存在并确认精确构建。
+2. 用稳定语义键重新定位运行时对象。
+3. 读取并验证对象类型、身份和当前值。
+4. 校验输入类型、范围和写入前置条件。
+5. 在游戏要求的线程执行最小修改。
+6. 调用所需的缓存、事件、UI 或保存流程。
+7. 重新读取真实值；只有回读一致才报告成功。
 
-临时挂接代码必须：
+Unity/IL2CPP 业务函数通常需要主线程。临时挂接必须校验原始指令，保存并恢复指令与页面保护，设置完成状态和硬超时；无法确认远程代码是否仍在执行时不要释放其内存。修改 `System.String` 字段时创建新托管字符串并使用写屏障替换引用，不要原地修改共享字符串。
 
-- 校验原始指令字节后再写入。
-- 保存并恢复原始字节和页面保护。
-- 设置超时和完成状态。
-- 写入失败时尽量恢复目标进程。
-- 不在无法确认远程代码是否仍被执行时释放其内存。
+## 清单、下载和安装
 
-### 5. 持久化与锁定
+模块中心根目录 `catalog.json` 是“检查新有”的服务器清单。每项包括：
 
-专属字段保存：
+- 游戏模块 ID、语义化版本、Host API 版本和可选旧 ID。
+- 进程名与一个或多个精确兼容构建。
+- 编辑模块元数据。
+- HTTPS Release 下载地址与 ZIP SHA-256。
 
-- `LocatorKind = "GameAdapter"`
-- `AdapterId` 保存适配器 ID
-- `AdapterFieldKey` 保存稳定业务键
+安装流程固定为：临时下载、SHA-256 校验、安全解压、核对 `module.json`、原子移动到 `data/modules/packages/{游戏模块ID}/{版本}`，最后更新 `installed.json`。模块是可执行代码，必须审查来源。损坏模块不得阻止主程序启动。
 
-字段锁定会周期性调用适配器读取真实值，并在偏离目标时走同一个安全写入流程。不要为锁定另写一套绕过缓存或存档的快捷路径。
+不要先提交指向不存在资产的清单，也不要在相同版本下替换 ZIP 内容。内容变化必须提升模块版本并生成新哈希。
 
-## 模块清单与兼容规则
+## fzzml 参考实现
 
-仓库根目录的 `modules/catalog.json` 是“检查新有”的服务器清单。每项需要包含：
+模块中心的 `game.fzzml` v2.0.0 同时注册：
 
-- 模块 ID、语义化模块版本、显示名称、接口版本。
-- 允许的进程名列表。
-- 一个或多个兼容构建；每个构建可声明 EXE、`GameAssembly.dll`、元数据或组合构建指纹。
-- HTTPS 下载地址和模块 ZIP 的 SHA-256。
+- `game.fzzml.inventory`：从 `SaveManager._cachedSnapshot.inventoryRows` 按物品名聚合，在 Unity 主线程替换数量字符串，刷新缓存并调用游戏自身保存函数。应用不会主动把超过 9999 的值拆栈。
+- `game.fzzml.character-attributes`：从 `playerDefault.units` 枚举人物，用 `UnitSlotData.unitId` 定位，修改本次进程的 `PlayerUnitConfig` 基础五维，调用聚合器和属性事件。它仅本次游戏运行有效。
 
-兼容构建中填写的每个非空指纹都必须与当前游戏版本完全相同；进程名也必须匹配。因此为 `fzzml` 发布的模块不会出现在 `Long Live The Emperor` 中。不要用通配符放宽尚未实机验证的新构建。
+RVA、字段偏移和预期函数序言只属于清单列出的精确构建。支持新版本时新增经过审查的布局，不能静默覆盖旧布局。
 
-清单示例：
+## 测试与发布
 
-```json
-{
-  "schemaVersion": 1,
-  "hostApiVersion": 1,
-  "modules": [{
-    "id": "game.example.inventory.v1",
-    "version": "1.0.0",
-    "displayName": "示例游戏背包适配器",
-    "hostApiVersion": 1,
-    "processNames": ["ExampleGame"],
-    "compatibleBuilds": [{
-      "executableSha256": "64位十六进制 SHA-256",
-      "gameAssemblySha256": "可选的 SHA-256",
-      "metadataSha256": "可选的 SHA-256"
-    }],
-    "downloadUrl": "https://github.com/组织/仓库/releases/download/模块标签/模块.zip",
-    "sha256": "模块 ZIP 的 SHA-256"
-  }]
-}
-```
-
-安装流程固定为：下载到临时文件、校验 SHA-256、安全解压、核对 `module.json`、原子移动到 `data/modules/packages/{模块ID}/{版本}`，最后更新 `installed.json`。模块 ID、版本、ZIP 路径和程序集路径都必须通过路径边界校验；损坏的可选模块不得阻止主程序启动。
-
-### 打包和发布
-
-官方 fzzml 模块可用以下命令构建：
-
-```powershell
-./scripts/publish-module.ps1 -Version 1.0.0
-```
-
-脚本会创建 `dist/modules/GameValueEditor.Module.Fzzml-v1.0.0.zip`，计算 SHA-256 并更新清单。发布顺序是：
-
-1. 构建模块并完成自动化与实机验证。
-2. 把 ZIP 上传到清单中 `downloadUrl` 指向的 GitHub Release。
-3. 确认 Release 资产下载地址稳定可访问。
-4. 提交更新后的 `modules/catalog.json`。
-5. 用一个已支持构建和一个不支持/错误游戏分别执行“检查新有”，验证前者可见、后者不可见。
-
-不要先发布指向不存在资产的清单；不要在相同模块版本下替换 ZIP 内容。内容变化时必须提升模块版本并生成新 SHA-256。
-
-## fzzml 示例
-
-`GameValueEditor.Modules.Fzzml` 是当前参考模块，核心适配器为 `FzzmlInventoryAdapter`：
-
-1. 同时验证 `fzzml.exe`、`GameAssembly.dll` 和 `global-metadata.dat` 的 SHA-256。
-2. 每次操作从 `SaveManager.Instance` 重新读取 `AllParsedData.inventoryRows`。
-3. 按游戏内物品名聚合数量；玩家输入直接表示物品总数，不把超过 9999 的值在编辑器中拆栈。
-4. 在 Unity 主线程创建新的 IL2CPP 数量字符串，替换目标行引用。
-5. 调用游戏自身的清理、缓存、请求保存、刷新和 `SaveInventory2D_Binary` 流程。
-6. 最后重新定位并复核物品总数。
-
-这个适配器里的 RVA、字段偏移和预期函数序言只属于已验证构建。支持新版本时应建立新的版本适配器或经过审查的新布局配置，不能静默覆盖旧构建定义。
-
-同一个适配器 ID 可以包含多个经过验证的构建布局。连接到新布局后，应用会把旧版本中使用相同适配器 ID 的语义字段（例如物品名）复制到新的版本档案；不会复制普通扫描得到的地址或模块偏移。迁移后的字段默认不锁定，避免连接瞬间自动写入旧目标值。
-
-## “本游专属”界面接入
-
-“本游专属”Tab 永久可见。没有兼容模块时只显示检查按钮、模块状态和使用“通用扫描”的提示；模块安装并成功解析后才显示其专属内容。现有主窗口会在当前适配器实现 `IInventoryGameAdapter` 时启用背包页。新增其他专属内容时，优先新增小接口和独立子页，例如角色属性、任务状态或资源表，不要把所有游戏逻辑塞进背包接口。
-
-界面至少应提供：
-
-- 明确的刷新动作和状态信息。
-- 按业务名称/数值筛选。
-- Windows 标准多选；批量修改只能执行适配器明确支持的同类值写入。
-- 单项保存到“快捷入口”，备注名称仍由玩家填写。
-- 写入失败时不伪装为成功，也不保留未经复核的显示值。
-
-## 测试清单
-
-提交前至少执行：
+主程序至少执行：
 
 ```powershell
 dotnet build GameValueEditor.sln -c Release
 dotnet run --project tests/GameValueEditor.SmokeTests/GameValueEditor.SmokeTests.csproj -c Release
 ```
 
-新增专属适配器还应记录以下实机验证：
+模块中心至少执行：
 
-- 支持构建指纹匹配，未知构建拒绝启用。
-- 读取值与游戏界面/存档一致。
-- 小范围测试写入立即生效。
-- 刷新界面、切换页面后仍一致。
-- 正常保存并重启游戏后仍一致。
-- 超范围输入、对象未加载、结构变化和超时均安全失败。
-- 数值锁定解除后不再写入。
-- 模块没有出现在进程名或构建指纹不匹配的其他游戏中。
-- 模块检查、下载和安装按钮在请求中及冷却期间无法重复触发。
+```powershell
+dotnet build GameValueEditor.Modules.slnx -c Release
+./scripts/publish-fzzml.ps1 -Version 2.0.0
+```
 
-自动化实机写入应使用对玩家存档影响很小的数值并设置硬上限。发布说明中要明确新增了哪些写入行为、支持哪个构建，以及是否需要管理员权限。
+每个模块发布前还要实机验证：支持构建能加载，错误构建被拒绝；读取与游戏一致；最小写入即时生效；页面刷新和对象重定位不串数据；持久化编辑器重启后仍正确；`SessionOnly` 编辑器重启后恢复；异常输入、对象未加载、结构变化和超时均安全失败；模块不会出现在其他游戏中。
+
+发布顺序：构建与测试、创建不可变 Release 资产、确认下载地址、把真实 SHA-256 写入 `catalog.json`、提交清单、再从已发布版本执行一次在线检查与安装验证。

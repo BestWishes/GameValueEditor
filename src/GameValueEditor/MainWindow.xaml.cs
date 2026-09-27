@@ -8,6 +8,7 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using GameValueEditor.Dialogs;
 using GameValueEditor.Models;
+using GameValueEditor.ModuleSdk;
 using GameValueEditor.Services.Adapters;
 using GameValueEditor.ViewModels;
 
@@ -299,6 +300,60 @@ public partial class MainWindow : Window
         var count = AdapterInventoryGrid.SelectedItems.Count;
         if (WriteAdapterItemsButton is not null) WriteAdapterItemsButton.IsEnabled = count > 0;
         if (SaveAdapterFieldButton is not null) SaveAdapterFieldButton.IsEnabled = count == 1;
+    }
+
+    private async void RefreshAdapterCharacters_OnClick(object sender, RoutedEventArgs e) =>
+        await RunGuardedAsync(_viewModel.RefreshAdapterCharactersAsync);
+
+    private async void WriteCharacterAttribute_OnClick(object sender, RoutedEventArgs e) =>
+        await EditSelectedCharacterAttributeAsync();
+
+    private async void AdapterCharacterAttributesGrid_OnMouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (FindAncestor<DataGridRow>(e.OriginalSource as DependencyObject) is null) return;
+        await EditSelectedCharacterAttributeAsync();
+    }
+
+    private async Task EditSelectedCharacterAttributeAsync()
+    {
+        await RunGuardedAsync(async () =>
+        {
+            var character = _viewModel.SelectedAdapterCharacter
+                            ?? throw new InvalidOperationException("请先选择一个人物。");
+            var attribute = _viewModel.SelectedCharacterAttribute
+                            ?? throw new InvalidOperationException("请先选择一个人物属性。");
+            var dialog = new TextInputDialog(
+                "修改人物属性",
+                $"输入“{character.DisplayName}”的{attribute.DisplayName}目标值（仅本次游戏运行有效）：",
+                attribute.RawValueDisplay) { Owner = this };
+            if (dialog.ShowDialog() != true) return;
+            await _viewModel.WriteSelectedCharacterAttributeAsync(dialog.Value);
+        });
+    }
+
+    private async void SaveCharacterAttribute_OnClick(object sender, RoutedEventArgs e)
+    {
+        await RunGuardedAsync(async () =>
+        {
+            var character = _viewModel.SelectedAdapterCharacter
+                            ?? throw new InvalidOperationException("请先选择一个人物。");
+            var attribute = _viewModel.SelectedCharacterAttribute
+                            ?? throw new InvalidOperationException("请先选择一个人物属性。");
+            if (_viewModel.SelectedGame is null || _viewModel.SelectedVersion is null)
+                throw new InvalidOperationException("请先点击游戏名称后的“保存入库”，再保存字段。");
+            var fieldKey = ModuleFieldKey.Create("game.fzzml.character-attributes", character.CharacterId, attribute.Key);
+            var dialog = new AdapterFieldDialog(
+                _viewModel.GetAvailableGroups(), fieldKey, $"{character.DisplayName} {attribute.DisplayName}") { Owner = this };
+            if (dialog.ShowDialog() != true) return;
+            await _viewModel.AddCharacterAttributeFieldAsync(dialog.DisplayName, dialog.GroupName);
+        });
+    }
+
+    private void AdapterCharacterAttributesGrid_OnSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        var enabled = AdapterCharacterAttributesGrid.SelectedItem is AdapterCharacterAttribute { CanWrite: true };
+        if (WriteCharacterAttributeButton is not null) WriteCharacterAttributeButton.IsEnabled = enabled;
+        if (SaveCharacterFieldButton is not null) SaveCharacterFieldButton.IsEnabled = enabled;
     }
 
     private async void SavedFieldsGrid_OnMouseDoubleClick(object sender, MouseButtonEventArgs e)
