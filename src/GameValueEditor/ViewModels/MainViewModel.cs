@@ -93,7 +93,8 @@ public sealed class MainViewModel : ObservableObject
     private GameModuleCheckResult? _moduleCheckResult;
     private string _applicationUpdateStatusPrefix = string.Empty;
     private string _applicationUpdateActionText = "检查更新";
-    private bool _isApplicationUpdateControlBlocked;
+    private bool _isApplicationUpdateBusy;
+    private bool _isApplicationUpdateCheckCooldown;
     private ApplicationUpdateCheckResult? _applicationUpdateResult;
     private bool _applicationUpdateDownloaded;
     private bool _isOfficialWebsiteControlBlocked;
@@ -356,7 +357,8 @@ public sealed class MainViewModel : ObservableObject
         get => _applicationUpdateActionText;
         private set => SetProperty(ref _applicationUpdateActionText, value);
     }
-    public bool CanUseApplicationUpdate => !_isApplicationUpdateControlBlocked && !_applicationUpdateDownloaded;
+    public bool CanUseApplicationUpdate => !_isApplicationUpdateBusy && !_applicationUpdateDownloaded &&
+        (HasApplicationUpdateAvailable || !_isApplicationUpdateCheckCooldown);
     public bool HasApplicationUpdateAvailable => _applicationUpdateResult?.IsUpdateAvailable == true && !_applicationUpdateDownloaded;
     public bool IsApplicationUpdateDownloaded => _applicationUpdateDownloaded;
     public bool CanOpenOfficialWebsite => !_isOfficialWebsiteControlBlocked;
@@ -393,14 +395,46 @@ public sealed class MainViewModel : ObservableObject
 
     public void RefreshProcesses()
     {
-        foreach (var stale in _sessions.Values.Where(session => !IsProcessRunning(session.Process)).ToList())
-            DisconnectSession(stale, ReferenceEquals(_activeSession, stale));
+        SynchronizeConnectionStates();
         var previousId = SelectedProcess?.ProcessId;
         Processes.Clear();
         foreach (var process in _processService.GetProcesses()) Processes.Add(process);
         SelectedProcess = Processes.FirstOrDefault(process => process.ProcessId == previousId)
                           ?? Processes.FirstOrDefault();
         StatusText = $"发现 {Processes.Count} 个可访问进程";
+    }
+
+    public int SynchronizeConnectionStates()
+    {
+        var staleSessions = _sessions.Values
+            .Append(_activeSession)
+            .Where(session => session is not null)
+            .Cast<GameConnectionSession>()
+            .Distinct()
+            .Where(session => !IsProcessRunning(session.Process))
+            .ToList();
+        if (staleSessions.Count == 0) return 0;
+
+        var activeStaleSession = staleSessions.FirstOrDefault(session => ReferenceEquals(_activeSession, session));
+        var activeProcessName = activeStaleSession?.Process.ProcessName;
+        foreach (var session in staleSessions)
+            DisconnectSession(session, ReferenceEquals(_activeSession, session));
+
+        var staleProcessKeys = staleSessions
+            .Select(session => (session.Process.ProcessId, session.Process.StartTimeUtc))
+            .ToHashSet();
+        foreach (var process in Processes
+                     .Where(process => staleProcessKeys.Contains((process.ProcessId, process.StartTimeUtc)))
+                     .ToList())
+            Processes.Remove(process);
+        if (SelectedProcess is not null &&
+            staleProcessKeys.Contains((SelectedProcess.ProcessId, SelectedProcess.StartTimeUtc)))
+            SelectedProcess = Processes.FirstOrDefault();
+
+        StatusText = !string.IsNullOrWhiteSpace(activeProcessName)
+            ? $"游戏进程 {activeProcessName} 已退出，已自动断开连接"
+            : $"检测到 {staleSessions.Count} 个游戏进程已退出，已同步连接状态";
+        return staleSessions.Count;
     }
 
     public async Task RefreshProcessesWithCooldownAsync()
@@ -1475,10 +1509,11 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task CheckApplicationUpdateAsync()
     {
-        if (_isApplicationUpdateControlBlocked || _applicationUpdateDownloaded) return;
-        _isApplicationUpdateControlBlocked = true;
+        if (_isApplicationUpdateBusy || _isApplicationUpdateCheckCooldown || _applicationUpdateDownloaded) return;
+        _isApplicationUpdateBusy = true;
+        _isApplicationUpdateCheckCooldown = true;
+        ReleaseApplicationUpdateCheckCooldownAfterDelay();
         NotifyApplicationUpdateState();
-        var cooldown = Task.Delay(TimeSpan.FromSeconds(10));
         try
         {
             ApplicationUpdateStatusPrefix = "检查中 ";
@@ -1506,7 +1541,8 @@ public sealed class MainViewModel : ObservableObject
         }
         finally
         {
-            ReleaseApplicationUpdateControlsAfter(cooldown);
+            _isApplicationUpdateBusy = false;
+            NotifyApplicationUpdateState();
         }
     }
 
@@ -1514,10 +1550,9 @@ public sealed class MainViewModel : ObservableObject
     {
         var update = _applicationUpdateResult;
         if (update?.IsUpdateAvailable != true) throw new InvalidOperationException("请先检查更新。");
-        if (_isApplicationUpdateControlBlocked || _applicationUpdateDownloaded) return false;
-        _isApplicationUpdateControlBlocked = true;
+        if (_isApplicationUpdateBusy || _applicationUpdateDownloaded) return false;
+        _isApplicationUpdateBusy = true;
         NotifyApplicationUpdateState();
-        var cooldown = Task.Delay(TimeSpan.FromSeconds(10));
         try
         {
             ApplicationUpdateStatusPrefix = $"v{update.Version} 下载中 ";
@@ -1528,9 +1563,17 @@ public sealed class MainViewModel : ObservableObject
             StatusText = $"已下载并校验 v{update.Version}，可立即重启或下次启动时更新";
             return true;
         }
+        catch
+        {
+            ApplicationUpdateStatusPrefix = $"v{update.Version} 下载失败 ";
+            ApplicationUpdateActionText = "更新";
+            StatusText = $"下载肝肾大圣 v{update.Version} 失败，请稍后重试";
+            throw;
+        }
         finally
         {
-            ReleaseApplicationUpdateControlsAfter(cooldown);
+            _isApplicationUpdateBusy = false;
+            NotifyApplicationUpdateState();
         }
     }
 
@@ -1616,12 +1659,12 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(IsApplicationUpdateDownloaded));
     }
 
-    private async void ReleaseApplicationUpdateControlsAfter(Task cooldown)
+    private async void ReleaseApplicationUpdateCheckCooldownAfterDelay()
     {
-        try { await cooldown; }
+        try { await Task.Delay(TimeSpan.FromSeconds(10)); }
         finally
         {
-            _isApplicationUpdateControlBlocked = false;
+            _isApplicationUpdateCheckCooldown = false;
             NotifyApplicationUpdateState();
         }
     }

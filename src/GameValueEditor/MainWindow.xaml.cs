@@ -5,6 +5,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using GameValueEditor.Dialogs;
 using GameValueEditor.Models;
 using GameValueEditor.Services.Adapters;
@@ -15,17 +16,32 @@ namespace GameValueEditor;
 public partial class MainWindow : Window
 {
     private readonly MainViewModel _viewModel = new();
+    private readonly DispatcherTimer _connectionMonitorTimer = new()
+    {
+        Interval = TimeSpan.FromSeconds(1)
+    };
 
     public MainWindow()
     {
         InitializeComponent();
         DataContext = _viewModel;
-        Loaded += async (_, _) => await RunGuardedAsync(_viewModel.InitializeAsync);
+        _connectionMonitorTimer.Tick += ConnectionMonitorTimer_OnTick;
+        Loaded += MainWindow_OnLoaded;
         Closing += MainWindow_OnClosing;
     }
 
+    private async void MainWindow_OnLoaded(object sender, RoutedEventArgs e)
+    {
+        await RunGuardedAsync(_viewModel.InitializeAsync);
+        _connectionMonitorTimer.Start();
+    }
+
+    private void ConnectionMonitorTimer_OnTick(object? sender, EventArgs e) =>
+        _viewModel.SynchronizeConnectionStates();
+
     private void MainWindow_OnClosing(object? sender, CancelEventArgs e)
     {
+        _connectionMonitorTimer.Stop();
         try
         {
             _viewModel.Shutdown();

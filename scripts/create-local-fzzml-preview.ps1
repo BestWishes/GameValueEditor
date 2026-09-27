@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$ApplicationVersion = "0.3.0-preview.4",
+    [string]$ApplicationVersion = "0.3.0-preview.5",
     [string]$ModuleVersion = "1.0.0"
 )
 

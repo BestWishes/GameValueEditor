@@ -97,7 +97,7 @@ try
     if (args.Contains("--update-live", StringComparer.OrdinalIgnoreCase))
     {
         var liveUpdateRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-LiveUpdate-{Guid.NewGuid():N}");
-        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.4");
+        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.5");
         var liveUpdate = await liveUpdateService.CheckAsync();
         Assert(liveUpdate.AssetName.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
                liveUpdate.AssetName.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase),
@@ -224,6 +224,27 @@ try
     await Task.Delay(2200);
     Assert(!cooldownViewModel.CanAccelerate && !cooldownViewModel.CanRestoreSpeed,
         "Speed buttons became enabled without an attached game after the interaction cooldown");
+
+    var livenessViewModel = new MainViewModel();
+    using (var currentProcess = Process.GetCurrentProcess())
+    {
+        var staleProcess = new ProcessItem
+        {
+            ProcessId = currentProcess.Id,
+            ProcessName = currentProcess.ProcessName,
+            ExecutablePath = executable!,
+            StartTimeUtc = currentProcess.StartTime.ToUniversalTime().AddSeconds(1)
+        };
+        livenessViewModel.Attach(staleProcess);
+        Assert(livenessViewModel.AttachedProcess is not null &&
+               livenessViewModel.ConnectionText.StartsWith("已连接", StringComparison.Ordinal),
+            "Liveness test could not create an attached session");
+        Assert(livenessViewModel.SynchronizeConnectionStates() == 1,
+            "Exited or PID-reused game session was not detected");
+        Assert(livenessViewModel.AttachedProcess is null && livenessViewModel.ConnectionText == "未连接",
+            "Stale game session remained connected after liveness synchronization");
+    }
+    livenessViewModel.Shutdown();
 
     var profileTestRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-Smoke-{Guid.NewGuid():N}");
     Directory.CreateDirectory(profileTestRoot);
@@ -386,6 +407,11 @@ try
         var previewUpdate = await previewUpdateService.CheckAsync();
         Assert(previewUpdate.IsUpdateAvailable && previewUpdate.Version == "0.3.0-preview.2",
             "Preview channel did not select the newest application preview after ignoring module releases");
+        var availableUpdateViewModel = new MainViewModel(previewUpdateService);
+        await availableUpdateViewModel.CheckApplicationUpdateAsync();
+        Assert(availableUpdateViewModel.HasApplicationUpdateAvailable && availableUpdateViewModel.CanUseApplicationUpdate,
+            "Newly available update remained disabled by the check-button cooldown");
+        availableUpdateViewModel.Shutdown();
         var stableUpdateService = new ApplicationUpdateService(
             Path.Combine(serviceTestRoot, "stable-updates"), releasesClient, "0.2.0");
         var stableUpdate = await stableUpdateService.CheckAsync();
