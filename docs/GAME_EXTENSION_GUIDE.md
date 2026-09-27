@@ -36,7 +36,7 @@
 - 游戏专属模块代表一个游戏，例如 `game.fzzml`。
 - 游戏内编辑模块代表该游戏的一种功能，例如 `game.fzzml.inventory` 和 `game.fzzml.character-attributes`。
 - 一个游戏使用一个 ZIP/DLL，可以注册多个编辑模块。
-- “本游专属”顶部状态属于整个游戏包，下方使用竖向导航切换各编辑模块。
+- “本游专属”顶部状态属于整个游戏包，下方使用左侧竖向导航切换各编辑模块，所选模块内容显示在右侧；模块名称不得显示成内容区上方的横向标题行。
 - 宿主统一渲染 `collection`、`master-detail` 和 `property-grid` 等标准界面；游戏模块返回数据和操作能力。
 
 Host API v2 契约位于 `src/GameValueEditor.ModuleSdk`。模块中心保存同版本 SDK 源码快照；发布模块 ZIP 时只放游戏模块 DLL 和 `module.json`，不要把另一份 SDK DLL 或主程序 DLL 放入 ZIP。

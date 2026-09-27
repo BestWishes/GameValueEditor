@@ -9,6 +9,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -100,7 +101,7 @@ try
     if (args.Contains("--update-live", StringComparer.OrdinalIgnoreCase))
     {
         var liveUpdateRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-LiveUpdate-{Guid.NewGuid():N}");
-        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.8");
+        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.9");
         var liveUpdate = await liveUpdateService.CheckAsync();
         Assert(liveUpdate.AssetName.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
                liveUpdate.AssetName.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase),
@@ -596,11 +597,41 @@ try
                     "Editor connect button must follow the selected library game");
                 Assert(BindingOperations.GetBinding(editorGameDisconnectButton, UIElement.IsEnabledProperty)?.Path.Path == nameof(MainViewModel.CanDisconnectSelectedGame),
                     "Editor disconnect button must follow the selected library game");
+                var editorModulesTabControl = (TabControl?)mainWindow.FindName("EditorModulesTabControl")
+                                              ?? throw new InvalidOperationException("Editor modules tab control was not created");
+                var inventoryEditorTab = (TabItem?)mainWindow.FindName("InventoryEditorTab")
+                                         ?? throw new InvalidOperationException("Inventory editor tab was not created");
+                var characterAttributesEditorTab = (TabItem?)mainWindow.FindName("CharacterAttributesEditorTab")
+                                                   ?? throw new InvalidOperationException("Character attributes editor tab was not created");
+                var mainTabs = (TabControl?)mainWindow.FindName("MainTabs")
+                               ?? throw new InvalidOperationException("Main tab control was not created");
+                mainTabs.SelectedIndex = 0;
+                editorModulesTabControl.Visibility = Visibility.Visible;
+                characterAttributesEditorTab.Visibility = Visibility.Visible;
+                editorModulesTabControl.ApplyTemplate();
+                var root = (FrameworkElement)mainWindow.Content;
+                root.Measure(new Size(1320, 820));
+                root.Arrange(new Rect(0, 0, 1320, 820));
+                mainWindow.UpdateLayout();
+                var editorModuleHeaderPanel = (TabPanel?)editorModulesTabControl.Template.FindName(
+                                                  "PART_EditorModuleHeaderPanel", editorModulesTabControl)
+                                              ?? throw new InvalidOperationException("Vertical editor module header panel was not created");
+                var editorModuleContentHost = (ContentPresenter?)editorModulesTabControl.Template.FindName(
+                                                  "PART_SelectedContentHost", editorModulesTabControl)
+                                              ?? throw new InvalidOperationException("Editor module content host was not created");
+                var headerPosition = editorModuleHeaderPanel.TranslatePoint(new Point(), editorModulesTabControl);
+                var contentPosition = editorModuleContentHost.TranslatePoint(new Point(), editorModulesTabControl);
+                Assert(contentPosition.X > headerPosition.X + editorModuleHeaderPanel.ActualWidth,
+                    $"Editor module content must render to the right of the vertical navigation " +
+                    $"(header x={headerPosition.X}, width={editorModuleHeaderPanel.ActualWidth}; content x={contentPosition.X})");
+                var inventoryTabPosition = inventoryEditorTab.TranslatePoint(new Point(), editorModuleHeaderPanel);
+                var characterTabPosition = characterAttributesEditorTab.TranslatePoint(new Point(), editorModuleHeaderPanel);
+                Assert(characterTabPosition.Y >= inventoryTabPosition.Y + inventoryEditorTab.ActualHeight,
+                    "Editor module names must stack vertically in the left navigation");
                 var renderViewModel = (MainViewModel)mainWindow.DataContext;
                 Assert(renderViewModel.Themes.Select(choice => choice.Display).SequenceEqual(
                         ["浅色", "深色", "护眼墨绿", "暖砂纸张", "雾蓝灰"]),
                     "Theme selector does not expose the five expected themes");
-                var root = (FrameworkElement)mainWindow.Content;
                 root.Measure(new Size(1320, 820));
                 root.Arrange(new Rect(0, 0, 1320, 820));
                 root.UpdateLayout();
@@ -662,8 +693,6 @@ try
                 using (var snapshot = File.Create(dialogSnapshotPath)) dialogEncoder.Save(snapshot);
                 renderedMessageDialog.Close();
 
-                var mainTabs = (TabControl?)mainWindow.FindName("MainTabs")
-                               ?? throw new InvalidOperationException("Main tab control was not created");
                 var renderVersion = new GameVersionProfile
                 {
                     DisplayName = "1.2.3",

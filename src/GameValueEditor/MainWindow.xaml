@@ -245,17 +245,70 @@
                                              Background="Transparent" FontSize="17" Foreground="{DynamicResource MutedTextBrush}"
                                              Margin="0,4,0,0" TextAlignment="Center" TextWrapping="Wrap" Cursor="IBeam"/>
                                 </StackPanel>
-                                <TabControl TabStripPlacement="Left"
+                                <TabControl x:Name="EditorModulesTabControl" TabStripPlacement="Left"
                                             Visibility="{Binding HasActiveAdapter, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                <TabControl.Style>
+                                    <Style TargetType="TabControl" BasedOn="{StaticResource {x:Type TabControl}}">
+                                        <Setter Property="Background" Value="{DynamicResource WindowBrush}"/>
+                                        <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+                                        <Setter Property="Template">
+                                            <Setter.Value>
+                                                <ControlTemplate TargetType="TabControl">
+                                                    <Grid Background="{TemplateBinding Background}">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="136"/>
+                                                            <ColumnDefinition Width="*"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <Border Grid.Column="0" Margin="0,0,10,0"
+                                                                Background="{DynamicResource PanelBrush}"
+                                                                BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1">
+                                                            <TabPanel x:Name="PART_EditorModuleHeaderPanel" IsItemsHost="True"
+                                                                      KeyboardNavigation.TabIndex="1"/>
+                                                        </Border>
+                                                        <Border Grid.Column="1" Background="{DynamicResource WindowBrush}"
+                                                                BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1">
+                                                            <ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent"
+                                                                              Margin="{TemplateBinding Padding}"/>
+                                                        </Border>
+                                                    </Grid>
+                                                </ControlTemplate>
+                                            </Setter.Value>
+                                        </Setter>
+                                    </Style>
+                                </TabControl.Style>
                                 <TabControl.Resources>
                                     <Style TargetType="TabItem" BasedOn="{StaticResource {x:Type TabItem}}">
-                                        <Setter Property="MinWidth" Value="118"/>
-                                        <Setter Property="HorizontalContentAlignment" Value="Left"/>
+                                        <Setter Property="Width" Value="134"/>
                                         <Setter Property="Padding" Value="16,12"/>
+                                        <Setter Property="Template">
+                                            <Setter.Value>
+                                                <ControlTemplate TargetType="TabItem">
+                                                    <Border x:Name="EditorModuleTabChrome"
+                                                            Background="{TemplateBinding Background}"
+                                                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1"
+                                                            Padding="{TemplateBinding Padding}">
+                                                        <ContentPresenter ContentSource="Header" HorizontalAlignment="Left"
+                                                                          VerticalAlignment="Center"/>
+                                                    </Border>
+                                                    <ControlTemplate.Triggers>
+                                                        <Trigger Property="IsSelected" Value="True">
+                                                            <Setter TargetName="EditorModuleTabChrome" Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+                                                            <Setter Property="Foreground" Value="{DynamicResource SelectionTextBrush}"/>
+                                                        </Trigger>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter TargetName="EditorModuleTabChrome" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                                                        </Trigger>
+                                                        <Trigger Property="IsEnabled" Value="False">
+                                                            <Setter TargetName="EditorModuleTabChrome" Property="Opacity" Value="0.45"/>
+                                                        </Trigger>
+                                                    </ControlTemplate.Triggers>
+                                                </ControlTemplate>
+                                            </Setter.Value>
+                                        </Setter>
                                     </Style>
                                 </TabControl.Resources>
-                                <TabItem Header="背包物品" IsEnabled="{Binding HasActiveInventoryAdapter}">
-                                    <Grid Margin="12">
+                                <TabItem x:Name="InventoryEditorTab" Header="背包物品" IsEnabled="{Binding HasActiveInventoryAdapter}">
+                                    <Grid x:Name="InventoryEditorContent" Margin="12">
                                         <Grid.RowDefinitions>
                                             <RowDefinition Height="Auto"/>
                                             <RowDefinition Height="*"/>
@@ -294,7 +347,7 @@
                                         </StackPanel>
                                     </Grid>
                                 </TabItem>
-                                <TabItem Header="人物属性"
+                                <TabItem x:Name="CharacterAttributesEditorTab" Header="人物属性"
                                          Visibility="{Binding HasCharacterEditor, Converter={StaticResource BooleanToVisibilityConverter}}">
                                     <Grid Margin="12">
                                         <TextBlock Visibility="{Binding HasUnsupportedCharacterAdapter, Converter={StaticResource BooleanToVisibilityConverter}}"
