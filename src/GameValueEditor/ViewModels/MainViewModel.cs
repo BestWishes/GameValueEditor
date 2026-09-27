@@ -127,7 +127,10 @@ public sealed class MainViewModel : ObservableObject
     public IReadOnlyList<ThemeChoice> Themes { get; } =
     [
         new(ApplicationTheme.Light, "浅色"),
-        new(ApplicationTheme.Dark, "深色")
+        new(ApplicationTheme.Dark, "深色"),
+        new(ApplicationTheme.EyeCareGreen, "护眼墨绿"),
+        new(ApplicationTheme.WarmSand, "暖砂纸张"),
+        new(ApplicationTheme.MistBlue, "雾蓝灰")
     ];
     public IReadOnlyList<Choice<ScanComparison>> Comparisons { get; } =
     [
@@ -381,7 +384,8 @@ public sealed class MainViewModel : ObservableObject
             game.IsConnected = false;
             game.IconSource = _gameIconService.Load(game.IconFileName) ?? DefaultGameIcon;
         }
-        if (!Enum.TryParse<ApplicationTheme>(_document.Theme, true, out var theme)) theme = ApplicationTheme.Light;
+        if (!Enum.TryParse<ApplicationTheme>(_document.Theme, true, out var theme) || !Enum.IsDefined(theme))
+            theme = ApplicationTheme.Light;
         _selectedTheme = Themes.First(item => item.Value == theme);
         _themeService.Apply(theme);
         OnPropertyChanged(nameof(SelectedTheme));

@@ -3,6 +3,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -98,7 +99,7 @@ try
     if (args.Contains("--update-live", StringComparer.OrdinalIgnoreCase))
     {
         var liveUpdateRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-LiveUpdate-{Guid.NewGuid():N}");
-        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.6");
+        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.7");
         var liveUpdate = await liveUpdateService.CheckAsync();
         Assert(liveUpdate.AssetName.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
                liveUpdate.AssetName.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase),
@@ -500,9 +501,74 @@ try
             Assert(comboBox.Text == "全新分组", "Free-form group text was not retained");
             dialog.Close();
 
+            var themeService = new ThemeService();
+            var expectedThemes = new[]
+            {
+                ApplicationTheme.Light,
+                ApplicationTheme.Dark,
+                ApplicationTheme.EyeCareGreen,
+                ApplicationTheme.WarmSand,
+                ApplicationTheme.MistBlue
+            };
+            var windowColors = new HashSet<Color>();
+            foreach (var theme in expectedThemes)
+            {
+                themeService.Apply(theme);
+                var windowBrush = application.Resources["WindowBrush"] as SolidColorBrush
+                                  ?? throw new InvalidOperationException($"{theme} did not provide WindowBrush");
+                var textBrush = application.Resources["TextBrush"] as SolidColorBrush
+                                ?? throw new InvalidOperationException($"{theme} did not provide TextBrush");
+                Assert(windowBrush.Color != textBrush.Color, $"{theme} background and text colors are identical");
+                windowColors.Add(windowBrush.Color);
+            }
+            Assert(windowColors.Count == expectedThemes.Length, "Theme window colors must be distinct");
+
+            themeService.Apply(ApplicationTheme.Dark);
+            var messageDialog = Activator.CreateInstance(
+                                    typeof(MessageDialog),
+                                    BindingFlags.Instance | BindingFlags.NonPublic,
+                                    binder: null,
+                                    args: new object[] { "操作未完成", "用于验证深色主题的弹框。", false },
+                                    culture: null) as Window
+                                ?? throw new InvalidOperationException("Message dialog could not be created for theme verification");
+            Window[] themedDialogs =
+            [
+                new AdapterFieldDialog(),
+                new GroupInputDialog([], "未分组"),
+                messageDialog,
+                new ModifyFieldDialog("测试字段", "未分组", "1", []),
+                new SaveFieldDialog(),
+                new TextInputDialog("输入", "请输入测试内容")
+            ];
+            var expectedWindowBrush = (SolidColorBrush)application.Resources["WindowBrush"];
+            var expectedTextBrush = (SolidColorBrush)application.Resources["TextBrush"];
+            var themedWindowStyle = (Style)application.Resources["ThemedWindowStyle"];
+            foreach (var themedDialog in themedDialogs)
+            {
+                try
+                {
+                    themedDialog.ShowActivated = false;
+                    themedDialog.ShowInTaskbar = false;
+                    themedDialog.Left = -10_000;
+                    themedDialog.Top = -10_000;
+                    themedDialog.Show();
+                    themedDialog.UpdateLayout();
+                    Assert(ReferenceEquals(themedDialog.Style, themedWindowStyle),
+                        $"{themedDialog.GetType().Name} does not use the shared themed window style");
+                    Assert(themedDialog.Background is SolidColorBrush background && background.Color == expectedWindowBrush.Color,
+                        $"{themedDialog.GetType().Name} does not use the dark theme background");
+                    Assert(themedDialog.Foreground is SolidColorBrush foreground && foreground.Color == expectedTextBrush.Color,
+                        $"{themedDialog.GetType().Name} does not use the dark theme text color");
+                }
+                finally
+                {
+                    themedDialog.Close();
+                }
+            }
+
             if (args.Contains("--render-ui", StringComparer.OrdinalIgnoreCase))
             {
-                new ThemeService().Apply(ApplicationTheme.Dark);
+                themeService.Apply(ApplicationTheme.Dark);
                 var mainWindow = new MainWindow
                 {
                     ShowActivated = false,
@@ -526,21 +592,74 @@ try
                     "Editor connect button must follow the selected library game");
                 Assert(BindingOperations.GetBinding(editorGameDisconnectButton, UIElement.IsEnabledProperty)?.Path.Path == nameof(MainViewModel.CanDisconnectSelectedGame),
                     "Editor disconnect button must follow the selected library game");
+                var renderViewModel = (MainViewModel)mainWindow.DataContext;
+                Assert(renderViewModel.Themes.Select(choice => choice.Display).SequenceEqual(
+                        ["浅色", "深色", "护眼墨绿", "暖砂纸张", "雾蓝灰"]),
+                    "Theme selector does not expose the five expected themes");
                 var root = (FrameworkElement)mainWindow.Content;
                 root.Measure(new Size(1320, 820));
                 root.Arrange(new Rect(0, 0, 1320, 820));
                 root.UpdateLayout();
-                var bitmap = new RenderTargetBitmap(1320, 820, 96, 96, PixelFormats.Pbgra32);
-                bitmap.Render(root);
-                var encoder = new PngBitmapEncoder();
-                encoder.Frames.Add(BitmapFrame.Create(bitmap));
-                var snapshotPath = Path.GetFullPath(Path.Combine("artifacts", "ui-dark-smoke.png"));
-                Directory.CreateDirectory(Path.GetDirectoryName(snapshotPath)!);
-                using (var snapshot = File.Create(snapshotPath)) encoder.Save(snapshot);
+                var snapshotDirectory = Path.GetFullPath("artifacts");
+                Directory.CreateDirectory(snapshotDirectory);
+                string RenderMainWindow(string fileName)
+                {
+                    mainWindow.UpdateLayout();
+                    root.UpdateLayout();
+                    var bitmap = new RenderTargetBitmap(1320, 820, 96, 96, PixelFormats.Pbgra32);
+                    bitmap.Render(root);
+                    var encoder = new PngBitmapEncoder();
+                    encoder.Frames.Add(BitmapFrame.Create(bitmap));
+                    var path = Path.Combine(snapshotDirectory, fileName);
+                    using var snapshot = File.Create(path);
+                    encoder.Save(snapshot);
+                    return path;
+                }
+
+                var themeSnapshots = new Dictionary<ApplicationTheme, string>();
+                foreach (var (theme, fileName) in new[]
+                         {
+                             (ApplicationTheme.Light, "ui-light-smoke.png"),
+                             (ApplicationTheme.Dark, "ui-dark-smoke.png"),
+                             (ApplicationTheme.EyeCareGreen, "ui-eye-care-green-smoke.png"),
+                             (ApplicationTheme.WarmSand, "ui-warm-sand-smoke.png"),
+                             (ApplicationTheme.MistBlue, "ui-mist-blue-smoke.png")
+                         })
+                {
+                    themeService.Apply(theme);
+                    themeSnapshots[theme] = RenderMainWindow(fileName);
+                }
+
+                themeService.Apply(ApplicationTheme.Dark);
+                var renderedMessageDialog = Activator.CreateInstance(
+                                                typeof(MessageDialog),
+                                                BindingFlags.Instance | BindingFlags.NonPublic,
+                                                binder: null,
+                                                args: new object[] { "操作未完成", "用于验证深色主题下的错误提示弹框。", false },
+                                                culture: null) as Window
+                                            ?? throw new InvalidOperationException("Message dialog could not be created for rendering");
+                renderedMessageDialog.ShowActivated = false;
+                renderedMessageDialog.ShowInTaskbar = false;
+                renderedMessageDialog.Left = -10_000;
+                renderedMessageDialog.Top = -10_000;
+                renderedMessageDialog.Show();
+                renderedMessageDialog.UpdateLayout();
+                var renderedDialogRoot = (FrameworkElement)renderedMessageDialog.Content;
+                renderedDialogRoot.Measure(new Size(432, double.PositiveInfinity));
+                var dialogWidth = 432;
+                var dialogHeight = Math.Max(1, (int)Math.Ceiling(renderedDialogRoot.DesiredSize.Height));
+                renderedDialogRoot.Arrange(new Rect(0, 0, dialogWidth, dialogHeight));
+                renderedDialogRoot.UpdateLayout();
+                var dialogBitmap = new RenderTargetBitmap(dialogWidth, dialogHeight, 96, 96, PixelFormats.Pbgra32);
+                dialogBitmap.Render(renderedDialogRoot);
+                var dialogEncoder = new PngBitmapEncoder();
+                dialogEncoder.Frames.Add(BitmapFrame.Create(dialogBitmap));
+                var dialogSnapshotPath = Path.Combine(snapshotDirectory, "ui-message-dialog-dark-smoke.png");
+                using (var snapshot = File.Create(dialogSnapshotPath)) dialogEncoder.Save(snapshot);
+                renderedMessageDialog.Close();
 
                 var mainTabs = (TabControl?)mainWindow.FindName("MainTabs")
                                ?? throw new InvalidOperationException("Main tab control was not created");
-                var renderViewModel = (MainViewModel)mainWindow.DataContext;
                 var renderVersion = new GameVersionProfile
                 {
                     DisplayName = "1.2.3",
@@ -567,7 +686,9 @@ try
                 var versionSnapshotPath = Path.GetFullPath(Path.Combine("artifacts", "ui-version-dark-smoke.png"));
                 using (var snapshot = File.Create(versionSnapshotPath)) versionEncoder.Save(snapshot);
                 mainWindow.Close();
-                Console.WriteLine($"Rendered dark UI: {snapshotPath}");
+                foreach (var (theme, path) in themeSnapshots)
+                    Console.WriteLine($"Rendered {theme} UI: {path}");
+                Console.WriteLine($"Rendered dark message dialog: {dialogSnapshotPath}");
                 Console.WriteLine($"Rendered version UI: {versionSnapshotPath}");
             }
             application.Shutdown();

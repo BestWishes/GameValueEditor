@@ -12,7 +12,7 @@
 
 一个面向 Windows 离线单机游戏的本地数值扫描与管理工具。它不仅保存临时地址，还把玩家确认过的字段整理到按游戏、按版本隔离的本地游戏库中。
 
-> 最新稳定版本：`v0.2.0`。当前源码正在开发 `v0.3.0-preview.6`。
+> 最新稳定版本：`v0.2.0`。当前源码正在开发 `v0.3.0-preview.7`。
 
 ## 主要功能
 
@@ -32,7 +32,7 @@
 - 当前构建变化时不会套用旧的原始内存地址；构建仍受支持的游戏专属字段会按语义键迁移到新版本档案。
 - 静态地址优先保存为“模块 + 偏移”；动态地址保存为本次进程会话地址，并在重启后要求重新定位。
 - 所有档案只保存在本机，写入时自动保留上一份配置备份。
-- 支持完整协调的浅色、深色主题（包括标签页、列表、弹窗和标题栏），并在进程列表显示程序图标。
+- 支持浅色、深色、护眼墨绿、暖砂纸张和雾蓝灰五套完整主题；标签页、列表、输入弹框、确认弹框、错误弹框和标题栏均跟随当前主题，并在进程列表显示程序图标。
 - “本游专属”支持从 GitHub 检查、校验并按需安装游戏专属模块；只装配游戏身份和构建指纹都匹配的模块。
 - “快捷入口”支持直接编辑备注名称、分组和当前值，并可锁定目标值持续保持。
 - 分组输入框支持直接输入、按文字筛选已有分组，或保留新文字创建分组。
@@ -117,7 +117,7 @@ dotnet run --project tests/GameValueEditor.SmokeTests/GameValueEditor.SmokeTests
 验证最终 ZIP 中的程序能够正常启动：
 
 ```powershell
-./scripts/test-package-startup.ps1 -ArchivePath ./dist/GameValueEditor-v0.3.0-preview.6-win-x64.zip
+./scripts/test-package-startup.ps1 -ArchivePath ./dist/GameValueEditor-v0.3.0-preview.7-win-x64.zip
 ```
 
 构建官方 fzzml 可选模块并更新 `modules/catalog.json` 中的 SHA-256：

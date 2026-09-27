@@ -25,11 +25,12 @@
         <SolidColorBrush x:Key="SelectionTextBrush" Color="{StaticResource SelectionTextColor}"/>
         <SolidColorBrush x:Key="DangerBrush" Color="{StaticResource DangerColor}"/>
 
-        <Style TargetType="Window">
+        <Style x:Key="ThemedWindowStyle" TargetType="Window">
             <Setter Property="Background" Value="{DynamicResource WindowBrush}"/>
             <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
             <Setter Property="FontFamily" Value="Segoe UI, Microsoft YaHei UI"/>
         </Style>
+        <Style TargetType="Window" BasedOn="{StaticResource ThemedWindowStyle}"/>
         <Style TargetType="TextBlock">
             <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
         </Style>

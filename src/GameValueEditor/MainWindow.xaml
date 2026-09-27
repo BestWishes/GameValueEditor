@@ -2,6 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="肝肾大圣-单机游戏数值编辑器" Icon="pack://application:,,,/GameValueEditor;component/Assets/GameValueEditorIcon.png" Height="820" Width="1320"
+        Style="{StaticResource ThemedWindowStyle}"
         MinHeight="700" MinWidth="1080" WindowStartupLocation="CenterScreen">
     <Grid Background="{DynamicResource WindowBrush}">
         <Grid.RowDefinitions>
@@ -23,7 +24,7 @@
                     <TextBlock Text="肝肾大圣-单机游戏数值编辑器" FontSize="19" FontWeight="SemiBold"/>
                     <TextBlock Text="LOCAL GAME VALUE EDITOR" FontSize="10" Foreground="{DynamicResource AccentBrush}"/>
                 </StackPanel>
-                <ComboBox Grid.Column="1" Width="82" Height="32" Margin="0,0,14,0"
+                <ComboBox Grid.Column="1" Width="100" Height="32" Margin="0,0,14,0"
                           ItemsSource="{Binding Themes}" SelectedItem="{Binding SelectedTheme}"
                           DisplayMemberPath="Display" SelectionChanged="Theme_OnSelectionChanged" ToolTip="切换应用主题"/>
                 <Button Grid.Column="2" Content="刷新进程" Width="88" Height="32" Margin="0,0,6,0"
