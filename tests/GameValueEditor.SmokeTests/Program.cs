@@ -62,14 +62,20 @@ try
         var scanner = new MemoryScanService();
         var scanResult = await scanner.InitialExactScanAsync(
             Environment.ProcessId,
-            MemoryValueType.Int32,
-            BitConverter.GetBytes(marker),
+            [new ScanTargetDefinition(
+                MemoryValueType.Int32,
+                SearchRoutineIds.DirectNumeric,
+                "直接数值",
+                1d,
+                BitConverter.GetBytes(marker))],
             writableOnly: true,
             alignedOnly: false,
             progress: null,
             CancellationToken.None);
-        Assert(scanResult.Candidates.Any(candidate => candidate.Address == expectedAddress), "Pinned marker was not found by memory scan");
-        var markerCandidate = scanResult.Candidates.First(candidate => candidate.Address == expectedAddress);
+        using var markerCandidates = scanResult.Candidates;
+        var markerPreview = markerCandidates.ReadCandidates(10_000);
+        Assert(markerPreview.Any(candidate => candidate.Address == expectedAddress), "Pinned marker was not found by memory scan");
+        var markerCandidate = markerPreview.First(candidate => candidate.Address == expectedAddress);
         Assert(markerCandidate.FirstBytes.SequenceEqual(BitConverter.GetBytes(marker)), "Initial scan value was not preserved");
         Assert(markerCandidate.FirstDisplay == marker.ToString(), "Initial scan display value is invalid");
 
@@ -80,6 +86,50 @@ try
     finally
     {
         handle.Free();
+    }
+
+    const int overflowMarker = 0x31415926;
+    const int overflowReplacement = 0x27182818;
+    var overflowPayload = Enumerable.Repeat(overflowMarker, 250_500).ToArray();
+    var overflowHandle = GCHandle.Alloc(overflowPayload, GCHandleType.Pinned);
+    try
+    {
+        var finalAddress = unchecked((ulong)overflowHandle.AddrOfPinnedObject().ToInt64()) +
+                           (ulong)((overflowPayload.Length - 1) * sizeof(int));
+        var scanner = new MemoryScanService();
+        var initial = await scanner.InitialExactScanAsync(
+            Environment.ProcessId,
+            [new ScanTargetDefinition(
+                MemoryValueType.Int32,
+                SearchRoutineIds.DirectNumeric,
+                "直接数值",
+                1d,
+                BitConverter.GetBytes(overflowMarker))],
+            writableOnly: true,
+            alignedOnly: true,
+            progress: null,
+            CancellationToken.None);
+        using var initialCandidates = initial.Candidates;
+        Assert(initialCandidates.Count >= overflowPayload.Length,
+            "Initial scan still discarded candidates at the former 250,000-result limit");
+        Assert(initialCandidates.ReadCandidates(1_000).Count == 1_000,
+            "Candidate preview did not respect its requested display limit");
+
+        overflowPayload[^1] = overflowReplacement;
+        var filtered = await scanner.NextScanAsync(
+            Environment.ProcessId,
+            initialCandidates,
+            ScanComparison.Exact,
+            _ => BitConverter.GetBytes(overflowReplacement),
+            progress: null,
+            CancellationToken.None);
+        using var filteredCandidates = filtered.Candidates;
+        Assert(filteredCandidates.ReadCandidates(1_000).Any(candidate => candidate.Address == finalAddress),
+            "A candidate beyond the former result limit was not retained for the next scan");
+    }
+    finally
+    {
+        overflowHandle.Free();
     }
 
     var executable = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
@@ -101,7 +151,7 @@ try
     if (args.Contains("--update-live", StringComparer.OrdinalIgnoreCase))
     {
         var liveUpdateRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-LiveUpdate-{Guid.NewGuid():N}");
-        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.9");
+        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.10");
         var liveUpdate = await liveUpdateService.CheckAsync();
         Assert(liveUpdate.AssetName.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
                liveUpdate.AssetName.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase),
@@ -117,6 +167,81 @@ try
         .ToList();
     Assert(ReferenceEquals(orderedGames[0], connectedGame) && ReferenceEquals(orderedGames[1], pinnedGame),
         "Connected games were not sorted before pinned and recent games");
+
+    var processService = new ProcessService();
+    var logicalStart = DateTime.UtcNow.AddMinutes(-2);
+    const string electronPath = @"C:\Games\Vespera\Vespera.exe";
+    var electronProcesses = new[]
+    {
+        new ProcessItem { ProcessId = 100, ParentProcessId = 50, ProcessName = "Vespera", ExecutablePath = electronPath, StartTimeUtc = logicalStart, RuntimeKind = GameRuntimeKind.Electron, Role = GameProcessRole.Main, WorkingSetBytes = 80 },
+        new ProcessItem { ProcessId = 101, ParentProcessId = 100, ProcessName = "Vespera", ExecutablePath = electronPath, StartTimeUtc = logicalStart.AddSeconds(1), RuntimeKind = GameRuntimeKind.Electron, Role = GameProcessRole.Gpu, WorkingSetBytes = 120 },
+        new ProcessItem { ProcessId = 102, ParentProcessId = 100, ProcessName = "Vespera", ExecutablePath = electronPath, StartTimeUtc = logicalStart.AddSeconds(2), RuntimeKind = GameRuntimeKind.Electron, Role = GameProcessRole.Renderer, WorkingSetBytes = 500 },
+        new ProcessItem { ProcessId = 103, ParentProcessId = 100, ProcessName = "Vespera", ExecutablePath = electronPath, StartTimeUtc = logicalStart.AddSeconds(3), RuntimeKind = GameRuntimeKind.Electron, Role = GameProcessRole.Network, WorkingSetBytes = 70 },
+        new ProcessItem { ProcessId = 104, ParentProcessId = 100, ProcessName = "Vespera", ExecutablePath = electronPath, StartTimeUtc = logicalStart.AddSeconds(4), RuntimeKind = GameRuntimeKind.Electron, Role = GameProcessRole.Audio, WorkingSetBytes = 60 },
+        new ProcessItem { ProcessId = 200, ParentProcessId = 50, ProcessName = "Vespera", ExecutablePath = electronPath, StartTimeUtc = logicalStart.AddMinutes(1), RuntimeKind = GameRuntimeKind.Electron, Role = GameProcessRole.Main, WorkingSetBytes = 90 },
+        new ProcessItem { ProcessId = 201, ParentProcessId = 200, ProcessName = "Vespera", ExecutablePath = electronPath, StartTimeUtc = logicalStart.AddMinutes(1).AddSeconds(1), RuntimeKind = GameRuntimeKind.Electron, Role = GameProcessRole.Renderer, WorkingSetBytes = 600 }
+    };
+    foreach (var selected in electronProcesses.Take(5))
+    {
+        var logicalGame = processService.ResolveLogicalGame(selected, electronProcesses);
+        Assert(logicalGame.RootProcess.ProcessId == 100, $"Selecting PID {selected.ProcessId} did not resolve the same logical game root");
+        Assert(logicalGame.DataProcess.ProcessId == 102, $"Selecting PID {selected.ProcessId} did not route to the renderer data process");
+        Assert(logicalGame.Members.Count == 5, $"Selecting PID {selected.ProcessId} merged another game instance or omitted a member");
+    }
+    var secondInstance = processService.ResolveLogicalGame(electronProcesses[6], electronProcesses);
+    Assert(secondInstance.RootProcess.ProcessId == 200 && secondInstance.DataProcess.ProcessId == 201 && secondInstance.Members.Count == 2,
+        "Two instances with the same executable path were incorrectly merged");
+
+    const string unityPath = @"C:\Games\WorldApart\WorldApart.exe";
+    var unityProcesses = new[]
+    {
+        new ProcessItem
+        {
+            ProcessId = 400,
+            ParentProcessId = 50,
+            ProcessName = "WorldApart",
+            ExecutablePath = unityPath,
+            StartTimeUtc = logicalStart,
+            RuntimeKind = GameRuntimeKind.UnityIl2Cpp,
+            Role = GameProcessRole.Main,
+            WorkingSetBytes = 20 * 1024 * 1024
+        },
+        new ProcessItem
+        {
+            ProcessId = 401,
+            ParentProcessId = 400,
+            ProcessName = "WorldApart",
+            WindowTitle = "WorldApart",
+            ExecutablePath = unityPath,
+            StartTimeUtc = logicalStart.AddSeconds(1),
+            RuntimeKind = GameRuntimeKind.UnityIl2Cpp,
+            Role = GameProcessRole.Main,
+            WorkingSetBytes = 4L * 1024 * 1024 * 1024
+        }
+    };
+    foreach (var selected in unityProcesses)
+    {
+        var logicalGame = processService.ResolveLogicalGame(selected, unityProcesses);
+        Assert(logicalGame.RootProcess.ProcessId == 400,
+            $"Selecting Unity PID {selected.ProcessId} did not resolve the same logical game root");
+        Assert(logicalGame.DataProcess.ProcessId == 401,
+            $"Selecting Unity PID {selected.ProcessId} did not route to the window-owning game process");
+        Assert(logicalGame.Members.Count == 2,
+            $"Selecting Unity PID {selected.ProcessId} omitted a same-instance member");
+    }
+
+    var singleNative = new ProcessItem
+    {
+        ProcessId = 300,
+        ProcessName = "SingleGame",
+        ExecutablePath = @"C:\Games\Single\SingleGame.exe",
+        StartTimeUtc = logicalStart,
+        RuntimeKind = GameRuntimeKind.Native,
+        Role = GameProcessRole.Main
+    };
+    var singleGroup = processService.ResolveLogicalGame(singleNative, new[] { singleNative });
+    Assert(singleGroup.RootProcess.ProcessId == 300 && singleGroup.DataProcess.ProcessId == 300 && singleGroup.Members.Count == 1,
+        "Single-process game routing changed unexpectedly");
 
     var nativeSpeedTargetPath = Environment.GetEnvironmentVariable("GVE_NATIVE_SPEED_TARGET");
     var speedTargetStart = new ProcessStartInfo(

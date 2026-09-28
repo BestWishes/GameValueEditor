@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$ApplicationVersion = "0.3.0-preview.9",
+    [string]$ApplicationVersion = "0.3.0-preview.10",
     [string]$ModuleVersion = "2.0.0",
     [string]$ModuleRepository = "D:\MyOtherProjects\GameValueEditor-Modules"
 )

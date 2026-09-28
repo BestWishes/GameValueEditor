@@ -322,9 +322,10 @@ public partial class MainWindow : Window
                             ?? throw new InvalidOperationException("请先选择一个人物。");
             var attribute = _viewModel.SelectedCharacterAttribute
                             ?? throw new InvalidOperationException("请先选择一个人物属性。");
+            var lifetimeNote = _viewModel.IsCharacterEditorSessionOnly ? "（仅本次游戏运行有效）" : string.Empty;
             var dialog = new TextInputDialog(
                 "修改人物属性",
-                $"输入“{character.DisplayName}”的{attribute.DisplayName}目标值（仅本次游戏运行有效）：",
+                $"输入“{character.DisplayName}”的{attribute.DisplayName}目标值{lifetimeNote}：",
                 attribute.RawValueDisplay) { Owner = this };
             if (dialog.ShowDialog() != true) return;
             await _viewModel.WriteSelectedCharacterAttributeAsync(dialog.Value);
@@ -341,7 +342,7 @@ public partial class MainWindow : Window
                             ?? throw new InvalidOperationException("请先选择一个人物属性。");
             if (_viewModel.SelectedGame is null || _viewModel.SelectedVersion is null)
                 throw new InvalidOperationException("请先点击游戏名称后的“保存入库”，再保存字段。");
-            var fieldKey = ModuleFieldKey.Create("game.fzzml.character-attributes", character.CharacterId, attribute.Key);
+            var fieldKey = ModuleFieldKey.Create(_viewModel.ActiveCharacterEditorId, character.CharacterId, attribute.Key);
             var dialog = new AdapterFieldDialog(
                 _viewModel.GetAvailableGroups(), fieldKey, $"{character.DisplayName} {attribute.DisplayName}") { Owner = this };
             if (dialog.ShowDialog() != true) return;

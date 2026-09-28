@@ -18,6 +18,8 @@ namespace GameValueEditor.ViewModels;
 
 public sealed class MainViewModel : ObservableObject
 {
+    private const int ScanResultPreviewLimit = 1_000;
+
     private static readonly Lazy<ImageSource?> DefaultGameIconSource = new(() =>
     {
         try
@@ -36,7 +38,7 @@ public sealed class MainViewModel : ObservableObject
     private readonly ProfileStore _profileStore = new();
     private readonly ProcessService _processService = new();
     private readonly VersionFingerprintService _fingerprintService = new();
-    private readonly MemoryScanService _scanService = new();
+    private readonly MemoryScanService _scanService;
     private readonly GameAdapterRegistry _adapterRegistry;
     private readonly ThemeService _themeService = new();
     private readonly ProcessSpeedService _idleSpeedService = new();
@@ -47,8 +49,8 @@ public sealed class MainViewModel : ObservableObject
     private readonly Dictionary<Guid, GameConnectionSession> _sessions = [];
     private GameConnectionSession? _activeSession;
     private LibraryDocument _document = new();
-    private List<ScanCandidate> _scanCandidates = [];
-    private Stack<List<ScanCandidate>> _scanHistory = new();
+    private ScanCandidateStore? _scanCandidates;
+    private Stack<ScanCandidateStore> _scanHistory = new();
     private CancellationTokenSource? _liveRefreshCancellation;
     private ICollectionView? _gamesView;
     private GameProfile? _selectedGame;
@@ -62,11 +64,13 @@ public sealed class MainViewModel : ObservableObject
     private readonly ObservableCollection<AdapterInventoryItem> _adapterInventoryItems = [];
     private readonly ObservableCollection<AdapterCharacterItem> _adapterCharacters = [];
     private ICollectionView? _adapterItemsView;
+    private ICollectionView? _characterAttributesView;
     private AdapterInventoryItem? _selectedAdapterItem;
     private AdapterCharacterItem? _selectedAdapterCharacter;
     private AdapterCharacterAttribute? _selectedCharacterAttribute;
     private string _adapterItemNameFilter = string.Empty;
     private string _adapterItemCountFilter = string.Empty;
+    private string _characterAttributeNameFilter = string.Empty;
     private string _searchText = string.Empty;
     private string _scanValue = string.Empty;
     private MemoryValueType? _selectedValueType;
@@ -89,7 +93,7 @@ public sealed class MainViewModel : ObservableObject
     private bool _isProcessRefreshBlocked;
     private bool _isConnectionControlBlocked;
     private bool _isLibraryControlBlocked;
-    private int _scanResultCount;
+    private long _scanResultCount;
     private CancellationTokenSource? _scanCancellation;
     private bool _suppressGameActivation;
     private string _moduleStatusText = "尚未检查当前游戏的专属模块";
@@ -105,6 +109,7 @@ public sealed class MainViewModel : ObservableObject
 
     public MainViewModel(ApplicationUpdateService? applicationUpdateService = null)
     {
+        _scanService = new MemoryScanService(Path.Combine(_profileStore.RootDirectory, "scan-temp"));
         _speedService = _idleSpeedService;
         _gameIconService = new GameIconService(_profileStore.IconsDirectory);
         _moduleCatalogService = new GameModuleCatalogService(_profileStore.ModulesDirectory);
@@ -147,6 +152,7 @@ public sealed class MainViewModel : ObservableObject
 
     public ICollectionView GamesView => _gamesView ??= CreateGamesView();
     public ICollectionView AdapterItemsView => _adapterItemsView ??= CreateAdapterItemsView();
+    public ICollectionView? CharacterAttributesView => _characterAttributesView;
     public ObservableCollection<AdapterInventoryItem> AdapterInventoryItems => _adapterInventoryItems;
     public ObservableCollection<AdapterCharacterItem> AdapterCharacters => _adapterCharacters;
     public ObservableCollection<ScanCandidate> VisibleScanResults { get => _visibleScanResults; private set => SetProperty(ref _visibleScanResults, value); }
@@ -243,7 +249,7 @@ public sealed class MainViewModel : ObservableObject
         set
         {
             if (!SetProperty(ref _selectedAdapterCharacter, value)) return;
-            SelectedCharacterAttribute = value?.Attributes.FirstOrDefault();
+            RebuildCharacterAttributesView(value);
         }
     }
     public AdapterCharacterAttribute? SelectedCharacterAttribute
@@ -260,6 +266,17 @@ public sealed class MainViewModel : ObservableObject
     {
         get => _adapterItemCountFilter;
         set { if (SetProperty(ref _adapterItemCountFilter, value)) AdapterItemsView.Refresh(); }
+    }
+    public string CharacterAttributeNameFilter
+    {
+        get => _characterAttributeNameFilter;
+        set
+        {
+            if (!SetProperty(ref _characterAttributeNameFilter, value)) return;
+            _characterAttributesView?.Refresh();
+            if (SelectedCharacterAttribute is null || !MatchesCharacterAttributeFilter(SelectedCharacterAttribute))
+                SelectedCharacterAttribute = SelectedAdapterCharacter?.Attributes.FirstOrDefault(MatchesCharacterAttributeFilter);
+        }
     }
     public string SearchText
     {
@@ -331,14 +348,13 @@ public sealed class MainViewModel : ObservableObject
         > 1d => $"{FormatSpeedMultiplier(_speedService.Multiplier)} 倍加速中",
         _ => "正常倍速中"
     };
-    public int ScanResultCount { get => _scanResultCount; private set => SetProperty(ref _scanResultCount, value); }
+    public long ScanResultCount { get => _scanResultCount; private set => SetProperty(ref _scanResultCount, value); }
     public bool HasSelectedGame => SelectedGame is not null;
     public bool HasAttachedProcess => AttachedProcess is not null;
     public string LibraryStatusText => SelectedGame is null ? "未入库" : "已入库";
     public bool CanRefreshProcesses => !_isProcessRefreshBlocked;
     public bool CanConnectProcess => !_isConnectionControlBlocked && SelectedProcess is not null &&
-        (AttachedProcess is null || AttachedProcess.ProcessId != SelectedProcess.ProcessId ||
-         AttachedProcess.StartTimeUtc != SelectedProcess.StartTimeUtc);
+        (_activeSession is null || !_activeSession.ProcessGroup.Contains(SelectedProcess));
     public bool CanConnectSelectedGame => !_isConnectionControlBlocked && SelectedGame is not null &&
         !_sessions.ContainsKey(SelectedGame.Id);
     public bool CanDisconnectSelectedGame => !_isConnectionControlBlocked && SelectedGame is not null &&
@@ -346,7 +362,7 @@ public sealed class MainViewModel : ObservableObject
     public bool CanDisconnectCurrentProcess => !_isConnectionControlBlocked && AttachedProcess is not null && _activeSession is not null;
     public bool CanSaveCurrentGame => !_isLibraryControlBlocked && AttachedProcess is not null;
     public bool CanRemoveCurrentGame => !_isLibraryControlBlocked && SelectedGame is { IsPinned: false, IsLocked: false };
-    public bool HasScanSession => _scanCandidates.Count > 0;
+    public bool HasScanSession => _scanCandidates is { Count: > 0 };
     public bool CanUndoScan => !IsBusy && _scanHistory.Count > 0;
     public bool HasActiveAdapter => _activeAdapter is not null;
     public bool HasActiveInventoryAdapter => _activeAdapter is IInventoryGameAdapter;
@@ -356,11 +372,15 @@ public sealed class MainViewModel : ObservableObject
         adapter.SupportsCharacterAttributes(AttachedProcess);
     public bool HasUnsupportedCharacterAdapter =>
         _activeAdapter is ICharacterAttributesGameAdapter && !HasActiveCharacterAdapter;
+    public bool IsCharacterEditorSessionOnly => ActiveCharacterEditorDescriptor?.SessionOnly == true;
+    public string ActiveCharacterEditorId => ActiveCharacterEditorDescriptor?.Id ?? string.Empty;
     public bool HasNoActiveAdapter => _activeAdapter is null;
     public string ActiveGameDisplayName => !string.IsNullOrWhiteSpace(SelectedGame?.Name)
         ? SelectedGame.Name
-        : !string.IsNullOrWhiteSpace(AttachedProcess?.WindowTitle)
-            ? AttachedProcess.WindowTitle
+        : !string.IsNullOrWhiteSpace(_activeSession?.ProcessGroup.RootProcess.WindowTitle)
+            ? _activeSession.ProcessGroup.RootProcess.WindowTitle
+            : !string.IsNullOrWhiteSpace(AttachedProcess?.WindowTitle)
+                ? AttachedProcess.WindowTitle
             : !string.IsNullOrWhiteSpace(AttachedProcess?.ProcessName)
                 ? AttachedProcess.ProcessName
                 : "尚未选择游戏";
@@ -372,7 +392,9 @@ public sealed class MainViewModel : ObservableObject
         : $"{SelectedVersion.Architecture} · 构建 {GetVersionIdentity(SelectedVersion)[..Math.Min(12, GetVersionIdentity(SelectedVersion).Length)]}";
     public string LibraryPath => _profileStore.LibraryPath;
     private static ImageSource? DefaultGameIcon => DefaultGameIconSource.Value;
-    public ImageSource? ActiveGameIcon => SelectedGame?.IconSource ?? AttachedProcess?.Icon ?? DefaultGameIcon;
+    public ImageSource? ActiveGameIcon => SelectedGame?.IconSource ??
+                                          _activeSession?.ProcessGroup.RootProcess.Icon ??
+                                          AttachedProcess?.Icon ?? DefaultGameIcon;
     public string CurrentApplicationVersion => ApplicationVersion.Current;
     public string ModuleStatusText { get => _moduleStatusText; private set => SetProperty(ref _moduleStatusText, value); }
     public bool CanCheckGameModules => !_isModuleControlBlocked && SelectedGame is not null && SelectedVersion is not null;
@@ -438,14 +460,51 @@ public sealed class MainViewModel : ObservableObject
 
     public int SynchronizeConnectionStates()
     {
-        var staleSessions = _sessions.Values
+        var sessions = _sessions.Values
             .Append(_activeSession)
             .Where(session => session is not null)
             .Cast<GameConnectionSession>()
             .Distinct()
+            .ToList();
+        var staleSessions = sessions
+            .Where(session => !IsProcessRunning(session.ProcessGroup.RootProcess))
+            .ToList();
+        var rebindCandidates = sessions
+            .Except(staleSessions)
             .Where(session => !IsProcessRunning(session.Process))
             .ToList();
-        if (staleSessions.Count == 0) return 0;
+
+        var reboundCount = 0;
+        if (rebindCandidates.Count > 0)
+        {
+            var snapshot = _processService.GetProcesses();
+            foreach (var session in rebindCandidates)
+            {
+                var refreshedRoot = snapshot.FirstOrDefault(item =>
+                    item.ProcessId == session.ProcessGroup.RootProcess.ProcessId &&
+                    item.StartTimeUtc == session.ProcessGroup.RootProcess.StartTimeUtc);
+                if (refreshedRoot is null)
+                {
+                    staleSessions.Add(session);
+                    continue;
+                }
+
+                var refreshedGroup = _processService.ResolveLogicalGame(refreshedRoot, snapshot);
+                if (refreshedGroup.RuntimeKind is GameRuntimeKind.Electron or GameRuntimeKind.NwJs &&
+                    refreshedGroup.DataProcess.Role != GameProcessRole.Renderer)
+                {
+                    // Chromium may briefly have no renderer while reloading. Keep trying on the
+                    // next liveness tick instead of binding scans to the browser main process.
+                    if (ReferenceEquals(_activeSession, session))
+                        StatusText = "游戏正在重建数据进程，肝肾大圣将自动重新连接";
+                    continue;
+                }
+                RebindSession(session, refreshedGroup);
+                reboundCount++;
+            }
+        }
+
+        if (staleSessions.Count == 0) return reboundCount;
 
         var activeStaleSession = staleSessions.FirstOrDefault(session => ReferenceEquals(_activeSession, session));
         var activeProcessName = activeStaleSession?.Process.ProcessName;
@@ -453,7 +512,8 @@ public sealed class MainViewModel : ObservableObject
             DisconnectSession(session, ReferenceEquals(_activeSession, session));
 
         var staleProcessKeys = staleSessions
-            .Select(session => (session.Process.ProcessId, session.Process.StartTimeUtc))
+            .SelectMany(session => session.ProcessGroup.Members)
+            .Select(process => (process.ProcessId, process.StartTimeUtc))
             .ToHashSet();
         foreach (var process in Processes
                      .Where(process => staleProcessKeys.Contains((process.ProcessId, process.StartTimeUtc)))
@@ -466,7 +526,7 @@ public sealed class MainViewModel : ObservableObject
         StatusText = !string.IsNullOrWhiteSpace(activeProcessName)
             ? $"游戏进程 {activeProcessName} 已退出，已自动断开连接"
             : $"检测到 {staleSessions.Count} 个游戏进程已退出，已同步连接状态";
-        return staleSessions.Count;
+        return staleSessions.Count + reboundCount;
     }
 
     public async Task RefreshProcessesWithCooldownAsync()
@@ -488,18 +548,21 @@ public sealed class MainViewModel : ObservableObject
     {
         CaptureActiveSession();
         StopLiveCandidateRefresh();
-        if (_activeSession is { GameId: null } transient && transient.Process.ProcessId != process.ProcessId)
+        var snapshot = _processService.GetProcesses();
+        var group = _processService.ResolveLogicalGame(process, snapshot);
+        var dataProcess = group.DataProcess;
+        if (_activeSession is { GameId: null } transient && !transient.ProcessGroup.IsSameInstance(group))
             DisconnectSession(transient, false);
-        using var _ = new ProcessMemoryAccessor(process.ProcessId);
-        var matchingGame = ResolveGameForProcess(process, preferredGame);
+        using var _ = new ProcessMemoryAccessor(dataProcess.ProcessId);
+        var matchingGame = ResolveGameForProcess(dataProcess, preferredGame);
         if (matchingGame is not null && _sessions.TryGetValue(matchingGame.Id, out var previous) &&
-            previous.Process.ProcessId != process.ProcessId)
+            !previous.ProcessGroup.IsSameInstance(group))
             DisconnectSession(previous, false);
 
         var session = matchingGame is not null && _sessions.TryGetValue(matchingGame.Id, out var existing) &&
-                      existing.Process.ProcessId == process.ProcessId
+                      existing.ProcessGroup.IsSameInstance(group)
             ? existing
-            : new GameConnectionSession(process, matchingGame?.Id);
+            : new GameConnectionSession(group, matchingGame?.Id);
         if (matchingGame is not null)
         {
             _sessions[matchingGame.Id] = session;
@@ -512,8 +575,10 @@ public sealed class MainViewModel : ObservableObject
         finally { _suppressGameActivation = false; }
         RestoreSessionIntoView(session, matchingGame);
         SelectedProcess = process;
-        ConnectionText = $"已连接 · {process.ProcessName} · PID {process.ProcessId}";
-        StatusText = "进程连接成功，可以开始通用扫描";
+        ConnectionText = BuildConnectionText(session);
+        StatusText = group.Members.Count > 1
+            ? $"已识别 {group.Members.Count} 个关联进程，自动使用{dataProcess.Role.DisplayName()} PID {dataProcess.ProcessId}"
+            : "进程连接成功，可以开始通用扫描";
 
         if (matchingGame is not null)
         {
@@ -613,6 +678,8 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(HasCharacterEditor));
         OnPropertyChanged(nameof(HasActiveCharacterAdapter));
         OnPropertyChanged(nameof(HasUnsupportedCharacterAdapter));
+        OnPropertyChanged(nameof(IsCharacterEditorSessionOnly));
+        OnPropertyChanged(nameof(ActiveCharacterEditorId));
         OnPropertyChanged(nameof(HasNoActiveAdapter));
         OnPropertyChanged(nameof(ActiveAdapterText));
         var version = FindMatchingVersion(game, fingerprint);
@@ -683,6 +750,8 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(HasCharacterEditor));
         OnPropertyChanged(nameof(HasActiveCharacterAdapter));
         OnPropertyChanged(nameof(HasUnsupportedCharacterAdapter));
+        OnPropertyChanged(nameof(IsCharacterEditorSessionOnly));
+        OnPropertyChanged(nameof(ActiveCharacterEditorId));
         OnPropertyChanged(nameof(HasNoActiveAdapter));
         OnPropertyChanged(nameof(ActiveAdapterText));
 
@@ -814,7 +883,7 @@ public sealed class MainViewModel : ObservableObject
     {
         if (IsBusy) return;
         var process = AttachedProcess ?? throw new InvalidOperationException("请先连接游戏进程。");
-        if (!isNewScan && _scanCandidates.Count == 0)
+        if (!isNewScan && _scanCandidates is not { Count: > 0 })
             throw new InvalidOperationException("请先执行首次扫描。");
 
         StopLiveCandidateRefresh();
@@ -836,63 +905,29 @@ public sealed class MainViewModel : ObservableObject
             {
                 var targets = BuildInitialScanTargets();
                 if (targets.Count == 0) throw new InvalidOperationException("输入值无法转换为所选类型或搜索套路。");
-                var combined = new List<ScanCandidate>();
-                var truncated = false;
-                ulong scannedBytes = 0;
-
-                for (var index = 0; index < targets.Count; index++)
-                {
-                    var target = targets[index];
-                    var currentIndex = index;
-                    var routineProgress = new Progress<ScanProgress>(item =>
-                    {
-                        ProgressPercentage = (currentIndex + item.Percentage / 100d) * 100d / targets.Count;
-                        StatusText = $"扫描中 · {ProgressPercentage:F1}% · 已找到 {combined.Count + item.ResultCount:N0} 个";
-                    });
-                    var partial = await _scanService.InitialExactScanAsync(
-                        process.ProcessId,
-                        target.ValueType,
-                        target.Bytes,
-                        WritableOnly,
-                        AlignedOnly,
-                        routineProgress,
-                        _scanCancellation.Token);
-                    combined.AddRange(partial.Candidates.Select(candidate => new ScanCandidate
-                    {
-                        Address = candidate.Address,
-                        FirstBytes = (candidate.FirstBytes.Length > 0 ? candidate.FirstBytes : target.Bytes).ToArray(),
-                        PreviousBytes = candidate.PreviousBytes,
-                        CurrentBytes = candidate.CurrentBytes,
-                        ValueType = candidate.ValueType,
-                        SearchRoutineId = target.Routine.Id,
-                        SearchRoutineName = target.Routine.DisplayName,
-                        ScaleMultiplier = target.Multiplier
-                    }));
-                    truncated |= partial.Truncated;
-                    scannedBytes += partial.ScannedBytes;
-                    if (combined.Count >= 250_000)
-                    {
-                        combined = combined.Take(250_000).ToList();
-                        truncated = true;
-                        break;
-                    }
-                }
-                result = new ScanRunResult(combined, truncated, scannedBytes);
+                result = await _scanService.InitialExactScanAsync(
+                    process.ProcessId,
+                    targets,
+                    WritableOnly,
+                    AlignedOnly,
+                    progress,
+                    _scanCancellation.Token);
             }
             else
             {
-                Func<ScanCandidate, byte[]?> exactTargetFactory = candidate =>
+                Func<ScanCandidatePartition, byte[]?> exactTargetFactory = partition =>
                 {
                     if (SelectedComparison != ScanComparison.Exact) return null;
-                    return MemoryValueCodec.TryParseEncoded(ScanValue, candidate.ValueType, candidate.ScaleMultiplier, out var bytes)
+                    return MemoryValueCodec.TryParseEncoded(ScanValue, partition.ValueType, partition.ScaleMultiplier, out var bytes)
                         ? bytes
                         : null;
                 };
-                if (SelectedComparison == ScanComparison.Exact && _scanCandidates.Any(candidate => exactTargetFactory(candidate) is null))
+                if (SelectedComparison == ScanComparison.Exact &&
+                    _scanCandidates!.Partitions.Any(partition => exactTargetFactory(partition) is null))
                     throw new InvalidOperationException("输入值无法转换为当前扫描会话中的某些类型或套路。");
                 result = await _scanService.NextScanAsync(
                     process.ProcessId,
-                    _scanCandidates,
+                    _scanCandidates!,
                     SelectedComparison,
                     exactTargetFactory,
                     progress,
@@ -901,21 +936,19 @@ public sealed class MainViewModel : ObservableObject
 
             if (isNewScan)
             {
-                _scanHistory.Clear();
+                DisposeScanStore(_scanCandidates);
+                DisposeScanHistory(_scanHistory);
             }
-            else
+            else if (_scanCandidates is not null)
             {
-                _scanHistory.Push(CloneCandidates(_scanCandidates));
+                _scanHistory.Push(_scanCandidates);
             }
-            OnPropertyChanged(nameof(CanUndoScan));
-            _scanCandidates = result.Candidates.ToList();
-            VisibleScanResults = new ObservableCollection<ScanCandidate>(_scanCandidates.Take(50_000));
-            ScanResultCount = _scanCandidates.Count;
-            SelectedScanResult = VisibleScanResults.FirstOrDefault();
-            OnPropertyChanged(nameof(HasScanSession));
-            StatusText = result.Truncated
-                ? $"结果超过上限，保留前 {result.Candidates.Count:N0} 个；请继续改变游戏数值并过滤"
-                : $"扫描完成 · {_scanCandidates.Count:N0} 个候选地址";
+            _scanCandidates = result.Candidates;
+            RefreshScanPreview();
+            StatusText = ScanResultCount > ScanResultPreviewLimit
+                ? $"扫描完成 · {ScanResultCount:N0} 个候选地址 · 列表显示前 {ScanResultPreviewLimit:N0} 条"
+                : $"扫描完成 · {ScanResultCount:N0} 个候选地址";
+            CaptureActiveSession();
         }
         catch (OperationCanceledException)
         {
@@ -929,7 +962,7 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
-    private List<ScanTarget> BuildInitialScanTargets()
+    private List<ScanTargetDefinition> BuildInitialScanTargets()
     {
         var valueTypes = SelectedValueType is { } selected
             ? [selected]
@@ -937,7 +970,7 @@ public sealed class MainViewModel : ObservableObject
         var routines = SelectedSearchRoutine.Id == SearchRoutineIds.All
             ? SearchRoutines.Where(item => item.Id != SearchRoutineIds.All).ToList()
             : [SelectedSearchRoutine];
-        var targets = new List<ScanTarget>();
+        var targets = new List<ScanTargetDefinition>();
 
         foreach (var routine in routines)
         {
@@ -958,7 +991,12 @@ public sealed class MainViewModel : ObservableObject
             foreach (var valueType in valueTypes)
             {
                 if (MemoryValueCodec.TryParseEncoded(ScanValue, valueType, multiplier, out var bytes))
-                    targets.Add(new ScanTarget(valueType, routine, multiplier, bytes));
+                    targets.Add(new ScanTargetDefinition(
+                        valueType,
+                        routine.Id,
+                        routine.DisplayName,
+                        multiplier,
+                        bytes));
             }
         }
         return targets;
@@ -970,28 +1008,40 @@ public sealed class MainViewModel : ObservableObject
     {
         StopLiveCandidateRefresh();
         _scanCancellation?.Cancel();
-        _scanCandidates = [];
-        _scanHistory.Clear();
+        DisposeScanStore(_scanCandidates);
+        _scanCandidates = null;
+        DisposeScanHistory(_scanHistory);
         VisibleScanResults = [];
         ScanResultCount = 0;
         SelectedScanResult = null;
         StatusText = "已清除本次扫描";
         OnPropertyChanged(nameof(HasScanSession));
         OnPropertyChanged(nameof(CanUndoScan));
+        CaptureActiveSession();
     }
 
     public void UndoScan()
     {
         if (IsBusy || _scanHistory.Count == 0) return;
         StopLiveCandidateRefresh();
+        DisposeScanStore(_scanCandidates);
         _scanCandidates = _scanHistory.Pop();
-        VisibleScanResults = new ObservableCollection<ScanCandidate>(_scanCandidates.Take(50_000));
-        ScanResultCount = _scanCandidates.Count;
+        RefreshScanPreview();
+        StatusText = ScanResultCount > ScanResultPreviewLimit
+            ? $"已撤销上一次过滤 · {ScanResultCount:N0} 个候选地址 · 列表显示前 {ScanResultPreviewLimit:N0} 条"
+            : $"已撤销上一次过滤 · {ScanResultCount:N0} 个候选地址";
+        CaptureActiveSession();
+        StartLiveCandidateRefresh();
+    }
+
+    private void RefreshScanPreview()
+    {
+        var preview = _scanCandidates?.ReadCandidates(ScanResultPreviewLimit) ?? [];
+        VisibleScanResults = new ObservableCollection<ScanCandidate>(preview);
+        ScanResultCount = _scanCandidates?.Count ?? 0;
         SelectedScanResult = VisibleScanResults.FirstOrDefault();
-        StatusText = $"已撤销上一次过滤 · {_scanCandidates.Count:N0} 个候选地址";
         OnPropertyChanged(nameof(HasScanSession));
         OnPropertyChanged(nameof(CanUndoScan));
-        StartLiveCandidateRefresh();
     }
 
     public async Task<SavedField> SaveSelectedCandidateAsync(string name, string group)
@@ -1265,7 +1315,9 @@ public sealed class MainViewModel : ObservableObject
         if (SelectedAdapterCharacter is not null && !string.IsNullOrWhiteSpace(selectedAttribute))
             SelectedCharacterAttribute = SelectedAdapterCharacter.Attributes.FirstOrDefault(item =>
                 string.Equals(item.Key, selectedAttribute, StringComparison.Ordinal)) ?? SelectedAdapterCharacter.Attributes.FirstOrDefault();
-        StatusText = $"已读取 {_adapterCharacters.Count:N0} 个人物；属性修改仅本次游戏运行有效";
+        StatusText = IsCharacterEditorSessionOnly
+            ? $"已读取 {_adapterCharacters.Count:N0} 个人物；属性修改仅本次游戏运行有效"
+            : $"已读取 {_adapterCharacters.Count:N0} 个人物与属性";
     }
 
     public async Task WriteSelectedCharacterAttributeAsync(string value)
@@ -1285,7 +1337,9 @@ public sealed class MainViewModel : ObservableObject
             string.Equals(item.CharacterId, character.CharacterId, StringComparison.Ordinal));
         SelectedCharacterAttribute = SelectedAdapterCharacter?.Attributes.FirstOrDefault(item =>
             string.Equals(item.Key, attribute.Key, StringComparison.Ordinal));
-        StatusText = $"已实时修改 {character.DisplayName} 的{attribute.DisplayName}；关闭游戏后会失效";
+        StatusText = IsCharacterEditorSessionOnly
+            ? $"已实时修改 {character.DisplayName} 的{attribute.DisplayName}；关闭游戏后会失效"
+            : $"已实时修改并保存 {character.DisplayName} 的{attribute.DisplayName}";
     }
 
     public async Task<SavedField> AddCharacterAttributeFieldAsync(string displayName, string group)
@@ -1725,6 +1779,8 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(HasCharacterEditor));
         OnPropertyChanged(nameof(HasActiveCharacterAdapter));
         OnPropertyChanged(nameof(HasUnsupportedCharacterAdapter));
+        OnPropertyChanged(nameof(IsCharacterEditorSessionOnly));
+        OnPropertyChanged(nameof(ActiveCharacterEditorId));
         OnPropertyChanged(nameof(HasNoActiveAdapter));
         OnPropertyChanged(nameof(ActiveAdapterText));
     }
@@ -1826,7 +1882,7 @@ public sealed class MainViewModel : ObservableObject
             DisconnectSession(transient, false);
         if (game is not null && _sessions.TryGetValue(game.Id, out var session))
         {
-            if (IsProcessRunning(session.Process))
+            if (IsProcessRunning(session.ProcessGroup.RootProcess) && IsProcessRunning(session.Process))
             {
                 RestoreSessionIntoView(session, game);
                 return;
@@ -1847,7 +1903,7 @@ public sealed class MainViewModel : ObservableObject
         _scanCandidates = session.ScanCandidates;
         _scanHistory = session.ScanHistory;
         VisibleScanResults = session.VisibleScanResults;
-        ScanResultCount = _scanCandidates.Count;
+        ScanResultCount = _scanCandidates?.Count ?? 0;
         SelectedScanResult = session.SelectedScanResult ?? VisibleScanResults.FirstOrDefault();
         _adapterInventoryItems.Clear();
         foreach (var item in session.AdapterItems) _adapterInventoryItems.Add(item);
@@ -1859,7 +1915,8 @@ public sealed class MainViewModel : ObservableObject
         SelectedAdapterCharacter = _adapterCharacters.FirstOrDefault(item =>
             string.Equals(item.CharacterId, session.SelectedCharacterId, StringComparison.Ordinal));
         SelectedCharacterAttribute = SelectedAdapterCharacter?.Attributes.FirstOrDefault(item =>
-            string.Equals(item.Key, session.SelectedCharacterAttributeKey, StringComparison.Ordinal));
+            string.Equals(item.Key, session.SelectedCharacterAttributeKey, StringComparison.Ordinal) &&
+            MatchesCharacterAttributeFilter(item));
         AdapterItemNameFilter = session.AdapterItemNameFilter;
         AdapterItemCountFilter = session.AdapterItemCountFilter;
         ScanValue = session.ScanValue;
@@ -1875,12 +1932,14 @@ public sealed class MainViewModel : ObservableObject
                           ? game?.Versions.OrderByDescending(item => item.LastVerifiedUtc).FirstOrDefault()
                           : FindMatchingVersion(game, session.Fingerprint));
         SelectedVersion = version;
-        ConnectionText = $"已连接 · {session.Process.ProcessName} · PID {session.Process.ProcessId}";
+        ConnectionText = BuildConnectionText(session);
         OnPropertyChanged(nameof(HasActiveAdapter));
         OnPropertyChanged(nameof(HasActiveInventoryAdapter));
         OnPropertyChanged(nameof(HasCharacterEditor));
         OnPropertyChanged(nameof(HasActiveCharacterAdapter));
         OnPropertyChanged(nameof(HasUnsupportedCharacterAdapter));
+        OnPropertyChanged(nameof(IsCharacterEditorSessionOnly));
+        OnPropertyChanged(nameof(ActiveCharacterEditorId));
         OnPropertyChanged(nameof(HasNoActiveAdapter));
         OnPropertyChanged(nameof(ActiveAdapterText));
         OnPropertyChanged(nameof(SpeedStatusText));
@@ -1891,6 +1950,49 @@ public sealed class MainViewModel : ObservableObject
         RestartLockMaintenance();
     }
 
+    private void RebindSession(GameConnectionSession session, LogicalGameProcessGroup processGroup)
+    {
+        var wasActive = ReferenceEquals(_activeSession, session);
+        if (wasActive)
+        {
+            CaptureActiveSession();
+            StopLiveCandidateRefresh();
+            _scanCancellation?.Cancel();
+        }
+        StopSessionLockMaintenance(session);
+        try { session.SpeedService.DetachSafely(); }
+        catch (Exception exception) { Debug.WriteLine(exception); }
+        session.SpeedService.Dispose();
+        session.SpeedService = new ProcessSpeedService();
+        session.IsSpeedActive = false;
+        session.ProcessGroup = processGroup;
+        session.Process = processGroup.DataProcess;
+        DisposeSessionScanState(session);
+        session.ScanCandidates = null;
+        session.ScanHistory = new Stack<ScanCandidateStore>();
+        session.VisibleScanResults = [];
+        session.SelectedScanResult = null;
+        session.AdapterItems = [];
+        session.AdapterCharacters = [];
+        session.SelectedAdapterFieldKey = null;
+        session.SelectedCharacterId = null;
+        session.SelectedCharacterAttributeKey = null;
+        session.Adapter = session.Fingerprint is null
+            ? null
+            : _adapterRegistry.Resolve(session.Process, session.Fingerprint);
+
+        if (!wasActive) return;
+        var game = session.GameId is Guid gameId ? Games.FirstOrDefault(item => item.Id == gameId) : SelectedGame;
+        SelectedProcess = processGroup.SeedProcess;
+        RestoreSessionIntoView(session, game);
+        StatusText = $"游戏数据进程已重建，已自动改用 PID {session.Process.ProcessId}；临时扫描结果已清空";
+    }
+
+    private static string BuildConnectionText(GameConnectionSession session) =>
+        session.ProcessGroup.Members.Count > 1
+            ? $"已连接 · {session.ProcessGroup.RootProcess.ProcessName} · {session.ProcessGroup.Members.Count} 个关联进程 · 数据 PID {session.Process.ProcessId}"
+            : $"已连接 · {session.Process.ProcessName} · PID {session.Process.ProcessId}";
+
     private void ClearActiveView(GameProfile? selectedGame)
     {
         _activeSession = null;
@@ -1899,8 +2001,8 @@ public sealed class MainViewModel : ObservableObject
         _attachedGameId = null;
         _activeAdapter = null;
         AttachedProcess = null;
-        _scanCandidates = [];
-        _scanHistory = new Stack<List<ScanCandidate>>();
+        _scanCandidates = null;
+        _scanHistory = new Stack<ScanCandidateStore>();
         VisibleScanResults = [];
         ScanResultCount = 0;
         SelectedScanResult = null;
@@ -1916,6 +2018,8 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(HasCharacterEditor));
         OnPropertyChanged(nameof(HasActiveCharacterAdapter));
         OnPropertyChanged(nameof(HasUnsupportedCharacterAdapter));
+        OnPropertyChanged(nameof(IsCharacterEditorSessionOnly));
+        OnPropertyChanged(nameof(ActiveCharacterEditorId));
         OnPropertyChanged(nameof(HasNoActiveAdapter));
         OnPropertyChanged(nameof(ActiveAdapterText));
         OnPropertyChanged(nameof(SpeedStatusText));
@@ -1935,6 +2039,7 @@ public sealed class MainViewModel : ObservableObject
         }
         try { session.SpeedService.DetachSafely(); }
         finally { session.SpeedService.Dispose(); }
+        DisposeSessionScanState(session);
         if (session.GameId is Guid gameId)
         {
             _sessions.Remove(gameId);
@@ -2134,28 +2239,50 @@ public sealed class MainViewModel : ObservableObject
         return view;
     }
 
+    private GameEditorDescriptor? ActiveCharacterEditorDescriptor =>
+        _activeAdapter?.Editors.FirstOrDefault(editor => editor.Kind == GameEditorKind.MasterDetail);
+
+    private void RebuildCharacterAttributesView(AdapterCharacterItem? character)
+    {
+        _characterAttributesView = character is null
+            ? null
+            : CollectionViewSource.GetDefaultView(character.Attributes);
+        if (_characterAttributesView is not null)
+            _characterAttributesView.Filter = item =>
+                item is AdapterCharacterAttribute attribute && MatchesCharacterAttributeFilter(attribute);
+        OnPropertyChanged(nameof(CharacterAttributesView));
+        SelectedCharacterAttribute = character?.Attributes.FirstOrDefault(MatchesCharacterAttributeFilter);
+    }
+
+    private bool MatchesCharacterAttributeFilter(AdapterCharacterAttribute attribute) =>
+        string.IsNullOrWhiteSpace(CharacterAttributeNameFilter) ||
+        attribute.DisplayName.Contains(CharacterAttributeNameFilter.Trim(), StringComparison.CurrentCultureIgnoreCase);
+
     private static string NormalizeGroup(string? group) =>
         string.IsNullOrWhiteSpace(group) ? "未分组" : group.Trim();
 
-    private static List<ScanCandidate> CloneCandidates(IEnumerable<ScanCandidate> candidates) =>
-        candidates.Select(candidate => new ScanCandidate
-        {
-            Address = candidate.Address,
-            FirstBytes = candidate.FirstBytes.ToArray(),
-            PreviousBytes = candidate.PreviousBytes.ToArray(),
-            CurrentBytes = candidate.CurrentBytes.ToArray(),
-            ValueType = candidate.ValueType,
-            SearchRoutineId = candidate.SearchRoutineId,
-            SearchRoutineName = candidate.SearchRoutineName,
-            ScaleMultiplier = candidate.ScaleMultiplier
-        }).ToList();
+    private static void DisposeScanStore(ScanCandidateStore? store) => store?.Dispose();
+
+    private static void DisposeScanHistory(Stack<ScanCandidateStore> history)
+    {
+        while (history.TryPop(out var store)) store.Dispose();
+    }
+
+    private static void DisposeSessionScanState(GameConnectionSession session)
+    {
+        DisposeScanStore(session.ScanCandidates);
+        session.ScanCandidates = null;
+        DisposeScanHistory(session.ScanHistory);
+        session.VisibleScanResults = [];
+        session.SelectedScanResult = null;
+    }
 
     private void StartLiveCandidateRefresh()
     {
         StopLiveCandidateRefresh();
-        if (IsBusy || AttachedProcess is null || _scanCandidates.Count is <= 0 or >= 100) return;
+        if (IsBusy || AttachedProcess is null || _scanCandidates?.Count is not (> 0 and < 100)) return;
         var process = AttachedProcess;
-        var candidates = _scanCandidates.ToList();
+        var candidates = VisibleScanResults.ToList();
         var cancellation = new CancellationTokenSource();
         _liveRefreshCancellation = cancellation;
         _ = Task.Run(async () =>
@@ -2325,6 +2452,7 @@ public sealed class MainViewModel : ObservableObject
             StopSessionLockMaintenance(session);
             session.SpeedService.DetachSafely();
             session.SpeedService.Dispose();
+            DisposeSessionScanState(session);
         }
         _sessions.Clear();
         _activeAdapter = null;
@@ -2338,18 +2466,19 @@ public sealed class MainViewModel : ObservableObject
         catch { return string.Equals(left, right, StringComparison.OrdinalIgnoreCase); }
     }
 
-    private sealed class GameConnectionSession(ProcessItem process, Guid? gameId)
+    private sealed class GameConnectionSession(LogicalGameProcessGroup processGroup, Guid? gameId)
     {
-        public ProcessItem Process { get; } = process;
+        public LogicalGameProcessGroup ProcessGroup { get; set; } = processGroup;
+        public ProcessItem Process { get; set; } = processGroup.DataProcess;
         public Guid? GameId { get; set; } = gameId;
         public Guid? VersionId { get; set; }
         public VersionFingerprint? Fingerprint { get; set; }
         public IGameAdapter? Adapter { get; set; }
-        public ProcessSpeedService SpeedService { get; } = new();
+        public ProcessSpeedService SpeedService { get; set; } = new();
         public bool IsSpeedActive { get; set; }
         public string SpeedMultiplierInput { get; set; } = "2";
-        public List<ScanCandidate> ScanCandidates { get; set; } = [];
-        public Stack<List<ScanCandidate>> ScanHistory { get; set; } = new();
+        public ScanCandidateStore? ScanCandidates { get; set; }
+        public Stack<ScanCandidateStore> ScanHistory { get; set; } = new();
         public ObservableCollection<ScanCandidate> VisibleScanResults { get; set; } = [];
         public ScanCandidate? SelectedScanResult { get; set; }
         public List<AdapterInventoryItem> AdapterItems { get; set; } = [];
@@ -2367,11 +2496,6 @@ public sealed class MainViewModel : ObservableObject
         public CancellationTokenSource? LockMaintenanceCancellation { get; set; }
     }
 
-    private sealed record ScanTarget(
-        MemoryValueType ValueType,
-        SearchRoutineOption Routine,
-        double Multiplier,
-        byte[] Bytes);
 }
 
 public sealed record Choice<T>(T Value, string Display);

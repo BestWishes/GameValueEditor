@@ -7,15 +7,65 @@ namespace GameValueEditor.Models;
 public sealed class ProcessItem
 {
     public int ProcessId { get; init; }
+    public int ParentProcessId { get; init; }
     public string ProcessName { get; init; } = string.Empty;
     public string WindowTitle { get; init; } = string.Empty;
     public string ExecutablePath { get; init; } = string.Empty;
+    public string CommandLine { get; init; } = string.Empty;
     public DateTime StartTimeUtc { get; init; }
+    public long WorkingSetBytes { get; init; }
+    public GameProcessRole Role { get; init; }
+    public GameRuntimeKind RuntimeKind { get; init; }
     public ImageSource? Icon { get; init; }
 
-    public string DisplayName => string.IsNullOrWhiteSpace(WindowTitle)
-        ? $"{ProcessName}  ·  PID {ProcessId}"
-        : $"{WindowTitle}  ·  {ProcessName}  ·  PID {ProcessId}";
+    public string DisplayName
+    {
+        get
+        {
+            var role = Role == GameProcessRole.Unknown ? string.Empty : $"  ·  {Role.DisplayName()}";
+            return string.IsNullOrWhiteSpace(WindowTitle)
+                ? $"{ProcessName}  ·  PID {ProcessId}{role}"
+                : $"{WindowTitle}  ·  {ProcessName}  ·  PID {ProcessId}{role}";
+        }
+    }
+}
+
+public enum GameRuntimeKind
+{
+    Unknown,
+    Native,
+    Electron,
+    NwJs,
+    Unity,
+    UnityMono,
+    UnityIl2Cpp,
+    Unreal,
+    Godot
+}
+
+public enum GameProcessRole
+{
+    Unknown,
+    Main,
+    Renderer,
+    Gpu,
+    Network,
+    Audio,
+    Utility
+}
+
+public static class GameProcessRoleExtensions
+{
+    public static string DisplayName(this GameProcessRole role) => role switch
+    {
+        GameProcessRole.Main => "主进程",
+        GameProcessRole.Renderer => "游戏数据",
+        GameProcessRole.Gpu => "图形辅助",
+        GameProcessRole.Network => "网络辅助",
+        GameProcessRole.Audio => "音频辅助",
+        GameProcessRole.Utility => "辅助进程",
+        _ => "未知角色"
+    };
 }
 
 public sealed class ScanCandidate : ObservableObject
