@@ -4,7 +4,7 @@ namespace GameValueEditor.Models;
 
 public sealed class LibraryDocument
 {
-    public int SchemaVersion { get; set; } = 5;
+    public int SchemaVersion { get; set; } = 6;
     public string Theme { get; set; } = "Light";
     public ObservableCollection<GameProfile> Games { get; set; } = [];
 }

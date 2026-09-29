@@ -36,10 +36,40 @@ public sealed class GameModuleCatalogService
 
     public IReadOnlyList<InstalledModuleRecord> GetInstalledModules() => LoadInstalled().Modules;
 
+    public InstalledModuleManifest? GetInstalledManifest(string moduleId)
+    {
+        var record = FindInstalled(moduleId);
+        if (record is null || !IsSafePathSegment(record.Id) || !IsSafePathSegment(record.Version)) return null;
+        var path = Path.Combine(_modulesDirectory, "packages", record.Id, record.Version, "module.json");
+        if (!File.Exists(path)) return null;
+        try { return JsonSerializer.Deserialize<InstalledModuleManifest>(File.ReadAllText(path), _jsonOptions); }
+        catch { return null; }
+    }
+
+    public IReadOnlyList<InstalledModuleManifest> GetInstalledManifests() =>
+        GetInstalledModules().Select(record => GetInstalledManifest(record.Id)).OfType<InstalledModuleManifest>().ToList();
+
     public async Task<GameModuleCheckResult> CheckAsync(
         GameProfile game,
         GameVersionProfile version,
         CancellationToken cancellationToken = default)
+        => await CheckCoreAsync(game.ProcessName, version.BuildFingerprint, version.ExecutableSha256,
+            version.GameAssemblySha256, version.MetadataSha256, cancellationToken);
+
+    public async Task<GameModuleCheckResult> CheckAsync(
+        string processName,
+        VersionFingerprint fingerprint,
+        CancellationToken cancellationToken = default)
+        => await CheckCoreAsync(processName, fingerprint.BuildSha256, fingerprint.Sha256,
+            fingerprint.GameAssemblySha256, fingerprint.MetadataSha256, cancellationToken);
+
+    private async Task<GameModuleCheckResult> CheckCoreAsync(
+        string processName,
+        string buildFingerprint,
+        string executableSha256,
+        string gameAssemblySha256,
+        string metadataSha256,
+        CancellationToken cancellationToken)
     {
         using var response = await _httpClient.GetAsync(DefaultCatalogUrl, cancellationToken);
         response.EnsureSuccessStatusCode();
@@ -51,7 +81,9 @@ public sealed class GameModuleCatalogService
                 $"服务器模块清单需要接口版本 {catalog.HostApiVersion}，当前应用最高支持 {ModuleHostApi.CurrentVersion}。");
 
         var compatible = catalog.Modules
-            .Where(module => module.HostApiVersion is >= 1 and <= ModuleHostApi.CurrentVersion && Matches(module, game, version))
+            .Where(module => module.HostApiVersion is >= 1 and <= ModuleHostApi.CurrentVersion &&
+                             Matches(module, processName, buildFingerprint, executableSha256,
+                                 gameAssemblySha256, metadataSha256))
             .OrderByDescending(module => ParseVersion(module.Version))
             .FirstOrDefault();
         if (compatible is null)
@@ -75,6 +107,9 @@ public sealed class GameModuleCatalogService
     {
         EnsureSafePathSegment(module.Id, "模块 ID");
         EnsureSafePathSegment(module.Version, "模块版本");
+        if (!Uri.TryCreate(module.DownloadUrl, UriKind.Absolute, out var downloadUri) ||
+            downloadUri.Scheme != Uri.UriSchemeHttps)
+            throw new InvalidOperationException("模块下载地址必须使用 HTTPS。");
         if (string.IsNullOrWhiteSpace(module.Sha256) || module.Sha256.Length != 64)
             throw new InvalidOperationException("模块清单缺少有效的 SHA-256 校验值。");
         Directory.CreateDirectory(_modulesDirectory);
@@ -128,6 +163,34 @@ public sealed class GameModuleCatalogService
         }
     }
 
+    public InstalledModuleRecord? Unregister(string moduleId)
+    {
+        var document = LoadInstalled();
+        var record = document.Modules.FirstOrDefault(item => string.Equals(item.Id, moduleId, StringComparison.Ordinal));
+        if (record is null) return null;
+        document.Modules.Remove(record);
+        SaveInstalled(document);
+        return record;
+    }
+
+    public void RestoreRegistration(InstalledModuleRecord record)
+    {
+        var document = LoadInstalled();
+        document.Modules.RemoveAll(item => string.Equals(item.Id, record.Id, StringComparison.Ordinal));
+        document.Modules.Add(record);
+        SaveInstalled(document);
+    }
+
+    public void DeletePackage(string moduleId)
+    {
+        EnsureSafePathSegment(moduleId, "模块 ID");
+        var packagesRoot = Path.GetFullPath(Path.Combine(_modulesDirectory, "packages")) + Path.DirectorySeparatorChar;
+        var packageRoot = Path.GetFullPath(Path.Combine(packagesRoot, moduleId));
+        if (!packageRoot.StartsWith(packagesRoot, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("模块卸载路径无效。");
+        if (Directory.Exists(packageRoot)) Directory.Delete(packageRoot, true);
+    }
+
     private InstalledModuleDocument LoadInstalled()
     {
         var path = Path.Combine(_modulesDirectory, "installed.json");
@@ -163,8 +226,15 @@ public sealed class GameModuleCatalogService
             manifest.HostApiVersion != catalogEntry.HostApiVersion ||
             manifest.HostApiVersion is < 1 or > ModuleHostApi.CurrentVersion)
             throw new InvalidOperationException("专属模块包与服务器清单不一致。");
-        var assemblyPath = Path.GetFullPath(Path.Combine(directory, manifest.AssemblyFile));
-        if (!assemblyPath.StartsWith(Path.GetFullPath(directory), StringComparison.OrdinalIgnoreCase) || !File.Exists(assemblyPath))
+        if (!string.Equals(manifest.GameDisplayName, catalogEntry.GameDisplayName, StringComparison.Ordinal) ||
+            !manifest.ProcessNames.ToHashSet(StringComparer.OrdinalIgnoreCase)
+                .SetEquals(catalogEntry.ProcessNames) ||
+            !manifest.Editors.Select(item => item.Id).ToHashSet(StringComparer.Ordinal)
+                .SetEquals(catalogEntry.Editors.Select(item => item.Id)))
+            throw new InvalidOperationException("专属模块包的游戏身份或编辑器清单与服务器不一致。");
+        var packageRoot = Path.GetFullPath(directory) + Path.DirectorySeparatorChar;
+        var assemblyPath = Path.GetFullPath(Path.Combine(packageRoot, manifest.AssemblyFile));
+        if (!assemblyPath.StartsWith(packageRoot, StringComparison.OrdinalIgnoreCase) || !File.Exists(assemblyPath))
             throw new InvalidOperationException("专属模块包缺少声明的程序集。");
     }
 
@@ -187,16 +257,22 @@ public sealed class GameModuleCatalogService
         }
     }
 
-    private static bool Matches(GameModuleCatalogEntry module, GameProfile game, GameVersionProfile version)
+    private static bool Matches(
+        GameModuleCatalogEntry module,
+        string processName,
+        string buildFingerprint,
+        string executableSha256,
+        string gameAssemblySha256,
+        string metadataSha256)
     {
         if (module.ProcessNames.Count > 0 &&
-            !module.ProcessNames.Any(name => string.Equals(name, game.ProcessName, StringComparison.OrdinalIgnoreCase)))
+            !module.ProcessNames.Any(name => string.Equals(name, processName, StringComparison.OrdinalIgnoreCase)))
             return false;
         return module.CompatibleBuilds.Any(build =>
-            MatchOptional(build.BuildFingerprint, version.BuildFingerprint) &&
-            MatchOptional(build.ExecutableSha256, version.ExecutableSha256) &&
-            MatchOptional(build.GameAssemblySha256, version.GameAssemblySha256) &&
-            MatchOptional(build.MetadataSha256, version.MetadataSha256));
+            MatchOptional(build.BuildFingerprint, buildFingerprint) &&
+            MatchOptional(build.ExecutableSha256, executableSha256) &&
+            MatchOptional(build.GameAssemblySha256, gameAssemblySha256) &&
+            MatchOptional(build.MetadataSha256, metadataSha256));
     }
 
     private static bool MatchOptional(string expected, string actual) =>
@@ -214,6 +290,11 @@ public sealed class GameModuleCatalogService
             value.Contains(Path.DirectorySeparatorChar) || value.Contains(Path.AltDirectorySeparatorChar))
             throw new InvalidOperationException($"{label}包含不安全字符。");
     }
+
+    private static bool IsSafePathSegment(string value) =>
+        !string.IsNullOrWhiteSpace(value) && value is not "." and not ".." &&
+        value.IndexOfAny(Path.GetInvalidFileNameChars()) < 0 &&
+        !value.Contains(Path.DirectorySeparatorChar) && !value.Contains(Path.AltDirectorySeparatorChar);
 
     private static async Task<string> ComputeSha256Async(string path, CancellationToken cancellationToken)
     {
@@ -242,14 +323,26 @@ public sealed class GameModuleCatalogEntry
     public string Id { get; set; } = string.Empty;
     public string Version { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
+    public string GameDisplayName { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
     public int HostApiVersion { get; set; } = 1;
     public List<string> LegacyIds { get; set; } = [];
     public List<GameModuleEditorEntry> Editors { get; set; } = [];
     public List<string> ProcessNames { get; set; } = [];
     public List<GameModuleBuildMatch> CompatibleBuilds { get; set; } = [];
+    public List<GameModuleContributor> Contributors { get; set; } = [];
     public string DownloadUrl { get; set; } = string.Empty;
     public string Sha256 { get; set; } = string.Empty;
+}
+
+public sealed class GameModuleContributor
+{
+    public long GithubId { get; set; }
+    public string GithubLogin { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+    public string ProfileUrl { get; set; } = string.Empty;
+    public DateOnly FirstContributionDate { get; set; }
+    public DateOnly LatestContributionDate { get; set; }
 }
 
 public sealed class GameModuleEditorEntry

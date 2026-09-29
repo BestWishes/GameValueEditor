@@ -62,6 +62,7 @@ Host API v2 契约位于 `src/GameValueEditor.ModuleSdk`。模块中心保存同
 games/example/
   GameValueEditor.Modules.Example.csproj
   module.json
+  contributors.generated.json  # 自动维护，不手改
   src/
     ExampleGameAdapter.cs
     Shared/
@@ -80,14 +81,25 @@ games/example/
   "id": "game.example",
   "version": "1.0.0",
   "displayName": "示例游戏专属模块",
+  "gameDisplayName": "示例游戏",
+  "description": "示例游戏的背包编辑能力。",
   "assemblyFile": "GameValueEditor.Modules.Example.dll",
   "hostApiVersion": 2,
+  "processNames": ["ExampleGame"],
+  "compatibleBuilds": [
+    {
+      "executableSha256": "64位十六进制哈希",
+      "gameAssemblySha256": "64位十六进制哈希",
+      "metadataSha256": "64位十六进制哈希"
+    }
+  ],
   "editors": [
     {
       "id": "game.example.inventory",
       "displayName": "背包物品",
       "kind": "collection",
-      "order": 100
+      "order": 100,
+      "sessionOnly": false
     }
   ]
 }
@@ -129,20 +141,23 @@ Unity/IL2CPP 业务函数通常需要主线程。临时挂接必须校验原始�
 
 ## 清单、下载和安装
 
-模块中心根目录 `catalog.json` 是“检查新有”的服务器清单。每项包括：
+模块中心根目录 `catalog.json` 是“检查新有”的服务器清单。源码 `games/{短名}/module.json` 是游戏身份、兼容构建和编辑器元数据的唯一人工维护来源，发布脚本从它生成目录，避免重复字段漂移。每项包括：
 
 - 游戏模块 ID、语义化版本、Host API 版本和可选旧 ID。
 - 进程名与一个或多个精确兼容构建。
 - 编辑模块元数据。
 - HTTPS Release 下载地址与 ZIP SHA-256。
+- 整个游戏包的贡献者快照：GitHub 数字 ID、登录名、显示名称、主页、首次和最新贡献日期。
 
 安装流程固定为：临时下载、SHA-256 校验、安全解压、核对 `module.json`、原子移动到 `data/modules/packages/{游戏模块ID}/{版本}`，最后更新 `installed.json`。模块是可执行代码，必须审查来源。损坏模块不得阻止主程序启动。
 
-不要先提交指向不存在资产的清单，也不要在相同版本下替换 ZIP 内容。内容变化必须提升模块版本并生成新哈希。
+不要先提交指向不存在资产的清单，也不要在相同版本下替换 ZIP 内容。内容变化必须提升模块版本并生成新哈希。贡献者文件由合并后的可信工作流按 PR 实际修改的游戏目录生成；贡献者不得在 PR 中手工修改名单，也不会按编辑器拆分、计数或排名。
+
+宿主允许未入库但已连接的游戏检查清单。下载成功后，使用 `gameDisplayName`、进程名和实时精确指纹生成普通游戏库条目并关联稳定 `ModuleId`；完整离线包启动时也会为已安装模块补齐管理条目。单独卸载模块保留版本和快捷入口，从库移出则连同本地模块一起删除。
 
 ## fzzml 参考实现
 
-模块中心的 `game.fzzml` v2.0.0 同时注册：
+模块中心的 `game.fzzml` v2.0.1 同时注册：
 
 - `game.fzzml.inventory`：从 `SaveManager._cachedSnapshot.inventoryRows` 按物品名聚合，在 Unity 主线程替换数量字符串，刷新缓存并调用游戏自身保存函数。应用不会主动把超过 9999 的值拆栈。
 - `game.fzzml.character-attributes`：从 `playerDefault.units` 枚举人物，用 `UnitSlotData.unitId` 定位，修改本次进程的 `PlayerUnitConfig` 基础五维，调用聚合器和属性事件。它仅本次游戏运行有效。
@@ -168,9 +183,10 @@ dotnet run --project tests/GameValueEditor.SmokeTests/GameValueEditor.SmokeTests
 
 ```powershell
 dotnet build GameValueEditor.Modules.slnx -c Release
-./scripts/publish-fzzml.ps1 -Version 2.0.0
+./scripts/publish-fzzml.ps1 -Version 2.0.1
+./scripts/validate-modules.ps1
 ```
 
 每个模块发布前还要实机验证：支持构建能加载，错误构建被拒绝；读取与游戏一致；最小写入即时生效；页面刷新和对象重定位不串数据；持久化编辑器重启后仍正确；`SessionOnly` 编辑器重启后恢复；异常输入、对象未加载、结构变化和超时均安全失败；模块不会出现在其他游戏中。
 
-发布顺序：构建与测试、创建不可变 Release 资产、确认下载地址、把真实 SHA-256 写入 `catalog.json`、提交清单、再从已发布版本执行一次在线检查与安装验证。
+发布顺序：校验源码清单、构建与测试、由发布脚本生成 ZIP 和目录、创建不可变 Release 资产、校验线上 SHA-256、提交并推送 `catalog.json`、再从已发布版本执行一次在线检查与安装验证。PR 自动构建和结构检查不能证明内存写入安全；未知构建拒绝、真实对象/线程/保存/回读证据和最小实机写入仍需人工确认。

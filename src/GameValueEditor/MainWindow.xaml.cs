@@ -111,10 +111,13 @@ public partial class MainWindow : Window
             var game = _viewModel.SelectedGame ?? throw new InvalidOperationException("请先选择游戏条目。");
             if (game.IsPinned) throw new InvalidOperationException("置顶游戏不能从库移出，请先取消置顶。");
             if (game.IsLocked) throw new InvalidOperationException("锁定游戏不能从库移出，请先解锁。");
+            var moduleMessage = game.IsModuleInstalled
+                ? "\n本地安装的该游戏专属模块也会一并卸载。"
+                : string.Empty;
             if (MessageDialog.Confirm(
                     this,
                     "从游戏库移出",
-                    $"确定将“{game.Name}”及其全部版本和字段配置从游戏库移出吗？\n这个操作不会修改游戏文件；如果游戏正在连接，当前连接会继续保留。"))
+                    $"确定将“{game.Name}”及其全部版本和字段配置从游戏库移出吗？{moduleMessage}\n这个操作不会修改游戏文件；如果游戏正在连接，当前连接会继续保留。"))
                 await _viewModel.DeleteSelectedGameAsync();
         });
     }
@@ -141,6 +144,19 @@ public partial class MainWindow : Window
 
     private async void InstallGameModule_OnClick(object sender, RoutedEventArgs e) =>
         await RunGuardedAsync(_viewModel.InstallAvailableGameModuleAsync);
+
+    private async void UninstallGameModule_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (!MessageDialog.Confirm(this, "卸载专属模块", "确定卸载当前游戏的本地专属模块吗？\n游戏库、游戏版本和快捷入口会保留。")) return;
+        await RunGuardedAsync(_viewModel.UninstallCurrentGameModuleAsync);
+    }
+
+    private void ShowModuleContributors_OnClick(object sender, RoutedEventArgs e) => RunGuarded(() =>
+    {
+        var contributors = _viewModel.GetModuleContributors();
+        if (contributors.Count == 0) throw new InvalidOperationException("当前模块尚无可显示的贡献者信息。");
+        new ModuleContributorsDialog(contributors) { Owner = this }.ShowDialog();
+    });
 
     private async void ApplicationUpdate_OnClick(object sender, RoutedEventArgs e)
     {

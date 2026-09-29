@@ -14,12 +14,14 @@ public sealed class GameProfile : ObservableObject
     private bool _isLocked;
     private DateTime _lastUsedUtc = DateTime.UtcNow;
     private bool _isConnected;
+    private bool _isModuleInstalled;
     private ImageSource? _iconSource;
 
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Name { get => _name; set => SetProperty(ref _name, value); }
     public string ExecutablePath { get => _executablePath; set => SetProperty(ref _executablePath, value); }
     public string ProcessName { get => _processName; set => SetProperty(ref _processName, value); }
+    public string ModuleId { get; set; } = string.Empty;
     public string IconFileName { get; set; } = string.Empty;
     public bool IsPinned { get => _isPinned; set { if (SetProperty(ref _isPinned, value)) OnPropertyChanged(nameof(Badges)); } }
     public bool IsLocked { get => _isLocked; set { if (SetProperty(ref _isLocked, value)) OnPropertyChanged(nameof(Badges)); } }
@@ -41,10 +43,25 @@ public sealed class GameProfile : ObservableObject
     public ImageSource? IconSource { get => _iconSource; set => SetProperty(ref _iconSource, value); }
 
     [JsonIgnore]
+    public bool IsModuleInstalled
+    {
+        get => _isModuleInstalled;
+        set
+        {
+            if (!SetProperty(ref _isModuleInstalled, value)) return;
+            OnPropertyChanged(nameof(Badges));
+            OnPropertyChanged(nameof(ModuleDisplay));
+        }
+    }
+
+    [JsonIgnore]
     public string ConnectionDisplay => IsConnected ? "✓" : "✕";
 
     [JsonIgnore]
-    public string Badges => $"{(IsPinned ? "📌 " : string.Empty)}{(IsLocked ? "🔒 " : string.Empty)}";
+    public string Badges => $"{(IsPinned ? "📌 " : string.Empty)}{(IsLocked ? "🔒 " : string.Empty)}{(IsModuleInstalled ? "🧩 " : string.Empty)}";
+
+    [JsonIgnore]
+    public string ModuleDisplay => IsModuleInstalled ? "已装专属模块" : "";
 
     [JsonIgnore]
     public string Summary => $"{Versions.Count} 个版本 · {Versions.Sum(version => version.Fields.Count)} 个字段";

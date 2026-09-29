@@ -13,7 +13,7 @@ LibraryDocument
       └─ SavedField
 ```
 
-- `GameProfile`：玩家看到的游戏条目、安装路径、置顶和锁定状态。
+- `GameProfile`：玩家看到的游戏条目、安装路径、置顶和锁定状态，以及可选的稳定 `ModuleId`。运行时 `IsModuleInstalled` 只反映本机真实安装清单。
 - `GameVersionProfile`：一个确定的游戏构建。普通游戏以 EXE SHA-256 标识；IL2CPP 游戏以 EXE、`GameAssembly.dll` 和元数据的组合指纹标识。
 - `SavedField`：玩家填写的备注名称、分组、数值锁定目标，以及程序保存的类型和定位器。
 
@@ -31,7 +31,7 @@ LibraryDocument
 - `ThemeService`：切换统一的浅色和深色资源调色板。
 - `ProcessSpeedService`：为当前 x64 进程挂接常见计时 API，按整数倍缩放虚拟时间并支持连续回正。
 - `GameAdapterRegistry`：通过独立的 `GameValueEditor.ModuleSdk` Host API v2 从 `data/modules` 加载已安装游戏包，并根据完整游戏构建指纹选择专属适配器。
-- `GameModuleCatalogService`：从独立的 `GameValueEditor-Modules` 模块中心检查、下载、校验和原子安装可选游戏包。
+- `GameModuleCatalogService`：从独立的 `GameValueEditor-Modules` 模块中心检查、下载、校验、原子安装、停用和卸载可选游戏包，并读取包内贡献者快照。
 - `ApplicationUpdateService`：检查 GitHub 正式 Release、校验更新包并交给独立更新器安装。
 
 ## 搜索套路
@@ -66,6 +66,12 @@ Electron/NW.js 游戏按命令行区分主进程、Renderer、GPU、网络、音
 - 对溢出和结构不一致进行校验；界面层不得臆测游戏的堆叠表示。
 
 专属实现作为独立游戏包放在 `data/modules/packages/{游戏模块ID}/{版本}`，`installed.json` 记录当前启用版本。模块 ZIP 必须通过 SHA-256、清单一致性和安全路径校验；模块加载失败不会阻止主程序启动。只有进程名和清单中声明的全部非空构建指纹都匹配时，模块才会提供给当前游戏。
+
+模块与游戏库遵循一个简单不变量：每个已安装游戏模块都必须关联一个普通游戏库条目。未入库的已连接游戏可以直接检查模块，只有下载安装成功后才自动入库；应用启动时也会为完整离线包或旧安装中缺少条目的模块补建可管理条目。单独“卸载”保留游戏版本和快捷入口；“从库移出”先卸载模块，成功后才删除条目，仍在运行的进程保留为无专属能力的临时会话。
+
+游戏库可按连接状态、名称和本地模块排序。贡献者元数据属于整个游戏包，来源于模块中心对已合并 PR 的自动汇总；宿主只显示 GitHub 名称、主页、首次和最新贡献日期，不把贡献归属到某个编辑器，也不显示次数或排名。
+
+为控制主窗口继续膨胀，服务实例由 `MainViewModelServices` 统一组合后注入 `MainViewModel`；连接会话状态独立为 `GameConnectionSession`，适配器变化的 UI 通知集中处理。没有引入 DI 框架，也没有为了形式重写现有 MVVM。
 
 当前官方 `game.fzzml` 包含 `game.fzzml.inventory` 和 `game.fzzml.character-attributes`。背包编辑器按物品名聚合记录并调用游戏自身存档流程，不对超过 9999 的数值主动拆栈。人物属性编辑器以人物 ID 和属性键定位，修改运行时配置并触发聚合/UI 事件；它仅本次游戏运行有效，不允许锁定或在重启后自动重应用。
 

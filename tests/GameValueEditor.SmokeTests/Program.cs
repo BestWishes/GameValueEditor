@@ -4,6 +4,7 @@ using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -151,7 +152,7 @@ try
     if (args.Contains("--update-live", StringComparer.OrdinalIgnoreCase))
     {
         var liveUpdateRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-LiveUpdate-{Guid.NewGuid():N}");
-        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.11");
+        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.12");
         var liveUpdate = await liveUpdateService.CheckAsync();
         Assert(liveUpdate.AssetName.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
                liveUpdate.AssetName.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase),
@@ -167,6 +168,16 @@ try
         .ToList();
     Assert(ReferenceEquals(orderedGames[0], connectedGame) && ReferenceEquals(orderedGames[1], pinnedGame),
         "Connected games were not sorted before pinned and recent games");
+    var moduleGame = new GameProfile { Name = "模块游戏", IsModuleInstalled = true };
+    var moduleSorted = new[] { recentGame, moduleGame }
+        .OrderBy(gameItem => gameItem, new GameProfileConnectionComparer(GameLibrarySortMode.LocalModule))
+        .ToList();
+    Assert(ReferenceEquals(moduleSorted[0], moduleGame) && moduleGame.Badges.Contains("🧩", StringComparison.Ordinal),
+        "Local-module sorting or badge failed");
+    var nameSorted = new[] { new GameProfile { Name = "乙" }, new GameProfile { Name = "甲" } }
+        .OrderBy(gameItem => gameItem, new GameProfileConnectionComparer(GameLibrarySortMode.Name))
+        .ToList();
+    Assert(nameSorted[0].Name == "甲", "Name sorting failed");
 
     var processService = new ProcessService();
     var logicalStart = DateTime.UtcNow.AddMinutes(-2);
@@ -408,7 +419,7 @@ try
             "Preferred routine persistence failed");
         Assert(restored.Games.Single().Versions.Single().Fields.Single().AdapterFieldKey == "item-key",
             "Adapter field persistence failed");
-        Assert(restored.SchemaVersion == 5, "Library schema version was not upgraded");
+        Assert(restored.SchemaVersion == 6, "Library schema version was not upgraded");
         Assert(restored.Games.Single().Versions.Single().BuildFingerprint == fingerprint.BuildSha256,
             "Build fingerprint persistence failed");
         Assert(restored.Games.Single().Versions.Single().Fields.Single().LockedValue == "321",
@@ -432,9 +443,11 @@ try
             "id": "game.test.multi-editor",
             "version": "1.1.0",
             "displayName": "测试专属模块",
+            "gameDisplayName": "测试游戏",
             "hostApiVersion": 2,
             "processNames": ["MatchedGame"],
             "compatibleBuilds": [{"executableSha256": "EXE", "gameAssemblySha256": "ASM", "metadataSha256": "META"}],
+            "editors": [{"id":"test.inventory"},{"id":"test.characters"}],
             "downloadUrl": "https://example.invalid/module.zip",
             "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           }]
@@ -460,6 +473,10 @@ try
         var unavailable = await catalogService.CheckAsync(wrongGame, matchingVersion);
         Assert(unavailable.Availability == GameModuleAvailability.NotAvailable,
             "A game-specific module leaked into another game");
+        var transientFingerprint = new VersionFingerprint("test", "", "", "EXE", 1, "x64", "", "ASM", "META");
+        var transientAvailable = await catalogService.CheckAsync("MatchedGame", transientFingerprint);
+        Assert(transientAvailable.Availability == GameModuleAvailability.Available,
+            "An unlisted connected game could not check for a compatible module");
 
         var moduleAssemblyPath = Assembly.GetExecutingAssembly().Location;
         Assert(File.Exists(moduleAssemblyPath), "Smoke module assembly is unavailable");
@@ -476,12 +493,23 @@ try
         await installService.InstallAsync(remoteModule);
         Assert(installService.FindInstalled(remoteModule.Id)?.Version == "1.1.0",
             "Verified module installation was not persisted");
-        using (var installedRegistry = new GameAdapterRegistry(Path.Combine(serviceTestRoot, "modules-install")))
-        {
-            var loaded = installedRegistry.FindById("game.test.multi-editor");
-            Assert(loaded is IInventoryGameAdapter && loaded is ICharacterAttributesGameAdapter && loaded.Editors.Count == 2,
-                "Installed multi-editor module was not dynamically loaded through Host API v2");
-        }
+        var installedManifest = installService.GetInstalledManifest(remoteModule.Id);
+        Assert(installedManifest?.GameDisplayName == "测试游戏" && installedManifest.Contributors.Count == 1,
+            "Installed module identity or contributor metadata was not retained");
+        VerifyInstalledModule(Path.Combine(serviceTestRoot, "modules-install"));
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        var removedRecord = installService.Unregister(remoteModule.Id);
+        Assert(removedRecord is not null && installService.FindInstalled(remoteModule.Id) is null,
+            "Module unregister did not update installed.json");
+        installService.RestoreRegistration(removedRecord!);
+        Assert(installService.FindInstalled(remoteModule.Id) is not null,
+            "Module registration rollback failed");
+        _ = installService.Unregister(remoteModule.Id);
+        installService.DeletePackage(remoteModule.Id);
+        Assert(!Directory.Exists(Path.Combine(serviceTestRoot, "modules-install", "packages", remoteModule.Id)),
+            "Module package directory was not removed");
         remoteModule.Id = "..\\escape";
         try
         {
@@ -667,6 +695,17 @@ try
                 new GroupInputDialog([], "未分组"),
                 messageDialog,
                 new ModifyFieldDialog("测试字段", "未分组", "1", []),
+                new ModuleContributorsDialog([
+                    new GameModuleContributor
+                    {
+                        GithubId = 1,
+                        GithubLogin = "octocat",
+                        DisplayName = "The Octocat",
+                        ProfileUrl = "https://github.com/octocat",
+                        FirstContributionDate = new DateOnly(2026, 1, 1),
+                        LatestContributionDate = new DateOnly(2026, 2, 1)
+                    }
+                ]),
                 new SaveFieldDialog(),
                 new TextInputDialog("输入", "请输入测试内容")
             ];
@@ -934,7 +973,7 @@ static byte[] CreateModuleArchive(string id, string version, string assemblyPath
         var manifest = archive.CreateEntry("module.json");
         using (var writer = new StreamWriter(manifest.Open(), Encoding.UTF8, leaveOpen: false))
             writer.Write($$"""
-            {"id":"{{id}}","version":"{{version}}","displayName":"测试专属模块","assemblyFile":"{{Path.GetFileName(assemblyPath)}}","hostApiVersion":2,"editors":[{"id":"test.inventory","displayName":"背包物品","kind":"collection","order":100},{"id":"test.characters","displayName":"人物属性","kind":"master-detail","order":200}]}
+            {"id":"{{id}}","version":"{{version}}","displayName":"测试专属模块","gameDisplayName":"测试游戏","description":"测试","assemblyFile":"{{Path.GetFileName(assemblyPath)}}","hostApiVersion":2,"processNames":["MatchedGame"],"compatibleBuilds":[{"executableSha256":"EXE","gameAssemblySha256":"ASM","metadataSha256":"META"}],"contributors":[{"githubLogin":"tester","displayName":"测试贡献者","profileUrl":"https://github.com/tester","firstContributionDate":"2026-01-01","latestContributionDate":"2026-01-02"}],"editors":[{"id":"test.inventory","displayName":"背包物品","kind":"collection","order":100,"sessionOnly":false},{"id":"test.characters","displayName":"人物属性","kind":"master-detail","order":200,"sessionOnly":true}]}
             """);
         var assembly = archive.CreateEntry(Path.GetFileName(assemblyPath));
         using var assemblyStream = assembly.Open();
@@ -942,6 +981,15 @@ static byte[] CreateModuleArchive(string id, string version, string assemblyPath
         source.CopyTo(assemblyStream);
     }
     return stream.ToArray();
+}
+
+[MethodImpl(MethodImplOptions.NoInlining)]
+static void VerifyInstalledModule(string modulesDirectory)
+{
+    using var installedRegistry = new GameAdapterRegistry(modulesDirectory);
+    var loaded = installedRegistry.FindById("game.test.multi-editor");
+    Assert(loaded is IInventoryGameAdapter && loaded is ICharacterAttributesGameAdapter && loaded.Editors.Count == 2,
+        "Installed multi-editor module was not dynamically loaded through Host API v2");
 }
 
 public sealed class SmokeTestModuleAdapter : IInventoryGameAdapter, ICharacterAttributesGameAdapter

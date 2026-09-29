@@ -1,0 +1,42 @@
+<Window x:Class="GameValueEditor.Dialogs.ModuleContributorsDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="专属模块贡献者" Width="660" Height="430" MinWidth="560" MinHeight="340"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False" Style="{StaticResource ThemedWindowStyle}">
+    <Grid Margin="22" Background="{DynamicResource WindowBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock Text="专属模块贡献者" FontSize="22" FontWeight="SemiBold"/>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,14,0,10">
+            <TextBlock Text="排序：" VerticalAlignment="Center" Foreground="{DynamicResource MutedTextBrush}"/>
+            <ComboBox x:Name="SortComboBox" Width="150" Height="30" SelectionChanged="SortComboBox_OnSelectionChanged">
+                <ComboBoxItem Content="名称" Tag="Name" IsSelected="True"/>
+                <ComboBoxItem Content="首次贡献日期" Tag="First"/>
+                <ComboBoxItem Content="最新贡献日期" Tag="Latest"/>
+            </ComboBox>
+        </StackPanel>
+        <DataGrid x:Name="ContributorsGrid" Grid.Row="2" AutoGenerateColumns="False" IsReadOnly="True"
+                  CanUserAddRows="False" CanUserDeleteRows="False" HeadersVisibility="Column">
+            <DataGrid.Columns>
+                <DataGridTemplateColumn Header="GitHub 名称" Width="*">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <TextBlock VerticalAlignment="Center">
+                                <Hyperlink NavigateUri="{Binding ProfileUri}" RequestNavigate="ContributorLink_OnRequestNavigate">
+                                    <Run Text="{Binding DisplayName}"/>
+                                </Hyperlink>
+                            </TextBlock>
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+                <DataGridTextColumn Header="首次贡献日期" Binding="{Binding FirstContributionDate}" Width="150"/>
+                <DataGridTextColumn Header="最新贡献日期" Binding="{Binding LatestContributionDate}" Width="150"/>
+            </DataGrid.Columns>
+        </DataGrid>
+        <Button Grid.Row="3" Content="关闭" IsCancel="True" HorizontalAlignment="Right" MinWidth="82" Margin="0,14,0,0"/>
+    </Grid>
+</Window>

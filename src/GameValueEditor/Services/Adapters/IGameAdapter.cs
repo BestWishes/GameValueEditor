@@ -58,8 +58,17 @@ public sealed class GameAdapterRegistry : IDisposable
     private void UnloadAll()
     {
         _adapters.Clear();
+        var unloadedContexts = _loadContexts.Select(context => new WeakReference(context)).ToArray();
         foreach (var context in _loadContexts) context.Unload();
         _loadContexts.Clear();
+        // Collectible load contexts release their module DLL handles only after collection.
+        // Uninstall needs those handles released before it can remove the package directory.
+        for (var attempt = 0; attempt < 3 && unloadedContexts.Any(reference => reference.IsAlive); attempt++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
     }
 
     private void LoadModule(InstalledModuleRecord record)
@@ -157,9 +166,14 @@ public sealed class InstalledModuleManifest
     public string Id { get; set; } = string.Empty;
     public string Version { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
+    public string GameDisplayName { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
     public string AssemblyFile { get; set; } = string.Empty;
     public int HostApiVersion { get; set; } = 1;
+    public List<string> ProcessNames { get; set; } = [];
+    public List<GameModuleBuildMatch> CompatibleBuilds { get; set; } = [];
     public List<InstalledEditorManifest> Editors { get; set; } = [];
+    public List<GameModuleContributor> Contributors { get; set; } = [];
 }
 
 public sealed class InstalledEditorManifest

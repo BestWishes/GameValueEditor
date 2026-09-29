@@ -57,6 +57,7 @@
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
@@ -76,7 +77,16 @@
                         <TextBox Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}" ToolTip="按游戏名称或进程名搜索"/>
                         <Button Grid.Column="1" Content="清空" Margin="6,0,0,0" Padding="10,6" Click="ClearGameSearch_OnClick"/>
                     </Grid>
-                    <ListBox Grid.Row="2" ItemsSource="{Binding GamesView}" SelectedItem="{Binding SelectedLibraryGame}">
+                    <Grid Grid.Row="2" Margin="4,0,4,10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="排序：" VerticalAlignment="Center" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,6,0"/>
+                        <ComboBox Grid.Column="1" ItemsSource="{Binding LibrarySortChoices}" SelectedItem="{Binding SelectedLibrarySort}"
+                                  DisplayMemberPath="Display" Height="30"/>
+                    </Grid>
+                    <ListBox Grid.Row="3" ItemsSource="{Binding GamesView}" SelectedItem="{Binding SelectedLibraryGame}">
                         <ListBox.ItemTemplate>
                             <DataTemplate>
                                 <Grid>
@@ -92,7 +102,10 @@
                                         <TextBlock FontWeight="SemiBold" TextTrimming="CharacterEllipsis">
                                             <Run Text="{Binding Badges, Mode=OneWay}"/><Run Text="{Binding Name, Mode=OneWay}"/>
                                         </TextBlock>
-                                        <TextBlock Text="{Binding Summary}" Foreground="{DynamicResource MutedTextBrush}" FontSize="11"/>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding Summary}" Foreground="{DynamicResource MutedTextBrush}" FontSize="11"/>
+                                            <TextBlock Text="{Binding ModuleDisplay}" Foreground="{DynamicResource AccentBrush}" FontSize="11" Margin="8,0,0,0"/>
+                                        </StackPanel>
                                     </StackPanel>
                                     <TextBlock Grid.Column="2" Text="{Binding ConnectionDisplay}" FontSize="17" FontWeight="SemiBold"
                                                Foreground="{DynamicResource AccentBrush}" VerticalAlignment="Center" Margin="8,0,2,0"/>
@@ -100,7 +113,7 @@
                             </DataTemplate>
                         </ListBox.ItemTemplate>
                     </ListBox>
-                    <Grid Grid.Row="3" Margin="0,10,0,0">
+                    <Grid Grid.Row="4" Margin="0,10,0,0">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
@@ -218,6 +231,8 @@
                                         <ColumnDefinition Width="*"/>
                                         <ColumnDefinition Width="Auto"/>
                                         <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
                                     <StackPanel>
                                         <TextBlock Text="{Binding ActiveAdapterText}" FontWeight="SemiBold"/>
@@ -225,8 +240,12 @@
                                     </StackPanel>
                                     <Button Grid.Column="1" Content="检查新有" IsEnabled="{Binding CanCheckGameModules}"
                                             Click="CheckGameModules_OnClick"/>
-                                    <Button Grid.Column="2" Content="可更新" IsEnabled="{Binding CanInstallGameModule}"
+                                    <Button Grid.Column="2" Content="{Binding ModuleInstallActionText}" IsEnabled="{Binding CanInstallGameModule}"
                                             Click="InstallGameModule_OnClick"/>
+                                    <Button Grid.Column="3" Content="卸载" IsEnabled="{Binding CanUninstallGameModule}"
+                                            Click="UninstallGameModule_OnClick"/>
+                                    <Button Grid.Column="4" Content="贡献者" IsEnabled="{Binding CanViewModuleContributors}"
+                                            Click="ShowModuleContributors_OnClick" Margin="18,0,0,0"/>
                                 </Grid>
                             </Border>
                             <Grid Grid.Row="1" Margin="0,12,0,0">
@@ -572,12 +591,11 @@
                 <TextBlock Text="{Binding StatusText}" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
                     <TextBlock Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center">
-                        <Run Text="仅用于离线单机游戏 · v"/><Run Text="{Binding CurrentApplicationVersion, Mode=OneWay}"/><Run Text="（"/>
+                        <Run Text="仅用于离线单机游戏 · v"/><Run Text="{Binding CurrentApplicationVersion, Mode=OneWay}"/><Run Text="　　"/>
                     </TextBlock>
                     <TextBlock Text="{Binding ApplicationUpdateStatusPrefix}" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
                     <Button Content="{Binding ApplicationUpdateActionText}" IsEnabled="{Binding CanUseApplicationUpdate}"
                             Click="ApplicationUpdate_OnClick" Padding="6,1" Margin="0" MinHeight="22"/>
-                    <TextBlock Text="）" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
                     <Button Content="官网" IsEnabled="{Binding CanOpenOfficialWebsite}"
                             Click="OpenOfficialWebsite_OnClick" Padding="10,1" Margin="24,0,0,0" MinHeight="22"/>
                 </StackPanel>
