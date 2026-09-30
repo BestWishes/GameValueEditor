@@ -152,7 +152,7 @@ try
     if (args.Contains("--update-live", StringComparer.OrdinalIgnoreCase))
     {
         var liveUpdateRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-LiveUpdate-{Guid.NewGuid():N}");
-        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.12");
+        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.13");
         var liveUpdate = await liveUpdateService.CheckAsync();
         Assert(liveUpdate.AssetName.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
                liveUpdate.AssetName.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase),
@@ -192,6 +192,11 @@ try
         new ProcessItem { ProcessId = 200, ParentProcessId = 50, ProcessName = "Vespera", ExecutablePath = electronPath, StartTimeUtc = logicalStart.AddMinutes(1), RuntimeKind = GameRuntimeKind.Electron, Role = GameProcessRole.Main, WorkingSetBytes = 90 },
         new ProcessItem { ProcessId = 201, ParentProcessId = 200, ProcessName = "Vespera", ExecutablePath = electronPath, StartTimeUtc = logicalStart.AddMinutes(1).AddSeconds(1), RuntimeKind = GameRuntimeKind.Electron, Role = GameProcessRole.Renderer, WorkingSetBytes = 600 }
     };
+    Assert(electronProcesses.All(process =>
+            !process.DisplayName.Contains("主进程", StringComparison.Ordinal) &&
+            !process.DisplayName.Contains("游戏数据", StringComparison.Ordinal) &&
+            !process.DisplayName.Contains("辅助", StringComparison.Ordinal)),
+        "Process list leaked internal role labels into user-facing display text");
     foreach (var selected in electronProcesses.Take(5))
     {
         var logicalGame = processService.ResolveLogicalGame(selected, electronProcesses);
@@ -490,16 +495,16 @@ try
         var installService = new GameModuleCatalogService(Path.Combine(serviceTestRoot, "modules-install"), moduleClient);
         var remoteModule = available.RemoteModule!;
         remoteModule.Sha256 = moduleHash;
-        await installService.InstallAsync(remoteModule);
+        var moduleProgress = new InlineProgress<DownloadProgressSnapshot>();
+        await installService.InstallAsync(remoteModule, moduleProgress);
+        Assert(moduleProgress.Values.Count > 0 && moduleProgress.Values[^1].Percentage == 100,
+            "Module download did not report completion progress");
         Assert(installService.FindInstalled(remoteModule.Id)?.Version == "1.1.0",
             "Verified module installation was not persisted");
         var installedManifest = installService.GetInstalledManifest(remoteModule.Id);
         Assert(installedManifest?.GameDisplayName == "测试游戏" && installedManifest.Contributors.Count == 1,
             "Installed module identity or contributor metadata was not retained");
-        VerifyInstalledModule(Path.Combine(serviceTestRoot, "modules-install"));
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
+        using var installedRegistry = LoadAndVerifyInstalledModule(Path.Combine(serviceTestRoot, "modules-install"));
         var removedRecord = installService.Unregister(remoteModule.Id);
         Assert(removedRecord is not null && installService.FindInstalled(remoteModule.Id) is null,
             "Module unregister did not update installed.json");
@@ -507,9 +512,29 @@ try
         Assert(installService.FindInstalled(remoteModule.Id) is not null,
             "Module registration rollback failed");
         _ = installService.Unregister(remoteModule.Id);
-        installService.DeletePackage(remoteModule.Id);
+        var packageDeleted = await installService.DeletePackageAsync(remoteModule.Id);
+        Assert(packageDeleted,
+            "Formal module package remained locked while the loaded adapter was running from its shadow copy");
         Assert(!Directory.Exists(Path.Combine(serviceTestRoot, "modules-install", "packages", remoteModule.Id)),
             "Module package directory was not removed");
+        installedRegistry.Reload();
+
+        var lockedModuleId = "game.test.locked";
+        var lockedModuleDirectory = Path.Combine(serviceTestRoot, "modules-install", "packages", lockedModuleId, "1.0.0");
+        Directory.CreateDirectory(lockedModuleDirectory);
+        var lockedModuleFile = Path.Combine(lockedModuleDirectory, "locked.dll");
+        await File.WriteAllBytesAsync(lockedModuleFile, [1, 2, 3]);
+        await using (var lockedStream = new FileStream(lockedModuleFile, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            Assert(!await installService.DeletePackageAsync(lockedModuleId),
+                "Locked module package unexpectedly reported a completed deletion");
+            Assert(installService.HasPendingDeletion(lockedModuleId),
+                "Failed module deletion was not recorded for startup cleanup");
+        }
+        _ = new GameModuleCatalogService(Path.Combine(serviceTestRoot, "modules-install"), moduleClient);
+        Assert(!Directory.Exists(Path.Combine(serviceTestRoot, "modules-install", "packages", lockedModuleId)) &&
+               !installService.HasPendingDeletion(lockedModuleId),
+            "Pending module deletion was not completed after the lock was released");
         remoteModule.Id = "..\\escape";
         try
         {
@@ -538,6 +563,11 @@ try
             "draft": false,
             "prerelease": true,
             "assets": [{
+              "name": "GameValueEditor-v0.3.0-preview.2-complete-offline-win-x64.zip",
+              "browser_download_url": "https://example.invalid/complete-offline.zip",
+              "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "size": 999
+            },{
               "name": "GameValueEditor-v0.3.0-preview.2-win-x64.zip",
               "browser_download_url": "https://example.invalid/preview.zip",
               "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -567,6 +597,8 @@ try
         var previewUpdate = await previewUpdateService.CheckAsync();
         Assert(previewUpdate.IsUpdateAvailable && previewUpdate.Version == "0.3.0-preview.2",
             "Preview channel did not select the newest application preview after ignoring module releases");
+        Assert(previewUpdate.AssetName == "GameValueEditor-v0.3.0-preview.2-win-x64.zip",
+            "Application updater selected the complete offline bundle instead of the standard host package");
         var availableUpdateViewModel = new MainViewModel(previewUpdateService);
         await availableUpdateViewModel.CheckApplicationUpdateAsync();
         Assert(availableUpdateViewModel.HasApplicationUpdateAvailable && availableUpdateViewModel.CanUseApplicationUpdate,
@@ -602,11 +634,39 @@ try
                 Content = new ByteArrayContent(updateArchive)
             }));
         var updateService = new ApplicationUpdateService(Path.Combine(serviceTestRoot, "updates"), updateClient);
+        var updateProgress = new InlineProgress<DownloadProgressSnapshot>();
         var pending = await updateService.DownloadAsync(new ApplicationUpdateCheckResult(
             true, "99.0.0", "GameValueEditor-v99.0.0-win-x64.zip",
-            "https://example.invalid/update.zip", updateHash, updateArchive.Length));
+            "https://example.invalid/update.zip", updateHash, updateArchive.Length), updateProgress);
         Assert(File.Exists(pending.ArchivePath) && File.Exists(updateService.PendingManifestPath),
             "Verified application update was not marked for next startup");
+        Assert(updateProgress.Values.Count > 0 && updateProgress.Values[^1].Percentage == 100,
+            "Application download did not report completion progress");
+
+        var stalledDestination = Path.Combine(serviceTestRoot, "stalled.download");
+        using var stalledClient = new HttpClient(new StaticResponseHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new StallingStream())
+            }));
+        try
+        {
+            await HttpDownloadService.DownloadToFileAsync(stalledClient, "https://example.invalid/stalled",
+                stalledDestination, 0, timeoutPolicy: new DownloadTimeoutPolicy(
+                    TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(80)));
+            throw new InvalidOperationException("Stalled download unexpectedly completed");
+        }
+        catch (TimeoutException exception) when (exception.Message.Contains("没有收到下载数据", StringComparison.Ordinal))
+        {
+        }
+        Assert(!File.Exists(stalledDestination), "Timed-out download left a partial file behind");
+
+        Directory.CreateDirectory(Path.GetDirectoryName(updateService.LastErrorNoticePath)!);
+        await File.WriteAllTextAsync(updateService.LastErrorNoticePath,
+            "{\"FailedAt\":\"2026-09-30T00:00:00+08:00\",\"Message\":\"文件仍被占用\",\"LogPath\":\"update-error.log\"}");
+        Assert(updateService.TakeLastFailure()?.Message == "文件仍被占用" &&
+               updateService.TakeLastFailure() is null,
+            "Application update failure notice was not returned exactly once");
     }
     finally
     {
@@ -984,12 +1044,13 @@ static byte[] CreateModuleArchive(string id, string version, string assemblyPath
 }
 
 [MethodImpl(MethodImplOptions.NoInlining)]
-static void VerifyInstalledModule(string modulesDirectory)
+static GameAdapterRegistry LoadAndVerifyInstalledModule(string modulesDirectory)
 {
-    using var installedRegistry = new GameAdapterRegistry(modulesDirectory);
+    var installedRegistry = new GameAdapterRegistry(modulesDirectory);
     var loaded = installedRegistry.FindById("game.test.multi-editor");
     Assert(loaded is IInventoryGameAdapter && loaded is ICharacterAttributesGameAdapter && loaded.Editors.Count == 2,
         "Installed multi-editor module was not dynamically loaded through Host API v2");
+    return installedRegistry;
 }
 
 public sealed class SmokeTestModuleAdapter : IInventoryGameAdapter, ICharacterAttributesGameAdapter
@@ -1066,4 +1127,29 @@ internal sealed class StaticResponseHandler(Func<HttpRequestMessage, HttpRespons
     protected override Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request,
         CancellationToken cancellationToken) => Task.FromResult(responseFactory(request));
+}
+
+internal sealed class InlineProgress<T> : IProgress<T>
+{
+    public List<T> Values { get; } = [];
+    public void Report(T value) => Values.Add(value);
+}
+
+internal sealed class StallingStream : Stream
+{
+    public override bool CanRead => true;
+    public override bool CanSeek => false;
+    public override bool CanWrite => false;
+    public override long Length => throw new NotSupportedException();
+    public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+    public override void Flush() { }
+    public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+    public override void SetLength(long value) => throw new NotSupportedException();
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        return 0;
+    }
 }

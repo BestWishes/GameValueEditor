@@ -16,19 +16,27 @@ public sealed class GameModuleCatalogService
 
     private readonly string _modulesDirectory;
     private readonly HttpClient _httpClient;
+    private readonly DownloadTimeoutPolicy _downloadTimeoutPolicy;
     private readonly JsonSerializerOptions _jsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
         WriteIndented = true
     };
 
-    public GameModuleCatalogService(string modulesDirectory, HttpClient? httpClient = null)
+    public GameModuleCatalogService(
+        string modulesDirectory,
+        HttpClient? httpClient = null,
+        DownloadTimeoutPolicy? downloadTimeoutPolicy = null)
     {
         _modulesDirectory = modulesDirectory;
         _httpClient = httpClient ?? new HttpClient();
-        if (!_httpClient.DefaultRequestHeaders.UserAgent.Any())
+        _downloadTimeoutPolicy = downloadTimeoutPolicy ?? DownloadTimeoutPolicy.Default;
+        if (httpClient is null)
+        {
             _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("GameValueEditor-Modules/1.0");
-        _httpClient.Timeout = TimeSpan.FromSeconds(30);
+            _httpClient.Timeout = TimeSpan.FromSeconds(30);
+        }
+        CleanupPendingDeletions();
     }
 
     public InstalledModuleRecord? FindInstalled(string moduleId) =>
@@ -103,7 +111,10 @@ public sealed class GameModuleCatalogService
                 $"本地专属模块已是最新：v{installed.Version}");
     }
 
-    public async Task InstallAsync(GameModuleCatalogEntry module, CancellationToken cancellationToken = default)
+    public async Task InstallAsync(
+        GameModuleCatalogEntry module,
+        IProgress<DownloadProgressSnapshot>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         EnsureSafePathSegment(module.Id, "模块 ID");
         EnsureSafePathSegment(module.Version, "模块版本");
@@ -112,19 +123,16 @@ public sealed class GameModuleCatalogService
             throw new InvalidOperationException("模块下载地址必须使用 HTTPS。");
         if (string.IsNullOrWhiteSpace(module.Sha256) || module.Sha256.Length != 64)
             throw new InvalidOperationException("模块清单缺少有效的 SHA-256 校验值。");
+        if (HasPendingDeletion(module.Id) && !await DeletePackageAsync(module.Id, cancellationToken))
+            throw new InvalidOperationException("上次卸载的模块文件仍被占用，请重启肝肾大圣后再安装。");
         Directory.CreateDirectory(_modulesDirectory);
         var downloadsDirectory = Path.Combine(_modulesDirectory, "downloads");
         Directory.CreateDirectory(downloadsDirectory);
         var temporaryArchive = Path.Combine(downloadsDirectory, $"{Guid.NewGuid():N}.download");
-        using (var response = await _httpClient.GetAsync(module.DownloadUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken))
-        {
-            response.EnsureSuccessStatusCode();
-            await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
-            await using var target = new FileStream(temporaryArchive, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-            await source.CopyToAsync(target, cancellationToken);
-        }
         try
         {
+            await HttpDownloadService.DownloadToFileAsync(_httpClient, module.DownloadUrl, temporaryArchive, 0,
+                progress, _downloadTimeoutPolicy, cancellationToken);
             var hash = await ComputeSha256Async(temporaryArchive, cancellationToken);
             if (!hash.Equals(module.Sha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("专属模块 SHA-256 校验失败，已拒绝安装。");
@@ -159,7 +167,10 @@ public sealed class GameModuleCatalogService
         }
         finally
         {
-            if (File.Exists(temporaryArchive)) File.Delete(temporaryArchive);
+            try { if (File.Exists(temporaryArchive)) File.Delete(temporaryArchive); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+            }
         }
     }
 
@@ -181,7 +192,50 @@ public sealed class GameModuleCatalogService
         SaveInstalled(document);
     }
 
-    public void DeletePackage(string moduleId)
+    public async Task<bool> DeletePackageAsync(string moduleId, CancellationToken cancellationToken = default)
+    {
+        EnsureSafePathSegment(moduleId, "模块 ID");
+        AddPendingDeletion(moduleId);
+        for (var attempt = 0; attempt < 6; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                DeletePackageOnce(moduleId);
+                RemovePendingDeletion(moduleId);
+                return true;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                if (attempt == 5) return false;
+                await Task.Delay(TimeSpan.FromMilliseconds(150 * (attempt + 1)), cancellationToken);
+            }
+        }
+        return false;
+    }
+
+    public bool HasPendingDeletion(string moduleId) =>
+        LoadPendingDeletions().ModuleIds.Contains(moduleId, StringComparer.Ordinal);
+
+    private string PendingDeletionsPath => Path.Combine(_modulesDirectory, "pending-deletions.json");
+
+    private void CleanupPendingDeletions()
+    {
+        var document = LoadPendingDeletions();
+        var remaining = new List<string>();
+        foreach (var moduleId in document.ModuleIds.Distinct(StringComparer.Ordinal))
+        {
+            if (!IsSafePathSegment(moduleId)) continue;
+            try { DeletePackageOnce(moduleId); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                remaining.Add(moduleId);
+            }
+        }
+        SavePendingDeletions(new PendingModuleDeletionDocument { ModuleIds = remaining });
+    }
+
+    private void DeletePackageOnce(string moduleId)
     {
         EnsureSafePathSegment(moduleId, "模块 ID");
         var packagesRoot = Path.GetFullPath(Path.Combine(_modulesDirectory, "packages")) + Path.DirectorySeparatorChar;
@@ -189,6 +243,48 @@ public sealed class GameModuleCatalogService
         if (!packageRoot.StartsWith(packagesRoot, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("模块卸载路径无效。");
         if (Directory.Exists(packageRoot)) Directory.Delete(packageRoot, true);
+    }
+
+    private PendingModuleDeletionDocument LoadPendingDeletions()
+    {
+        if (!File.Exists(PendingDeletionsPath)) return new PendingModuleDeletionDocument();
+        try
+        {
+            return JsonSerializer.Deserialize<PendingModuleDeletionDocument>(
+                       File.ReadAllText(PendingDeletionsPath), _jsonOptions)
+                   ?? new PendingModuleDeletionDocument();
+        }
+        catch
+        {
+            return new PendingModuleDeletionDocument();
+        }
+    }
+
+    private void AddPendingDeletion(string moduleId)
+    {
+        var document = LoadPendingDeletions();
+        if (!document.ModuleIds.Contains(moduleId, StringComparer.Ordinal)) document.ModuleIds.Add(moduleId);
+        SavePendingDeletions(document);
+    }
+
+    private void RemovePendingDeletion(string moduleId)
+    {
+        var document = LoadPendingDeletions();
+        document.ModuleIds.RemoveAll(item => string.Equals(item, moduleId, StringComparison.Ordinal));
+        SavePendingDeletions(document);
+    }
+
+    private void SavePendingDeletions(PendingModuleDeletionDocument document)
+    {
+        if (document.ModuleIds.Count == 0)
+        {
+            if (File.Exists(PendingDeletionsPath)) File.Delete(PendingDeletionsPath);
+            return;
+        }
+        Directory.CreateDirectory(_modulesDirectory);
+        var temporary = PendingDeletionsPath + ".tmp";
+        File.WriteAllText(temporary, JsonSerializer.Serialize(document, _jsonOptions));
+        File.Move(temporary, PendingDeletionsPath, true);
     }
 
     private InstalledModuleDocument LoadInstalled()
@@ -301,6 +397,12 @@ public sealed class GameModuleCatalogService
         await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
         return Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken));
     }
+}
+
+public sealed class PendingModuleDeletionDocument
+{
+    public int SchemaVersion { get; set; } = 1;
+    public List<string> ModuleIds { get; set; } = [];
 }
 
 public enum GameModuleAvailability { NotChecked, NotAvailable, Available, UpdateAvailable, Current }

@@ -43,6 +43,7 @@ public sealed class MainViewModelServices
     public static MainViewModelServices CreateDefault(ApplicationUpdateService? applicationUpdateService = null)
     {
         var profileStore = new ProfileStore();
+        var moduleCatalogService = new GameModuleCatalogService(profileStore.ModulesDirectory);
         return new MainViewModelServices(
             profileStore,
             new ProcessService(),
@@ -52,7 +53,7 @@ public sealed class MainViewModelServices
             new ThemeService(),
             new ProcessSpeedService(),
             new GameIconService(profileStore.IconsDirectory),
-            new GameModuleCatalogService(profileStore.ModulesDirectory),
+            moduleCatalogService,
             applicationUpdateService ?? new ApplicationUpdateService(profileStore.UpdatesDirectory));
     }
 }

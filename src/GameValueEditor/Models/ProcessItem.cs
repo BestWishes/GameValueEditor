@@ -22,10 +22,9 @@ public sealed class ProcessItem
     {
         get
         {
-            var role = Role == GameProcessRole.Unknown ? string.Empty : $"  ·  {Role.DisplayName()}";
             return string.IsNullOrWhiteSpace(WindowTitle)
-                ? $"{ProcessName}  ·  PID {ProcessId}{role}"
-                : $"{WindowTitle}  ·  {ProcessName}  ·  PID {ProcessId}{role}";
+                ? $"{ProcessName}  ·  PID {ProcessId}"
+                : $"{WindowTitle}  ·  {ProcessName}  ·  PID {ProcessId}";
         }
     }
 }

@@ -13,14 +13,17 @@ public sealed class ApplicationUpdateService
     private readonly HttpClient _httpClient;
     private readonly string _updatesDirectory;
     private readonly string _currentVersion;
+    private readonly DownloadTimeoutPolicy _downloadTimeoutPolicy;
 
     public ApplicationUpdateService(
         string updatesDirectory,
         HttpClient? httpClient = null,
-        string? currentVersion = null)
+        string? currentVersion = null,
+        DownloadTimeoutPolicy? downloadTimeoutPolicy = null)
     {
         _updatesDirectory = updatesDirectory;
         _currentVersion = currentVersion ?? ApplicationVersion.Current;
+        _downloadTimeoutPolicy = downloadTimeoutPolicy ?? DownloadTimeoutPolicy.Default;
         _httpClient = httpClient ?? new HttpClient();
         if (httpClient is null)
         {
@@ -30,6 +33,31 @@ public sealed class ApplicationUpdateService
     }
 
     public string PendingManifestPath => Path.Combine(_updatesDirectory, "pending-update.json");
+    public string LastErrorNoticePath => Path.Combine(_updatesDirectory, "last-update-error.json");
+
+    public ApplicationUpdateFailure? TakeLastFailure()
+    {
+        if (!File.Exists(LastErrorNoticePath)) return null;
+        try
+        {
+            return JsonSerializer.Deserialize<ApplicationUpdateFailure>(
+                File.ReadAllText(LastErrorNoticePath), JsonOptions);
+        }
+        catch
+        {
+            return new ApplicationUpdateFailure(
+                DateTimeOffset.Now,
+                "上次应用更新没有完成，请查看更新日志。",
+                Path.Combine(_updatesDirectory, "update-error.log"));
+        }
+        finally
+        {
+            try { File.Delete(LastErrorNoticePath); }
+            catch
+            {
+            }
+        }
+    }
 
     public async Task<ApplicationUpdateCheckResult> CheckAsync(CancellationToken cancellationToken = default)
     {
@@ -54,7 +82,7 @@ public sealed class ApplicationUpdateService
             if (!SemanticVersion.TryParse(releaseText, out var releaseVersion)) continue;
             if (!acceptPrerelease && (release.Prerelease || !string.IsNullOrEmpty(releaseVersion.PreRelease)))
                 continue;
-            var releaseAsset = release.Assets.FirstOrDefault(IsApplicationPackage);
+            var releaseAsset = release.Assets.FirstOrDefault(candidate => IsApplicationPackage(candidate, releaseText));
             if (releaseAsset is null || latestRelease is not null && releaseVersion.CompareTo(latest) <= 0) continue;
             latestRelease = release;
             asset = releaseAsset;
@@ -76,12 +104,12 @@ public sealed class ApplicationUpdateService
             asset.Size);
     }
 
-    private static bool IsApplicationPackage(GitHubAsset asset) =>
-        asset.Name.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
-        asset.Name.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase);
+    private static bool IsApplicationPackage(GitHubAsset asset, string version) =>
+        string.Equals(asset.Name, $"GameValueEditor-v{version}-win-x64.zip", StringComparison.OrdinalIgnoreCase);
 
     public async Task<PendingApplicationUpdate> DownloadAsync(
         ApplicationUpdateCheckResult update,
+        IProgress<DownloadProgressSnapshot>? progress = null,
         CancellationToken cancellationToken = default)
     {
         if (!update.IsUpdateAvailable) throw new InvalidOperationException("当前已经是最新正式版。");
@@ -98,33 +126,29 @@ public sealed class ApplicationUpdateService
         Directory.CreateDirectory(versionDirectory);
         var finalPath = Path.Combine(versionDirectory, assetName);
         var temporaryPath = finalPath + ".download";
-        using (var response = await _httpClient.GetAsync(update.DownloadUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken))
+        try
         {
-            response.EnsureSuccessStatusCode();
-            await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
-            await using var target = new FileStream(temporaryPath, FileMode.Create, FileAccess.Write, FileShare.None);
-            await source.CopyToAsync(target, cancellationToken);
-        }
+            await HttpDownloadService.DownloadToFileAsync(_httpClient, update.DownloadUrl, temporaryPath, update.Size,
+                progress, _downloadTimeoutPolicy, cancellationToken);
 
-        var file = new FileInfo(temporaryPath);
-        if (update.Size > 0 && file.Length != update.Size)
-        {
-            File.Delete(temporaryPath);
-            throw new InvalidOperationException("更新包大小与 GitHub 记录不一致。");
-        }
-        var actualHash = await ComputeSha256Async(temporaryPath, cancellationToken);
-        if (!actualHash.Equals(update.Sha256, StringComparison.OrdinalIgnoreCase))
-        {
-            File.Delete(temporaryPath);
-            throw new InvalidOperationException("更新包 SHA-256 校验失败，已拒绝安装。");
-        }
-        File.Move(temporaryPath, finalPath, true);
+            var actualHash = await ComputeSha256Async(temporaryPath, cancellationToken);
+            if (!actualHash.Equals(update.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("更新包 SHA-256 校验失败，已拒绝安装。");
+            File.Move(temporaryPath, finalPath, true);
 
-        var pending = new PendingApplicationUpdate(update.Version, finalPath, actualHash, DateTime.UtcNow);
-        var pendingTemporary = PendingManifestPath + ".tmp";
-        await File.WriteAllTextAsync(pendingTemporary, JsonSerializer.Serialize(pending, JsonOptions), cancellationToken);
-        File.Move(pendingTemporary, PendingManifestPath, true);
-        return pending;
+            var pending = new PendingApplicationUpdate(update.Version, finalPath, actualHash, DateTime.UtcNow);
+            var pendingTemporary = PendingManifestPath + ".tmp";
+            await File.WriteAllTextAsync(pendingTemporary, JsonSerializer.Serialize(pending, JsonOptions), cancellationToken);
+            File.Move(pendingTemporary, PendingManifestPath, true);
+            return pending;
+        }
+        finally
+        {
+            try { if (File.Exists(temporaryPath)) File.Delete(temporaryPath); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+            }
+        }
     }
 
     public bool LaunchPendingUpdate(bool restartApplication)
@@ -197,3 +221,4 @@ public sealed record ApplicationUpdateCheckResult(
     long Size);
 
 public sealed record PendingApplicationUpdate(string Version, string ArchivePath, string Sha256, DateTime DownloadedUtc);
+public sealed record ApplicationUpdateFailure(DateTimeOffset FailedAt, string Message, string LogPath);

@@ -1,7 +1,9 @@
 using GameValueEditor.Models;
 using GameValueEditor.ModuleSdk;
+using System.Diagnostics;
 using System.IO;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
 using System.Text.Json;
 
@@ -10,13 +12,19 @@ namespace GameValueEditor.Services.Adapters;
 public sealed class GameAdapterRegistry : IDisposable
 {
     private readonly string _modulesDirectory;
+    private readonly string _runtimeRoot;
+    private readonly string _runtimeSessionDirectory;
     private readonly List<IGameAdapter> _adapters = [];
     private readonly List<ModuleLoadContext> _loadContexts = [];
+    private readonly List<string> _shadowDirectories = [];
     private readonly List<string> _loadErrors = [];
 
     public GameAdapterRegistry(string? modulesDirectory = null)
     {
         _modulesDirectory = modulesDirectory ?? new ProfileStore().ModulesDirectory;
+        _runtimeRoot = Path.GetFullPath(Path.Combine(_modulesDirectory, "runtime"));
+        CleanupStaleRuntimeDirectories();
+        _runtimeSessionDirectory = Path.Combine(_runtimeRoot, $"{Environment.ProcessId}-{Guid.NewGuid():N}");
         Reload();
     }
 
@@ -53,17 +61,33 @@ public sealed class GameAdapterRegistry : IDisposable
 
     public IReadOnlyList<string> LoadErrors => _loadErrors;
 
-    public void Dispose() => UnloadAll();
+    public void Dispose()
+    {
+        UnloadAll();
+        TryDeleteDirectory(_runtimeSessionDirectory);
+    }
 
     private void UnloadAll()
+    {
+        var unloadedContexts = ReleaseLoadContexts();
+        WaitForUnload(unloadedContexts);
+        foreach (var directory in _shadowDirectories) TryDeleteDirectory(directory);
+        _shadowDirectories.Clear();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private WeakReference[] ReleaseLoadContexts()
     {
         _adapters.Clear();
         var unloadedContexts = _loadContexts.Select(context => new WeakReference(context)).ToArray();
         foreach (var context in _loadContexts) context.Unload();
         _loadContexts.Clear();
-        // Collectible load contexts release their module DLL handles only after collection.
-        // Uninstall needs those handles released before it can remove the package directory.
-        for (var attempt = 0; attempt < 3 && unloadedContexts.Any(reference => reference.IsAlive); attempt++)
+        return unloadedContexts;
+    }
+
+    private static void WaitForUnload(IReadOnlyList<WeakReference> unloadedContexts)
+    {
+        for (var attempt = 0; attempt < 4 && unloadedContexts.Any(reference => reference.IsAlive); attempt++)
         {
             GC.Collect();
             GC.WaitForPendingFinalizers();
@@ -87,30 +111,130 @@ public sealed class GameAdapterRegistry : IDisposable
             throw new InvalidOperationException(
                 $"模块需要 Host API {manifest.HostApiVersion}，当前最高支持 {ModuleHostApi.CurrentVersion}。");
         var packageRoot = Path.GetFullPath(packageDirectory) + Path.DirectorySeparatorChar;
-        var assemblyPath = Path.GetFullPath(Path.Combine(packageRoot, manifest.AssemblyFile));
-        if (!assemblyPath.StartsWith(packageRoot, StringComparison.OrdinalIgnoreCase) ||
-            !File.Exists(assemblyPath)) return;
-        var context = new ModuleLoadContext(assemblyPath);
-        var assembly = context.LoadFromAssemblyPath(assemblyPath);
-        var types = assembly.GetTypes().Where(type =>
-            !type.IsAbstract && typeof(IGameAdapter).IsAssignableFrom(type));
-        var loadedAdapters = new List<IGameAdapter>();
-        foreach (var type in types)
+        var packageAssemblyPath = Path.GetFullPath(Path.Combine(packageRoot, manifest.AssemblyFile));
+        if (!packageAssemblyPath.StartsWith(packageRoot, StringComparison.OrdinalIgnoreCase) ||
+            !File.Exists(packageAssemblyPath)) return;
+
+        var shadowDirectory = CreateShadowCopy(packageDirectory);
+        var shadowRoot = Path.GetFullPath(shadowDirectory) + Path.DirectorySeparatorChar;
+        var assemblyPath = Path.GetFullPath(Path.Combine(shadowRoot, manifest.AssemblyFile));
+        if (!assemblyPath.StartsWith(shadowRoot, StringComparison.OrdinalIgnoreCase) || !File.Exists(assemblyPath))
         {
-            if (Activator.CreateInstance(type) is not IGameAdapter adapter) continue;
-            ValidateAdapter(adapter, manifest);
-            loadedAdapters.Add(adapter);
+            TryDeleteDirectory(shadowDirectory);
+            return;
         }
-        if (manifest.HostApiVersion >= 2 && loadedAdapters.Count != 1)
-            throw new InvalidOperationException("Host API v2 游戏包必须且只能导出一个 IGameAdapter。");
-        foreach (var adapter in loadedAdapters)
+
+        ModuleLoadContext? context = null;
+        try
         {
-            if (_adapters.Any(existing => string.Equals(existing.Id, adapter.Id, StringComparison.Ordinal)))
-                throw new InvalidOperationException($"游戏模块 ID 重复：{adapter.Id}。");
-            _adapters.Add(adapter);
+            context = new ModuleLoadContext(assemblyPath);
+            var assembly = context.LoadFromAssemblyPath(assemblyPath);
+            var types = assembly.GetTypes().Where(type =>
+                !type.IsAbstract && typeof(IGameAdapter).IsAssignableFrom(type));
+            var loadedAdapters = new List<IGameAdapter>();
+            foreach (var type in types)
+            {
+                if (Activator.CreateInstance(type) is not IGameAdapter adapter) continue;
+                ValidateAdapter(adapter, manifest);
+                loadedAdapters.Add(adapter);
+            }
+            if (manifest.HostApiVersion >= 2 && loadedAdapters.Count != 1)
+                throw new InvalidOperationException("Host API v2 游戏包必须且只能导出一个 IGameAdapter。");
+            foreach (var adapter in loadedAdapters)
+            {
+                if (_adapters.Any(existing => string.Equals(existing.Id, adapter.Id, StringComparison.Ordinal)))
+                    throw new InvalidOperationException($"游戏模块 ID 重复：{adapter.Id}。");
+                _adapters.Add(adapter);
+            }
+            if (loadedAdapters.Count > 0)
+            {
+                _loadContexts.Add(context);
+                _shadowDirectories.Add(shadowDirectory);
+                context = null;
+            }
         }
-        if (loadedAdapters.Count > 0) _loadContexts.Add(context);
-        else context.Unload();
+        finally
+        {
+            context?.Unload();
+            if (context is not null) TryDeleteDirectory(shadowDirectory);
+        }
+    }
+
+    private string CreateShadowCopy(string packageDirectory)
+    {
+        Directory.CreateDirectory(_runtimeSessionDirectory);
+        var shadowDirectory = Path.Combine(_runtimeSessionDirectory, Guid.NewGuid().ToString("N"));
+        var sourceRoot = Path.GetFullPath(packageDirectory) + Path.DirectorySeparatorChar;
+        var targetRoot = Path.GetFullPath(shadowDirectory) + Path.DirectorySeparatorChar;
+        Directory.CreateDirectory(shadowDirectory);
+        try
+        {
+            var options = new EnumerationOptions
+            {
+                RecurseSubdirectories = true,
+                IgnoreInaccessible = false,
+                AttributesToSkip = FileAttributes.ReparsePoint,
+                ReturnSpecialDirectories = false
+            };
+            foreach (var source in Directory.EnumerateFiles(packageDirectory, "*", options))
+            {
+                var resolvedSource = Path.GetFullPath(source);
+                if (!resolvedSource.StartsWith(sourceRoot, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("模块影子复制的源路径无效。");
+                var relative = Path.GetRelativePath(packageDirectory, resolvedSource);
+                var destination = Path.GetFullPath(Path.Combine(shadowDirectory, relative));
+                if (!destination.StartsWith(targetRoot, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("模块影子复制的目标路径无效。");
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                File.Copy(resolvedSource, destination, true);
+            }
+            return shadowDirectory;
+        }
+        catch
+        {
+            TryDeleteDirectory(shadowDirectory);
+            throw;
+        }
+    }
+
+    private void CleanupStaleRuntimeDirectories()
+    {
+        if (!Directory.Exists(_runtimeRoot)) return;
+        foreach (var directory in Directory.EnumerateDirectories(_runtimeRoot))
+        {
+            var name = Path.GetFileName(directory);
+            var separator = name.IndexOf('-');
+            if (separator <= 0 || !int.TryParse(name[..separator], out var processId) || IsProcessRunning(processId))
+                continue;
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    private static bool IsProcessRunning(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return !process.HasExited;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void TryDeleteDirectory(string directory)
+    {
+        try
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
     }
 
     private static void ValidateAdapter(IGameAdapter adapter, InstalledModuleManifest manifest)

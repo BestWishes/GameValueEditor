@@ -241,7 +241,7 @@
                                     <Button Grid.Column="1" Content="检查新有" IsEnabled="{Binding CanCheckGameModules}"
                                             Click="CheckGameModules_OnClick"/>
                                     <Button Grid.Column="2" Content="{Binding ModuleInstallActionText}" IsEnabled="{Binding CanInstallGameModule}"
-                                            Click="InstallGameModule_OnClick"/>
+                                            Click="InstallGameModule_OnClick" Margin="0,0,20,0"/>
                                     <Button Grid.Column="3" Content="卸载" IsEnabled="{Binding CanUninstallGameModule}"
                                             Click="UninstallGameModule_OnClick"/>
                                     <Button Grid.Column="4" Content="贡献者" IsEnabled="{Binding CanViewModuleContributors}"

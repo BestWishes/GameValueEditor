@@ -864,6 +864,7 @@ public sealed class MainViewModel : ObservableObject
         try
         {
             var removedModule = false;
+            var moduleFilesDeleted = true;
             if (game.IsModuleInstalled && !string.IsNullOrWhiteSpace(game.ModuleId))
             {
                 if (_isModuleControlBlocked) throw new InvalidOperationException("专属模块正在更新，请稍候再试。");
@@ -871,7 +872,7 @@ public sealed class MainViewModel : ObservableObject
                 NotifyModuleControls();
                 try
                 {
-                    RemoveInstalledModuleCore(game.ModuleId);
+                    moduleFilesDeleted = await RemoveInstalledModuleCoreAsync(game.ModuleId);
                     removedModule = true;
                 }
                 finally
@@ -900,9 +901,14 @@ public sealed class MainViewModel : ObservableObject
             if (!keptConnection) SelectedGame = Games.FirstOrDefault();
             GamesView.Refresh();
             await SaveLibraryAsync();
+            var moduleSuffix = !removedModule
+                ? string.Empty
+                : moduleFilesDeleted
+                    ? "及其专属模块"
+                    : "及其专属模块（残留文件将在下次启动清理）";
             StatusText = keptConnection
-                ? $"已将 {game.Name}{(removedModule ? "及其专属模块" : string.Empty)}从本地移出，当前进程保持连接"
-                : $"已将 {game.Name}{(removedModule ? "及其专属模块" : string.Empty)}从游戏库移出";
+                ? $"已将 {game.Name}{moduleSuffix}从本地移出，当前进程保持连接"
+                : $"已将 {game.Name}{moduleSuffix}从游戏库移出";
         }
         finally { ReleaseLibraryControlsAfter(cooldown); }
     }
@@ -1663,7 +1669,12 @@ public sealed class MainViewModel : ObservableObject
         try
         {
             ModuleStatusText = $"正在下载并校验 {module.DisplayName} v{module.Version}…";
-            await _moduleCatalogService.InstallAsync(module);
+            var progress = new Progress<DownloadProgressSnapshot>(snapshot =>
+            {
+                ModuleStatusText = $"正在下载 {module.DisplayName} v{module.Version} · {snapshot.DisplayText}";
+                StatusText = ModuleStatusText;
+            });
+            await _moduleCatalogService.InstallAsync(module, progress);
             _adapterRegistry.Reload();
             ReloadAdaptersForSessions();
             if (game is null)
@@ -1714,19 +1725,20 @@ public sealed class MainViewModel : ObservableObject
         try
         {
             ModuleStatusText = "正在卸载当前游戏的专属模块…";
-            RemoveInstalledModuleCore(moduleId);
+            var packageDeleted = await RemoveInstalledModuleCoreAsync(moduleId);
             foreach (var game in Games.Where(item => string.Equals(item.ModuleId, moduleId, StringComparison.Ordinal)))
                 game.IsModuleInstalled = false;
             _moduleCheckResult = null;
-            ModuleStatusText = $"已卸载专属模块 v{record.Version}；游戏库和快捷入口已保留。";
+            ModuleStatusText = packageDeleted
+                ? $"已卸载专属模块 v{record.Version}；游戏库和快捷入口已保留。"
+                : $"已停用专属模块 v{record.Version}；残留文件将在下次启动自动清理。";
             GamesView.Refresh();
             NotifyModuleControls();
         }
         finally { ReleaseModuleControlsAfter(cooldown); }
-        await Task.CompletedTask;
     }
 
-    private void RemoveInstalledModuleCore(string moduleId)
+    private async Task<bool> RemoveInstalledModuleCoreAsync(string moduleId)
     {
         var sessions = _sessions.Values.Append(_activeSession).Where(item => item is not null)
             .Cast<GameConnectionSession>().Distinct().ToList();
@@ -1749,7 +1761,6 @@ public sealed class MainViewModel : ObservableObject
                 SetActiveAdapter(null);
             _adapterRegistry.Reload();
             ReloadAdaptersForSessions();
-            _moduleCatalogService.DeletePackage(moduleId);
         }
         catch
         {
@@ -1759,7 +1770,14 @@ public sealed class MainViewModel : ObservableObject
             RestartLockMaintenance();
             throw;
         }
-        RestartLockMaintenance();
+        try
+        {
+            return await _moduleCatalogService.DeletePackageAsync(moduleId);
+        }
+        finally
+        {
+            RestartLockMaintenance();
+        }
     }
 
     public IReadOnlyList<GameModuleContributor> GetModuleContributors()
@@ -1830,7 +1848,15 @@ public sealed class MainViewModel : ObservableObject
         try
         {
             ApplicationUpdateStatusPrefix = $"v{update.Version} 下载中 ";
-            await _applicationUpdateService.DownloadAsync(update);
+            var progress = new Progress<DownloadProgressSnapshot>(snapshot =>
+            {
+                var progressText = snapshot.Percentage is { } percentage
+                    ? $"下载 {percentage}% "
+                    : "下载中 ";
+                ApplicationUpdateStatusPrefix = $"v{update.Version} {progressText}";
+                StatusText = $"正在下载肝肾大圣 v{update.Version} · {snapshot.DisplayText}";
+            });
+            await _applicationUpdateService.DownloadAsync(update, progress);
             _applicationUpdateDownloaded = true;
             ApplicationUpdateStatusPrefix = $"v{update.Version} 已下载 ";
             ApplicationUpdateActionText = "待重启更新";
@@ -1852,6 +1878,9 @@ public sealed class MainViewModel : ObservableObject
     }
 
     public bool LaunchPendingApplicationUpdate() => _applicationUpdateService.LaunchPendingUpdate(true);
+
+    public ApplicationUpdateFailure? TakeLastApplicationUpdateFailure() =>
+        _applicationUpdateService.TakeLastFailure();
 
     public void OpenOfficialWebsite()
     {

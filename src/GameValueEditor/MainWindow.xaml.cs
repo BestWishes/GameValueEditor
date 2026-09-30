@@ -35,6 +35,14 @@ public partial class MainWindow : Window
     {
         await RunGuardedAsync(_viewModel.InitializeAsync);
         _connectionMonitorTimer.Start();
+        var updateFailure = _viewModel.TakeLastApplicationUpdateFailure();
+        if (updateFailure is not null)
+        {
+            MessageDialog.ShowInfo(
+                this,
+                "更新未完成",
+                $"已继续使用当前版本。\n\n{updateFailure.Message}\n\n详细日志：\n{updateFailure.LogPath}");
+        }
     }
 
     private void ConnectionMonitorTimer_OnTick(object? sender, EventArgs e) =>
