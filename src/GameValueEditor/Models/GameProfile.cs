@@ -83,6 +83,13 @@ public sealed class GameVersionProfile : ObservableObject
     public string BuildFingerprint { get; set; } = string.Empty;
     public string GameAssemblySha256 { get; set; } = string.Empty;
     public string MetadataSha256 { get; set; } = string.Empty;
+    public string GameDeclaredVersion { get; set; } = string.Empty;
+    public string GameDeclaredProductName { get; set; } = string.Empty;
+    public string GameDeclaredBuildGuid { get; set; } = string.Empty;
+    public string PlatformName { get; set; } = string.Empty;
+    public string PlatformAppId { get; set; } = string.Empty;
+    public string PlatformBuildId { get; set; } = string.Empty;
+    public string PlatformDisplayName { get; set; } = string.Empty;
     public long FileSize { get; set; }
     public string Architecture { get; set; } = "Unknown";
     public DateTime? CollectedUtc { get; set; }
@@ -133,10 +140,45 @@ public sealed class GameVersionProfile : ObservableObject
     [JsonIgnore]
     public string CollectedDateDisplay => CollectedUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "未知";
 
+    [JsonIgnore]
+    public string GameDeclaredVersionDisplay => string.IsNullOrWhiteSpace(GameDeclaredVersion) ? "未提供" : GameDeclaredVersion;
+
+    [JsonIgnore]
+    public string GameDeclaredProductNameDisplay => string.IsNullOrWhiteSpace(GameDeclaredProductName) ? "未提供" : GameDeclaredProductName;
+
+    [JsonIgnore]
+    public string GameDeclaredBuildGuidDisplay => string.IsNullOrWhiteSpace(GameDeclaredBuildGuid) ? "未提供" : GameDeclaredBuildGuid;
+
+    [JsonIgnore]
+    public string PlatformVersionDisplay
+    {
+        get
+        {
+            if (string.IsNullOrWhiteSpace(PlatformName)) return "未识别";
+            var parts = new[]
+            {
+                PlatformDisplayName,
+                string.IsNullOrWhiteSpace(PlatformAppId) ? string.Empty : $"App {PlatformAppId}",
+                string.IsNullOrWhiteSpace(PlatformBuildId) ? string.Empty : $"Build {PlatformBuildId}"
+            }.Where(value => !string.IsNullOrWhiteSpace(value));
+            return $"{PlatformName} · {string.Join(" · ", parts)}".TrimEnd(' ', '·');
+        }
+    }
+
     public void NotifyChoiceChanged()
     {
         OnPropertyChanged(nameof(VersionChoiceText));
         OnPropertyChanged(nameof(TechnicalDetails));
+        OnPropertyChanged(nameof(DisplayName));
+        OnPropertyChanged(nameof(FileVersion));
+        OnPropertyChanged(nameof(ProductVersion));
+        OnPropertyChanged(nameof(Architecture));
+        OnPropertyChanged(nameof(ExecutableSha256));
+        OnPropertyChanged(nameof(CollectedDateDisplay));
+        OnPropertyChanged(nameof(GameDeclaredVersionDisplay));
+        OnPropertyChanged(nameof(GameDeclaredProductNameDisplay));
+        OnPropertyChanged(nameof(GameDeclaredBuildGuidDisplay));
+        OnPropertyChanged(nameof(PlatformVersionDisplay));
     }
 
     public override string ToString() => VersionChoiceText;

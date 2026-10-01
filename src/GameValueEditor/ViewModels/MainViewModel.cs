@@ -100,7 +100,7 @@ public sealed class MainViewModel : ObservableObject
     private string _moduleStatusText = "尚未检查当前游戏的专属模块";
     private bool _isModuleControlBlocked;
     private GameModuleCheckResult? _moduleCheckResult;
-    private string _applicationUpdateStatusPrefix = string.Empty;
+    private string _applicationUpdateStatusText = string.Empty;
     private string _applicationUpdateActionText = "检查更新";
     private bool _isApplicationUpdateBusy;
     private bool _isApplicationUpdateCheckCooldown;
@@ -435,10 +435,10 @@ public sealed class MainViewModel : ObservableObject
         !string.IsNullOrWhiteSpace(ResolveActiveModuleId()) &&
         _moduleCatalogService.FindInstalled(ResolveActiveModuleId()) is not null;
     public bool CanViewModuleContributors => !_isModuleControlBlocked && GetModuleContributors().Count > 0;
-    public string ApplicationUpdateStatusPrefix
+    public string ApplicationUpdateStatusText
     {
-        get => _applicationUpdateStatusPrefix;
-        private set => SetProperty(ref _applicationUpdateStatusPrefix, value);
+        get => _applicationUpdateStatusText;
+        private set => SetProperty(ref _applicationUpdateStatusText, value);
     }
     public string ApplicationUpdateActionText
     {
@@ -724,6 +724,7 @@ public sealed class MainViewModel : ObservableObject
         {
             ApplyFingerprint(version, fingerprint);
         }
+        libraryChanged |= ApplyGameDeclaredMetadata(version, process);
         if (_activeAdapter is not null)
         {
             migratedFieldCount += MigrateAdapterFields(game, version, _activeAdapter.Id);
@@ -821,6 +822,7 @@ public sealed class MainViewModel : ObservableObject
             game.Versions.Add(version);
         }
         else ApplyFingerprint(version, fingerprint);
+        ApplyGameDeclaredMetadata(version, process);
         if (_activeAdapter is not null) MigrateAdapterFields(game, version, _activeAdapter.Id);
 
         UpdateCurrentVersionMarkers(game, fingerprint.BuildSha256);
@@ -1808,17 +1810,17 @@ public sealed class MainViewModel : ObservableObject
         NotifyApplicationUpdateState();
         try
         {
-            ApplicationUpdateStatusPrefix = "检查中 ";
+            ApplicationUpdateStatusText = "　检查中";
             _applicationUpdateResult = await _applicationUpdateService.CheckAsync();
             if (_applicationUpdateResult.IsUpdateAvailable)
             {
-                ApplicationUpdateStatusPrefix = $"v{_applicationUpdateResult.Version} ";
+                ApplicationUpdateStatusText = $"　v{_applicationUpdateResult.Version}";
                 ApplicationUpdateActionText = "更新";
                 StatusText = $"发现肝肾大圣新版本 v{_applicationUpdateResult.Version}";
             }
             else
             {
-                ApplicationUpdateStatusPrefix = "已最新 ";
+                ApplicationUpdateStatusText = "　已最新";
                 ApplicationUpdateActionText = "检查更新";
                 StatusText = "肝肾大圣当前已是最新版本";
             }
@@ -1826,7 +1828,7 @@ public sealed class MainViewModel : ObservableObject
         catch
         {
             _applicationUpdateResult = null;
-            ApplicationUpdateStatusPrefix = "检查失败 ";
+            ApplicationUpdateStatusText = "　检查失败";
             ApplicationUpdateActionText = "检查更新";
             StatusText = "检查肝肾大圣更新失败，请稍后重试";
             throw;
@@ -1847,25 +1849,25 @@ public sealed class MainViewModel : ObservableObject
         NotifyApplicationUpdateState();
         try
         {
-            ApplicationUpdateStatusPrefix = $"v{update.Version} 下载中 ";
+            ApplicationUpdateStatusText = $"　v{update.Version} 下载中";
             var progress = new Progress<DownloadProgressSnapshot>(snapshot =>
             {
                 var progressText = snapshot.Percentage is { } percentage
                     ? $"下载 {percentage}% "
                     : "下载中 ";
-                ApplicationUpdateStatusPrefix = $"v{update.Version} {progressText}";
+                ApplicationUpdateStatusText = $"　v{update.Version} {progressText.Trim()}";
                 StatusText = $"正在下载肝肾大圣 v{update.Version} · {snapshot.DisplayText}";
             });
             await _applicationUpdateService.DownloadAsync(update, progress);
             _applicationUpdateDownloaded = true;
-            ApplicationUpdateStatusPrefix = $"v{update.Version} 已下载 ";
+            ApplicationUpdateStatusText = $"　v{update.Version} 已下载";
             ApplicationUpdateActionText = "待重启更新";
             StatusText = $"已下载并校验 v{update.Version}，可立即重启或下次启动时更新";
             return true;
         }
         catch
         {
-            ApplicationUpdateStatusPrefix = $"v{update.Version} 下载失败 ";
+            ApplicationUpdateStatusText = $"　v{update.Version} 下载失败";
             ApplicationUpdateActionText = "更新";
             StatusText = $"下载肝肾大圣 v{update.Version} 失败，请稍后重试";
             throw;
@@ -2405,9 +2407,35 @@ public sealed class MainViewModel : ObservableObject
         version.BuildFingerprint = fingerprint.BuildSha256;
         version.GameAssemblySha256 = fingerprint.GameAssemblySha256;
         version.MetadataSha256 = fingerprint.MetadataSha256;
+        version.PlatformName = fingerprint.PlatformName;
+        version.PlatformAppId = fingerprint.PlatformAppId;
+        version.PlatformBuildId = fingerprint.PlatformBuildId;
+        version.PlatformDisplayName = fingerprint.PlatformDisplayName;
         version.FileSize = fingerprint.FileSize;
         version.Architecture = fingerprint.Architecture;
         version.LastVerifiedUtc = DateTime.UtcNow;
+    }
+
+    private bool ApplyGameDeclaredMetadata(GameVersionProfile version, ProcessItem process)
+    {
+        if (_activeAdapter is not IGameVersionMetadataProvider provider) return false;
+        try
+        {
+            var metadata = provider.ReadGameVersionMetadata(process.ToModuleContext());
+            var changed = !string.Equals(version.GameDeclaredVersion, metadata.Version, StringComparison.Ordinal) ||
+                          !string.Equals(version.GameDeclaredProductName, metadata.ProductName, StringComparison.Ordinal) ||
+                          !string.Equals(version.GameDeclaredBuildGuid, metadata.BuildGuid, StringComparison.Ordinal);
+            version.GameDeclaredVersion = metadata.Version;
+            version.GameDeclaredProductName = metadata.ProductName;
+            version.GameDeclaredBuildGuid = metadata.BuildGuid;
+            version.NotifyChoiceChanged();
+            return changed;
+        }
+        catch
+        {
+            // Optional metadata must never prevent connecting to or editing a supported game build.
+            return false;
+        }
     }
 
     private static IEnumerable<SavedField> CloneAdapterFields(GameVersionProfile source, string adapterId) =>

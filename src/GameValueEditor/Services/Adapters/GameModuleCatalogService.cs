@@ -88,27 +88,41 @@ public sealed class GameModuleCatalogService
             throw new InvalidOperationException(
                 $"服务器模块清单需要接口版本 {catalog.HostApiVersion}，当前应用最高支持 {ModuleHostApi.CurrentVersion}。");
 
-        var compatible = catalog.Modules
+        var candidates = catalog.Modules
             .Where(module => module.HostApiVersion is >= 1 and <= ModuleHostApi.CurrentVersion &&
-                             Matches(module, processName, buildFingerprint, executableSha256,
-                                 gameAssemblySha256, metadataSha256))
+                             MatchesProcess(module, processName))
             .OrderByDescending(module => ParseVersion(module.Version))
-            .FirstOrDefault();
-        if (compatible is null)
+            .ToList();
+        if (candidates.Count == 0)
             return new GameModuleCheckResult(GameModuleAvailability.NotAvailable, null, null,
-                "服务器暂无适用于当前游戏和版本的专属模块。");
+                "服务器暂无适用于当前游戏的专属模块。");
+
+        var compatible = candidates.FirstOrDefault(module => MatchesBuild(module, buildFingerprint,
+                             executableSha256, gameAssemblySha256, metadataSha256))
+                         ?? candidates[0];
+        var exactBuildMatch = MatchesBuild(compatible, buildFingerprint, executableSha256,
+            gameAssemblySha256, metadataSha256);
 
         var installed = FindInstalled(compatible.Id);
         if (installed is null)
             return new GameModuleCheckResult(GameModuleAvailability.Available, compatible, null,
-                $"发现可下载模块：{compatible.DisplayName} v{compatible.Version}");
+                exactBuildMatch
+                    ? $"发现可下载模块：{compatible.DisplayName} v{compatible.Version}"
+                    : $"发现当前游戏的专属模块 v{compatible.Version}；安装后会在本地安全验证当前构建。",
+                exactBuildMatch);
         var installedVersion = ParseVersion(installed.Version);
         var remoteVersion = ParseVersion(compatible.Version);
         return remoteVersion.CompareTo(installedVersion) > 0
             ? new GameModuleCheckResult(GameModuleAvailability.UpdateAvailable, compatible, installed,
-                $"发现模块更新：v{installed.Version} → v{compatible.Version}")
+                exactBuildMatch
+                    ? $"发现模块更新：v{installed.Version} → v{compatible.Version}"
+                    : $"发现模块更新 v{compatible.Version}；更新后会在本地安全验证当前构建。",
+                exactBuildMatch)
             : new GameModuleCheckResult(GameModuleAvailability.Current, compatible, installed,
-                $"本地专属模块已是最新：v{installed.Version}");
+                exactBuildMatch
+                    ? $"本地专属模块已是最新：v{installed.Version}"
+                    : $"本地模块已是最新 v{installed.Version}；当前构建尚未明确收录，将由本地安全校验决定是否启用。",
+                exactBuildMatch);
     }
 
     public async Task InstallAsync(
@@ -353,17 +367,17 @@ public sealed class GameModuleCatalogService
         }
     }
 
-    private static bool Matches(
+    private static bool MatchesProcess(GameModuleCatalogEntry module, string processName) =>
+        module.ProcessNames.Count == 0 ||
+        module.ProcessNames.Any(name => string.Equals(name, processName, StringComparison.OrdinalIgnoreCase));
+
+    private static bool MatchesBuild(
         GameModuleCatalogEntry module,
-        string processName,
         string buildFingerprint,
         string executableSha256,
         string gameAssemblySha256,
         string metadataSha256)
     {
-        if (module.ProcessNames.Count > 0 &&
-            !module.ProcessNames.Any(name => string.Equals(name, processName, StringComparison.OrdinalIgnoreCase)))
-            return false;
         return module.CompatibleBuilds.Any(build =>
             MatchOptional(build.BuildFingerprint, buildFingerprint) &&
             MatchOptional(build.ExecutableSha256, executableSha256) &&
@@ -411,7 +425,8 @@ public sealed record GameModuleCheckResult(
     GameModuleAvailability Availability,
     GameModuleCatalogEntry? RemoteModule,
     InstalledModuleRecord? InstalledModule,
-    string StatusText);
+    string StatusText,
+    bool IsExactBuildMatch = false);
 
 public sealed class GameModuleCatalog
 {

@@ -14,7 +14,7 @@ LibraryDocument
 ```
 
 - `GameProfile`：玩家看到的游戏条目、安装路径、置顶和锁定状态，以及可选的稳定 `ModuleId`。运行时 `IsModuleInstalled` 只反映本机真实安装清单。
-- `GameVersionProfile`：一个确定的游戏构建。普通游戏以 EXE SHA-256 标识；IL2CPP 游戏以 EXE、`GameAssembly.dll` 和元数据的组合指纹标识。
+- `GameVersionProfile`：一个确定的游戏构建。普通游戏以 EXE SHA-256 标识；IL2CPP 游戏以 EXE、`GameAssembly.dll` 和元数据的组合指纹标识；同时分栏保存游戏平台构建号、游戏自身声明版本以及引擎文件版本，三者不互相冒充。
 - `SavedField`：玩家填写的备注名称、分组、数值锁定目标，以及程序保存的类型和定位器。
 
 显示名称不是定位依据。两个字段允许拥有相同名称，内部使用 GUID 区分。
@@ -25,12 +25,13 @@ LibraryDocument
 
 - `ProcessService`：列出当前用户可访问的进程，读取父子关系、命令行和运行时特征，并把同一游戏实例的多个进程归成逻辑进程组。
 - `VersionFingerprintService`：读取版本、架构、大小并计算 EXE 与关键 IL2CPP 文件的组合构建指纹。
+- `GameVersionMetadataService`：只在当前安装目录所属的 Steam `steamapps` 范围内解析匹配的 `appmanifest`，读取 App ID、平台 Build ID 和平台显示名；移动到另一个 Steam 库后重新连接即可刷新，不把绝对安装路径当作版本身份。
 - `ProcessMemoryAccessor`：封装 `OpenProcess`、`VirtualQueryEx`、`ReadProcessMemory` 和 `WriteProcessMemory`。
 - `MemoryScanService`：执行首次精确扫描与候选过滤。
 - `ProfileStore`：以 JSON 原子写入本地游戏库，并维护上一版备份。
 - `ThemeService`：切换统一的浅色和深色资源调色板。
 - `ProcessSpeedService`：为当前 x64 进程挂接常见计时 API，按整数倍缩放虚拟时间并支持连续回正。
-- `GameAdapterRegistry`：通过独立的 `GameValueEditor.ModuleSdk` Host API v2 从 `data/modules` 加载已安装游戏包，并根据完整游戏构建指纹选择专属适配器。
+- `GameAdapterRegistry`：通过独立的 `GameValueEditor.ModuleSdk` Host API v2 从 `data/modules` 加载已安装游戏包，并让模块根据完整游戏构建身份与保守代码签名选择专属适配器。
 - `GameModuleCatalogService`：从独立的 `GameValueEditor-Modules` 模块中心检查、下载、校验、原子安装、停用和卸载可选游戏包，并读取包内贡献者快照。
 - `ApplicationUpdateService`：检查 GitHub 正式 Release、校验更新包并交给独立更新器安装。
 
@@ -58,14 +59,14 @@ Electron/NW.js 游戏按命令行区分主进程、Renderer、GPU、网络、音
 
 只有必须调用游戏运行时结构或自身函数才能可靠写入的数据，才实现专属适配器。适配器必须：
 
-- 使用 EXE 和关键运行时文件的 SHA-256 严格匹配受支持构建。
+- 优先使用 EXE 和关键运行时文件的 SHA-256 精确匹配受支持构建；只有模块明确实现并同时核对全部关键函数签名、对象布局入口和写入钩子时，才允许兼容哈希变化但代码布局未变的小版本。
 - 连接游戏时先按保存路径匹配；安装目录移动后可在进程名唯一或由游戏库条目发起连接时保持同一个游戏上下文，并在验证后更新保存路径。
 - 检测到受支持的新构建时，只迁移以适配器语义键定位的字段；原始地址、模块偏移和会话地址不会跨构建复制。
 - 每次读取或写入都重新定位实时对象，不保存跨进程会话地址。
 - 持久化编辑器写入后通过游戏自身缓存/保存流程落盘；仅会话编辑器明确标记 `SessionOnly`，两者都必须复核实时值。
 - 对溢出和结构不一致进行校验；界面层不得臆测游戏的堆叠表示。
 
-专属实现作为独立游戏包放在 `data/modules/packages/{游戏模块ID}/{版本}`，`installed.json` 记录当前启用版本。模块 ZIP 必须通过 SHA-256、清单一致性和安全路径校验；模块加载失败不会阻止主程序启动。只有进程名和清单中声明的全部非空构建指纹都匹配时，模块才会提供给当前游戏。宿主先把完整模块包复制到 `data/modules/runtime/{pid}-{session}/{load}`，再从影子副本创建可收集加载上下文，因此正式包 DLL 不会因正在执行而阻塞卸载或更新。卸载遇到外部占用时只把安全模块 ID 写入待清理记录，并在下次创建适配器注册表之前重试。
+专属实现作为独立游戏包放在 `data/modules/packages/{游戏模块ID}/{版本}`，`installed.json` 记录当前启用版本。模块 ZIP 必须通过 SHA-256、清单一致性和安全路径校验；模块加载失败不会阻止主程序启动。服务器目录先按进程身份发现可下载包，不再因为尚未登记的新构建哈希而把整个游戏模块隐藏；下载安装后仍必须由本地模块的 `Supports` 对精确指纹或完整结构签名进行安全验证，验证失败就不启用编辑能力。宿主先把完整模块包复制到 `data/modules/runtime/{pid}-{session}/{load}`，再从影子副本创建可收集加载上下文，因此正式包 DLL 不会因正在执行而阻塞卸载或更新。卸载遇到外部占用时只把安全模块 ID 写入待清理记录，并在下次创建适配器注册表之前重试。
 
 模块与游戏库遵循一个简单不变量：每个已安装游戏模块都必须关联一个普通游戏库条目。未入库的已连接游戏可以直接检查模块，只有下载安装成功后才自动入库；应用启动时也会为完整离线包或旧安装中缺少条目的模块补建可管理条目。单独“卸载”保留游戏版本和快捷入口；“从库移出”先卸载模块，成功后才删除条目，仍在运行的进程保留为无专属能力的临时会话。
 
@@ -75,7 +76,7 @@ Electron/NW.js 游戏按命令行区分主进程、Renderer、GPU、网络、音
 
 当前官方 `game.fzzml` 包含 `game.fzzml.inventory` 和 `game.fzzml.character-attributes`。背包编辑器按物品名聚合记录并调用游戏自身存档流程，不对超过 9999 的数值主动拆栈。人物属性编辑器以人物 ID 和属性键定位，修改运行时配置并触发聚合/UI 事件；它仅本次游戏运行有效，不允许锁定或在重启后自动重应用。
 
-官方 `game.worldapart` 包含持久化的背包和人物属性编辑器。人物属性界面由宿主提供名称筛选；模块把人物面板的精力、灵力等字段保留在游戏原有的“基础属性”分组，并把 `CombatModel.CultivateExp` 映射为“基础属性 · 修为”、`CombatModel.CultivateReserveExp` 映射为“资源 · 灵气”。每次操作都重新定位当前存档对象，在 Unity 主线程写入、调用游戏自动存档并回读。
+官方 `game.worldapart` 包含持久化的背包和人物属性编辑器。人物属性界面由宿主提供名称筛选；模块把人物面板的精力、灵力等字段保留在游戏原有的“基础属性”分组，并把 `CombatModel.CultivateExp` 映射为“基础属性 · 修为”、`CombatModel.CultivateReserveExp` 映射为“资源 · 灵气”。每次操作都重新定位当前存档对象，在 Unity 主线程写入、调用游戏自动存档并回读。v1.1.0 同时登记两个精确构建，并对新版布局提供覆盖全部关键 RVA 的结构签名回退；任一签名变化都会拒绝启用，而不是仅凭相同 EXE 或相似版本号套用旧偏移。
 
 新增游戏支持的完整判断、接入和测试流程见 [新游戏搜索套路与专属适配器扩展指南](GAME_EXTENSION_GUIDE.md)。
 

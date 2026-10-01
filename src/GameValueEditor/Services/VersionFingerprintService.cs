@@ -8,6 +8,13 @@ namespace GameValueEditor.Services;
 
 public sealed class VersionFingerprintService
 {
+    private readonly GameVersionMetadataService _metadataService;
+
+    public VersionFingerprintService(GameVersionMetadataService? metadataService = null)
+    {
+        _metadataService = metadataService ?? new GameVersionMetadataService();
+    }
+
     public async Task<VersionFingerprint> CreateAsync(string executablePath, CancellationToken cancellationToken = default)
     {
         var fileInfo = new FileInfo(executablePath);
@@ -32,6 +39,7 @@ public sealed class VersionFingerprintService
                 ? fileVersion
                 : fileInfo.LastWriteTime.ToString("yyyy.MM.dd.HHmm");
 
+        var platform = _metadataService.ReadPlatformMetadata(executablePath);
         return new VersionFingerprint(
             display,
             fileVersion,
@@ -41,7 +49,11 @@ public sealed class VersionFingerprintService
             ReadArchitecture(executablePath),
             buildHash,
             gameAssemblyHash,
-            metadataHash);
+            metadataHash,
+            platform.PlatformName,
+            platform.AppId,
+            platform.BuildId,
+            platform.DisplayName);
     }
 
     private static string CreateBuildFingerprint(string executableHash, string gameAssemblyHash, string metadataHash)

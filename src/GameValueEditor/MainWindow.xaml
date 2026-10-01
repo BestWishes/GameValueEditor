@@ -549,38 +549,52 @@
                     </TabItem>
 
                     <TabItem Header="游戏版本">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                         <Grid Margin="28">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="160"/>
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
-                                <RowDefinition Height="42"/>
-                                <RowDefinition Height="42"/>
-                                <RowDefinition Height="42"/>
-                                <RowDefinition Height="42"/>
-                                <RowDefinition Height="42"/>
-                                <RowDefinition Height="42"/>
+                                <RowDefinition Height="38"/>
+                                <RowDefinition Height="38"/>
+                                <RowDefinition Height="38"/>
+                                <RowDefinition Height="38"/>
+                                <RowDefinition Height="38"/>
+                                <RowDefinition Height="38"/>
+                                <RowDefinition Height="38"/>
+                                <RowDefinition Height="38"/>
+                                <RowDefinition Height="38"/>
+                                <RowDefinition Height="38"/>
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <Label Content="版本用途" Padding="0" VerticalContentAlignment="Center"/>
                             <TextBlock Grid.Column="1" Text="{Binding SelectedVersion.VersionChoiceText}" VerticalAlignment="Center"/>
-                            <Label Grid.Row="1" Content="文件版本" Padding="0" VerticalContentAlignment="Center"/>
-                            <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding SelectedVersion.FileVersion}" VerticalAlignment="Center"/>
-                            <Label Grid.Row="2" Content="产品版本" Padding="0" VerticalContentAlignment="Center"/>
-                            <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding SelectedVersion.ProductVersion}" VerticalAlignment="Center"/>
-                            <Label Grid.Row="3" Content="架构" Padding="0" VerticalContentAlignment="Center"/>
-                            <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding SelectedVersion.Architecture}" VerticalAlignment="Center"/>
-                            <Label Grid.Row="4" Content="收录日期" Padding="0" VerticalContentAlignment="Center"/>
-                            <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding SelectedVersion.CollectedDateDisplay}" VerticalAlignment="Center"/>
-                            <Label Grid.Row="5" Content="版本指纹（技术信息）" Padding="0" VerticalContentAlignment="Center"/>
-                            <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding SelectedVersion.ExecutableSha256}" TextWrapping="Wrap" VerticalAlignment="Center"/>
-                            <StackPanel Grid.Row="6" Grid.ColumnSpan="2" Margin="0,20,0,0">
+                            <Label Grid.Row="1" Content="游戏声明版本" Padding="0" VerticalContentAlignment="Center"/>
+                            <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding SelectedVersion.GameDeclaredVersionDisplay}" VerticalAlignment="Center"/>
+                            <Label Grid.Row="2" Content="游戏声明名称" Padding="0" VerticalContentAlignment="Center"/>
+                            <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding SelectedVersion.GameDeclaredProductNameDisplay}" VerticalAlignment="Center"/>
+                            <Label Grid.Row="3" Content="游戏构建 GUID" Padding="0" VerticalContentAlignment="Center"/>
+                            <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding SelectedVersion.GameDeclaredBuildGuidDisplay}" VerticalAlignment="Center"/>
+                            <Label Grid.Row="4" Content="平台版本" Padding="0" VerticalContentAlignment="Center"/>
+                            <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding SelectedVersion.PlatformVersionDisplay}" VerticalAlignment="Center"/>
+                            <Label Grid.Row="5" Content="引擎文件版本" Padding="0" VerticalContentAlignment="Center"/>
+                            <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding SelectedVersion.FileVersion}" VerticalAlignment="Center"/>
+                            <Label Grid.Row="6" Content="引擎产品版本" Padding="0" VerticalContentAlignment="Center"/>
+                            <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding SelectedVersion.ProductVersion}" VerticalAlignment="Center"/>
+                            <Label Grid.Row="7" Content="架构" Padding="0" VerticalContentAlignment="Center"/>
+                            <TextBlock Grid.Row="7" Grid.Column="1" Text="{Binding SelectedVersion.Architecture}" VerticalAlignment="Center"/>
+                            <Label Grid.Row="8" Content="收录日期" Padding="0" VerticalContentAlignment="Center"/>
+                            <TextBlock Grid.Row="8" Grid.Column="1" Text="{Binding SelectedVersion.CollectedDateDisplay}" VerticalAlignment="Center"/>
+                            <Label Grid.Row="9" Content="版本指纹（技术信息）" Padding="0" VerticalContentAlignment="Center"/>
+                            <TextBlock Grid.Row="9" Grid.Column="1" Text="{Binding SelectedVersion.ExecutableSha256}" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                            <StackPanel Grid.Row="10" Grid.ColumnSpan="2" Margin="0,20,0,0">
                                 <TextBlock Text="本地数据位置" FontWeight="SemiBold"/>
                                 <TextBlock Text="{Binding LibraryPath}" Foreground="{DynamicResource MutedTextBrush}" Margin="0,6,0,12"/>
                                 <Button Content="在资源管理器中显示" HorizontalAlignment="Left" Click="OpenLibraryFolder_OnClick"/>
                             </StackPanel>
                         </Grid>
+                        </ScrollViewer>
                     </TabItem>
                 </TabControl>
             </Grid>
@@ -593,9 +607,9 @@
                     <TextBlock Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center">
                         <Run Text="仅用于离线单机游戏 · v"/><Run Text="{Binding CurrentApplicationVersion, Mode=OneWay}"/><Run Text="　　"/>
                     </TextBlock>
-                    <TextBlock Text="{Binding ApplicationUpdateStatusPrefix}" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
                     <Button Content="{Binding ApplicationUpdateActionText}" IsEnabled="{Binding CanUseApplicationUpdate}"
                             Click="ApplicationUpdate_OnClick" Padding="6,1" Margin="0" MinHeight="22"/>
+                    <TextBlock Text="{Binding ApplicationUpdateStatusText}" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
                     <Button Content="官网" IsEnabled="{Binding CanOpenOfficialWebsite}"
                             Click="OpenOfficialWebsite_OnClick" Padding="10,1" Margin="24,0,0,0" MinHeight="22"/>
                 </StackPanel>

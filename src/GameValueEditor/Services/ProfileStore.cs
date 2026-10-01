@@ -67,7 +67,7 @@ public sealed class ProfileStore
 
     private static LibraryDocument Upgrade(LibraryDocument document)
     {
-        document.SchemaVersion = Math.Max(document.SchemaVersion, 6);
+        document.SchemaVersion = Math.Max(document.SchemaVersion, 7);
         foreach (var field in document.Games.SelectMany(game => game.Versions).SelectMany(version => version.Fields))
         {
             if (string.IsNullOrWhiteSpace(field.Group)) field.Group = "未分组";

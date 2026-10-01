@@ -152,7 +152,7 @@ try
     if (args.Contains("--update-live", StringComparer.OrdinalIgnoreCase))
     {
         var liveUpdateRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-LiveUpdate-{Guid.NewGuid():N}");
-        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.13");
+        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.14");
         var liveUpdate = await liveUpdateService.CheckAsync();
         Assert(liveUpdate.AssetName.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
                liveUpdate.AssetName.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase),
@@ -424,7 +424,7 @@ try
             "Preferred routine persistence failed");
         Assert(restored.Games.Single().Versions.Single().Fields.Single().AdapterFieldKey == "item-key",
             "Adapter field persistence failed");
-        Assert(restored.SchemaVersion == 6, "Library schema version was not upgraded");
+        Assert(restored.SchemaVersion == 7, "Library schema version was not upgraded");
         Assert(restored.Games.Single().Versions.Single().BuildFingerprint == fingerprint.BuildSha256,
             "Build fingerprint persistence failed");
         Assert(restored.Games.Single().Versions.Single().Fields.Single().LockedValue == "321",
@@ -482,6 +482,31 @@ try
         var transientAvailable = await catalogService.CheckAsync("MatchedGame", transientFingerprint);
         Assert(transientAvailable.Availability == GameModuleAvailability.Available,
             "An unlisted connected game could not check for a compatible module");
+        var changedBuild = new VersionFingerprint("test", "", "", "OTHER-EXE", 1, "x64", "", "OTHER-ASM", "OTHER-META");
+        var changedBuildAvailable = await catalogService.CheckAsync("MatchedGame", changedBuild);
+        Assert(changedBuildAvailable.Availability == GameModuleAvailability.Available &&
+               !changedBuildAvailable.IsExactBuildMatch &&
+               changedBuildAvailable.StatusText.Contains("本地安全验证", StringComparison.Ordinal),
+            "Module discovery was incorrectly hidden by an unlisted game build");
+
+        var steamApps = Path.Combine(serviceTestRoot, "Steam", "steamapps");
+        var steamGameDirectory = Path.Combine(steamApps, "common", "A1");
+        Directory.CreateDirectory(steamGameDirectory);
+        var steamExecutable = Path.Combine(steamGameDirectory, "WorldApart.exe");
+        await File.WriteAllBytesAsync(steamExecutable, [0x4D, 0x5A, 0, 0]);
+        await File.WriteAllTextAsync(Path.Combine(steamApps, "appmanifest_4209920.acf"), """
+        "AppState"
+        {
+            "appid" "4209920"
+            "name" "不问凡尘"
+            "installdir" "A1"
+            "buildid" "25617557"
+        }
+        """);
+        var platformMetadata = new GameVersionMetadataService().ReadPlatformMetadata(steamExecutable);
+        Assert(platformMetadata.PlatformName == "Steam" && platformMetadata.AppId == "4209920" &&
+               platformMetadata.BuildId == "25617557" && platformMetadata.DisplayName == "不问凡尘",
+            "Steam game-declared build metadata was not resolved from the matching library manifest");
 
         var moduleAssemblyPath = Assembly.GetExecutingAssembly().Location;
         Assert(File.Exists(moduleAssemblyPath), "Smoke module assembly is unavailable");
@@ -622,7 +647,7 @@ try
         catch (HttpRequestException)
         {
         }
-        Assert(failingUpdateViewModel.ApplicationUpdateStatusPrefix == "检查失败 " &&
+        Assert(failingUpdateViewModel.ApplicationUpdateStatusText == "　检查失败" &&
                failingUpdateViewModel.ApplicationUpdateActionText == "检查更新",
             "Failed application update check left the footer in its in-progress state");
 
@@ -922,6 +947,13 @@ try
                     DisplayName = "1.2.3",
                     FileVersion = "1.2.3.4",
                     ProductVersion = "1.2.3",
+                    GameDeclaredVersion = "0.8.6",
+                    GameDeclaredProductName = "不问凡尘",
+                    GameDeclaredBuildGuid = "build-guid-smoke",
+                    PlatformName = "Steam",
+                    PlatformAppId = "4209920",
+                    PlatformBuildId = "25617557",
+                    PlatformDisplayName = "不问凡尘",
                     Architecture = "x64",
                     CollectedUtc = new DateTime(2026, 9, 27, 12, 30, 0, DateTimeKind.Local),
                     ExecutableSha256 = new string('a', 64),
@@ -1014,6 +1046,57 @@ try
             Assert(written.DisplayValue == requested, $"Live adapter write mismatch: {written.DisplayValue}");
             Console.WriteLine($"Live adapter write passed: 赤阳花={written.DisplayValue}, {written.Status}.");
         }
+    }
+
+    if (args.Contains("--worldapart-live", StringComparer.OrdinalIgnoreCase))
+    {
+        using var liveProcess = Process.GetProcessesByName("WorldApart")
+            .FirstOrDefault(candidate =>
+            {
+                try { return candidate.Modules.Cast<ProcessModule>().Any(module =>
+                    string.Equals(module.ModuleName, "GameAssembly.dll", StringComparison.OrdinalIgnoreCase)); }
+                catch { return false; }
+            }) ?? throw new InvalidOperationException("WorldApart data process is not running");
+        var path = liveProcess.MainModule?.FileName ?? throw new InvalidOperationException("Unable to resolve WorldApart path");
+        var liveItem = new ProcessItem
+        {
+            ProcessId = liveProcess.Id,
+            ProcessName = liveProcess.ProcessName,
+            ExecutablePath = path,
+            StartTimeUtc = liveProcess.StartTime.ToUniversalTime()
+        };
+        var liveFingerprint = await new VersionFingerprintService().CreateAsync(path);
+        var liveModulesDirectory = Environment.GetEnvironmentVariable("GVE_MODULES_DIRECTORY");
+        using var liveRegistry = new GameAdapterRegistry(liveModulesDirectory);
+        var adapter = liveRegistry.Resolve(liveItem, liveFingerprint)
+                      ?? throw new InvalidOperationException(
+                          $"WorldApart module rejected the current build: {string.Join(" | ", liveRegistry.LoadErrors)}");
+        Assert(adapter is IInventoryGameAdapter && adapter is ICharacterAttributesGameAdapter,
+            "WorldApart module did not expose both editors");
+        var inventoryAdapter = (IInventoryGameAdapter)adapter;
+        var characterAdapter = (ICharacterAttributesGameAdapter)adapter;
+        var inventory = inventoryAdapter.ReadInventory(liveItem);
+        Assert(inventory.Count > 0, "WorldApart inventory was empty");
+        var inventorySample = inventory.First(item => item.Count is >= 0 and <= int.MaxValue);
+        var inventorySameValue = adapter.WriteField(liveItem, inventorySample.FieldKey, inventorySample.CountDisplay);
+        Assert(inventorySameValue.DisplayValue == inventorySample.CountDisplay,
+            "WorldApart inventory same-value write verification failed");
+        var characters = characterAdapter.ReadCharacters(liveItem);
+        var character = characters.Single();
+        var attribute = character.Attributes.First(candidate => candidate.CanWrite && candidate.RawValue >= 0);
+        var characterSameValue = characterAdapter.WriteCharacterAttribute(
+            liveItem, character.CharacterId, attribute.Key, attribute.RawValue);
+        Assert(characterSameValue.Attributes.Single(candidate => candidate.Key == attribute.Key).RawValue == attribute.RawValue,
+            "WorldApart character same-value write verification failed");
+        Assert(adapter is IGameVersionMetadataProvider,
+            "WorldApart module did not expose game-declared version metadata");
+        var metadataProvider = (IGameVersionMetadataProvider)adapter;
+        var declared = metadataProvider.ReadGameVersionMetadata(liveItem.ToModuleContext());
+        Assert(!string.IsNullOrWhiteSpace(declared.Version) && !string.IsNullOrWhiteSpace(declared.ProductName),
+            "WorldApart game-declared version metadata was empty");
+        Console.WriteLine($"WorldApart live module passed: {declared.ProductName} {declared.Version}, " +
+                          $"inventory {inventorySample.DisplayName}={inventorySample.CountDisplay}, " +
+                          $"attribute {attribute.DisplayName}={attribute.RawValueDisplay}.");
     }
 
     Console.WriteLine("Smoke tests passed: codec, scaled routine, scanner, writer, fingerprint.");
