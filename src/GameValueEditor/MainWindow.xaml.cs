@@ -38,10 +38,17 @@ public partial class MainWindow : Window
         var updateFailure = _viewModel.TakeLastApplicationUpdateFailure();
         if (updateFailure is not null)
         {
+            var updateDirectory = Path.GetDirectoryName(updateFailure.LogPath) ?? AppContext.BaseDirectory;
             MessageDialog.ShowInfo(
                 this,
                 "更新未完成",
-                $"已继续使用当前版本。\n\n{updateFailure.Message}\n\n详细日志：\n{updateFailure.LogPath}");
+                $"已继续使用当前版本。\n\n{updateFailure.Message}\n\n详细日志：\n{updateFailure.LogPath}",
+                new MessageDialogAction("打开更新目录", () =>
+                    Process.Start(new ProcessStartInfo(updateDirectory) { UseShellExecute = true })),
+                new MessageDialogAction("打开下载页", () =>
+                    Process.Start(new ProcessStartInfo("https://github.com/BestWishes/GameValueEditor/releases/latest")
+                        { UseShellExecute = true })),
+                new MessageDialogAction("复制日志位置", () => Clipboard.SetText(updateFailure.LogPath)));
         }
     }
 

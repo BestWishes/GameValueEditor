@@ -12,7 +12,7 @@
     <RootNamespace>GameValueEditor</RootNamespace>
     <Product>肝肾大圣-单机游戏数值编辑器</Product>
     <Description>A local-first memory value editor for offline single-player games.</Description>
-    <Version>0.3.0-preview.16</Version>
+    <Version>0.3.0</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\GameValueEditorIcon.ico</ApplicationIcon>
   </PropertyGroup>
@@ -23,6 +23,10 @@
 
   <ItemGroup>
     <ProjectReference Include="..\GameValueEditor.ModuleSdk\GameValueEditor.ModuleSdk.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="GameValueEditor.SmokeTests" />
   </ItemGroup>
 
   <ItemGroup>

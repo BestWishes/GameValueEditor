@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -30,6 +31,7 @@ public sealed class ApplicationUpdateService
             _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("GameValueEditor-Updater/1.0");
             _httpClient.Timeout = TimeSpan.FromSeconds(30);
         }
+        CleanupStaleUpdateArtifacts();
     }
 
     public string PendingManifestPath => Path.Combine(_updatesDirectory, "pending-update.json");
@@ -70,18 +72,15 @@ public sealed class ApplicationUpdateService
         if (!SemanticVersion.TryParse(_currentVersion, out var current))
             throw new InvalidOperationException($"当前应用版本号无效：{_currentVersion}");
 
-        var acceptPrerelease = !string.IsNullOrEmpty(current.PreRelease);
         GitHubRelease? latestRelease = null;
         GitHubAsset? asset = null;
         SemanticVersion latest = default;
         var latestText = string.Empty;
         foreach (var release in releases)
         {
-            if (release.Draft) continue;
+            if (release.Draft || release.Prerelease) continue;
             var releaseText = release.TagName.TrimStart('v', 'V');
             if (!SemanticVersion.TryParse(releaseText, out var releaseVersion)) continue;
-            if (!acceptPrerelease && (release.Prerelease || !string.IsNullOrEmpty(releaseVersion.PreRelease)))
-                continue;
             var releaseAsset = release.Assets.FirstOrDefault(candidate => IsApplicationPackage(candidate, releaseText));
             if (releaseAsset is null || latestRelease is not null && releaseVersion.CompareTo(latest) <= 0) continue;
             latestRelease = release;
@@ -140,6 +139,7 @@ public sealed class ApplicationUpdateService
             var pendingTemporary = PendingManifestPath + ".tmp";
             await File.WriteAllTextAsync(pendingTemporary, JsonSerializer.Serialize(pending, JsonOptions), cancellationToken);
             File.Move(pendingTemporary, PendingManifestPath, true);
+            CleanupStaleUpdateArtifacts();
             return pending;
         }
         finally
@@ -154,12 +154,7 @@ public sealed class ApplicationUpdateService
     public bool LaunchPendingUpdate(bool restartApplication)
     {
         if (!File.Exists(PendingManifestPath)) return false;
-        var updater = Path.Combine(AppContext.BaseDirectory, "GameValueEditor.Updater.exe");
-        if (!File.Exists(updater))
-            throw new InvalidOperationException("应用目录缺少 GameValueEditor.Updater.exe，无法安装已下载更新。");
-        Directory.CreateDirectory(_updatesDirectory);
-        var runner = Path.Combine(_updatesDirectory, $"updater-{Guid.NewGuid():N}.exe");
-        File.Copy(updater, runner, true);
+        var runner = PrepareUpdaterRunner();
         var start = new ProcessStartInfo(runner)
         {
             UseShellExecute = false,
@@ -172,8 +167,54 @@ public sealed class ApplicationUpdateService
         start.ArgumentList.Add("--app-dir");
         start.ArgumentList.Add(AppContext.BaseDirectory);
         if (restartApplication) start.ArgumentList.Add("--restart");
-        _ = Process.Start(start) ?? throw new InvalidOperationException("无法启动更新程序。");
-        return true;
+        try
+        {
+            _ = Process.Start(start) ?? throw new InvalidOperationException("无法启动更新程序。");
+            return true;
+        }
+        catch
+        {
+            TryDeleteFile(runner);
+            throw;
+        }
+    }
+
+    internal string PrepareUpdaterRunner()
+    {
+        var pending = JsonSerializer.Deserialize<PendingApplicationUpdate>(
+                          File.ReadAllText(PendingManifestPath), JsonOptions)
+                      ?? throw new InvalidOperationException("待安装更新记录无效。");
+        var updatesRoot = EnsureDirectoryRoot(_updatesDirectory);
+        var archivePath = Path.GetFullPath(pending.ArchivePath);
+        if (!archivePath.StartsWith(updatesRoot, StringComparison.OrdinalIgnoreCase) || !File.Exists(archivePath))
+            throw new InvalidOperationException("待安装更新包不在受信任的更新目录中。");
+        var actualHash = ComputeSha256(archivePath);
+        if (!actualHash.Equals(pending.Sha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("待安装更新包的 SHA-256 已变化，已取消安装。");
+
+        Directory.CreateDirectory(_updatesDirectory);
+        var runner = Path.Combine(_updatesDirectory, $"updater-{Guid.NewGuid():N}.exe");
+        try
+        {
+            using var archive = ZipFile.OpenRead(archivePath);
+            var updaterEntries = archive.Entries.Where(entry =>
+                    string.Equals(entry.FullName.Replace('\\', '/'), "GameValueEditor.Updater.exe",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrEmpty(entry.Name))
+                .ToList();
+            if (updaterEntries.Count != 1)
+                throw new InvalidOperationException("更新包必须且只能在根目录包含一个 GameValueEditor.Updater.exe。");
+            using var source = updaterEntries[0].Open();
+            using var destination = new FileStream(runner, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            source.CopyTo(destination);
+            if (destination.Length == 0) throw new InvalidOperationException("更新包中的更新程序为空。");
+            return runner;
+        }
+        catch
+        {
+            TryDeleteFile(runner);
+            throw;
+        }
     }
 
     public static bool TryLaunchPendingAtStartup()
@@ -188,6 +229,87 @@ public sealed class ApplicationUpdateService
         await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
         var hash = await SHA256.HashDataAsync(stream, cancellationToken);
         return Convert.ToHexString(hash);
+    }
+
+    private static string ComputeSha256(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        return Convert.ToHexString(SHA256.HashData(stream));
+    }
+
+    private void CleanupStaleUpdateArtifacts()
+    {
+        if (!Directory.Exists(_updatesDirectory)) return;
+        try
+        {
+            var updatesRoot = EnsureDirectoryRoot(_updatesDirectory);
+            string? retainedArchive = null;
+            if (File.Exists(PendingManifestPath))
+            {
+                try
+                {
+                    var pending = JsonSerializer.Deserialize<PendingApplicationUpdate>(
+                        File.ReadAllText(PendingManifestPath), JsonOptions);
+                    if (pending is not null)
+                    {
+                        var candidate = Path.GetFullPath(pending.ArchivePath);
+                        if (candidate.StartsWith(updatesRoot, StringComparison.OrdinalIgnoreCase))
+                            retainedArchive = candidate;
+                    }
+                }
+                catch
+                {
+                    // A damaged pending manifest is handled by the normal startup path.
+                }
+            }
+
+            foreach (var file in Directory.EnumerateFiles(_updatesDirectory, "updater-*.exe", SearchOption.TopDirectoryOnly))
+                TryDeleteFile(file);
+            foreach (var file in Directory.EnumerateFiles(_updatesDirectory, "failed-update-*.json", SearchOption.TopDirectoryOnly))
+                TryDeleteFile(file);
+            TryDeleteFile(PendingManifestPath + ".tmp");
+
+            foreach (var directory in Directory.EnumerateDirectories(_updatesDirectory, "extract-*", SearchOption.TopDirectoryOnly))
+                TryDeleteDirectory(directory);
+            foreach (var directory in Directory.EnumerateDirectories(_updatesDirectory, "*", SearchOption.TopDirectoryOnly))
+            {
+                var directoryRoot = EnsureDirectoryRoot(directory);
+                if (retainedArchive is not null && retainedArchive.StartsWith(directoryRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (var file in Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly))
+                        if (!string.Equals(Path.GetFullPath(file), retainedArchive, StringComparison.OrdinalIgnoreCase))
+                            TryDeleteFile(file);
+                    continue;
+                }
+                TryDeleteDirectory(directory);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            // Cleanup is best-effort and must never prevent the installed application from starting.
+        }
+    }
+
+    private static string EnsureDirectoryRoot(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        return Path.EndsInDirectorySeparator(fullPath) ? fullPath : fullPath + Path.DirectorySeparatorChar;
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try { if (Directory.Exists(path)) Directory.Delete(path, true); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+        }
     }
 
     private static string Sanitize(string value) =>

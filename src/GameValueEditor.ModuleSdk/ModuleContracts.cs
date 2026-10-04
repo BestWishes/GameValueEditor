@@ -4,7 +4,7 @@ namespace GameValueEditor.ModuleSdk;
 
 public static class ModuleHostApi
 {
-    public const int CurrentVersion = 2;
+    public const int CurrentVersion = 3;
 }
 
 public static class ModuleFieldKey

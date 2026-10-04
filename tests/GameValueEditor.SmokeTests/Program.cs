@@ -150,17 +150,19 @@ try
     Assert(Path.GetFullPath(ProfileStore.DefaultRoot).StartsWith(Path.GetFullPath(AppContext.BaseDirectory), StringComparison.OrdinalIgnoreCase),
         "Default profile directory must stay beside the application");
 
-    Assert(SemanticVersion.TryParse("0.3.0-preview.1", out var previewVersion), "Preview version parse failed");
-    Assert(SemanticVersion.TryParse("0.3.0", out var formalVersion), "Formal version parse failed");
-    Assert(formalVersion.CompareTo(previewVersion) > 0, "Formal release must supersede its preview");
+    Assert(!SemanticVersion.TryParse("0.3.0-preview.1", out _),
+        "Application versions must not accept prerelease suffixes");
+    Assert(SemanticVersion.TryParse("0.3.0", out var formalVersion) &&
+           formalVersion == new SemanticVersion(0, 3, 0), "Formal version parse failed");
     Assert(SemanticVersion.TryParse("1.2.10", out var higherPatch) &&
            SemanticVersion.TryParse("1.2.9", out var lowerPatch) && higherPatch.CompareTo(lowerPatch) > 0,
         "Semantic patch comparison failed");
+    Assert(ModuleHostApi.CurrentVersion == 3, "Host API version was not advanced for entity editor contracts");
 
     if (args.Contains("--update-live", StringComparer.OrdinalIgnoreCase))
     {
         var liveUpdateRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-LiveUpdate-{Guid.NewGuid():N}");
-        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.16");
+        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0");
         var liveUpdate = await liveUpdateService.CheckAsync();
         Assert(liveUpdate.AssetName.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
                liveUpdate.AssetName.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase),
@@ -592,17 +594,28 @@ try
             }]
           },
           {
-            "tag_name": "v0.3.0-preview.2",
+            "tag_name": "v9.0.0",
             "draft": false,
             "prerelease": true,
             "assets": [{
-              "name": "GameValueEditor-v0.3.0-preview.2-complete-offline-win-x64.zip",
+              "name": "GameValueEditor-v9.0.0-win-x64.zip",
+              "browser_download_url": "https://example.invalid/prerelease.zip",
+              "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "size": 999
+            }]
+          },
+          {
+            "tag_name": "v0.3.0",
+            "draft": false,
+            "prerelease": false,
+            "assets": [{
+              "name": "GameValueEditor-v0.3.0-complete-offline-win-x64.zip",
               "browser_download_url": "https://example.invalid/complete-offline.zip",
               "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
               "size": 999
             },{
-              "name": "GameValueEditor-v0.3.0-preview.2-win-x64.zip",
-              "browser_download_url": "https://example.invalid/preview.zip",
+              "name": "GameValueEditor-v0.3.0-win-x64.zip",
+              "browser_download_url": "https://example.invalid/stable.zip",
               "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
               "size": 456
             }]
@@ -625,28 +638,28 @@ try
             {
                 Content = new StringContent(releasesJson, Encoding.UTF8, "application/json")
             }));
-        var previewUpdateService = new ApplicationUpdateService(
-            Path.Combine(serviceTestRoot, "preview-updates"), releasesClient, "0.3.0-preview.1");
-        var previewUpdate = await previewUpdateService.CheckAsync();
-        Assert(previewUpdate.IsUpdateAvailable && previewUpdate.Version == "0.3.0-preview.2",
-            "Preview channel did not select the newest application preview after ignoring module releases");
-        Assert(previewUpdate.AssetName == "GameValueEditor-v0.3.0-preview.2-win-x64.zip",
+        var stableUpdateService = new ApplicationUpdateService(
+            Path.Combine(serviceTestRoot, "stable-updates"), releasesClient, "0.2.0");
+        var stableUpdate = await stableUpdateService.CheckAsync();
+        Assert(stableUpdate.IsUpdateAvailable && stableUpdate.Version == "0.3.0",
+            "Stable updater did not select the newest formal application release");
+        Assert(stableUpdate.AssetName == "GameValueEditor-v0.3.0-win-x64.zip",
             "Application updater selected the complete offline bundle instead of the standard host package");
-        var availableUpdateViewModel = new MainViewModel(previewUpdateService);
+        var availableUpdateViewModel = new MainViewModel(stableUpdateService);
         await availableUpdateViewModel.CheckApplicationUpdateAsync();
         Assert(availableUpdateViewModel.HasApplicationUpdateAvailable && availableUpdateViewModel.CanUseApplicationUpdate,
             "Newly available update remained disabled by the check-button cooldown");
         availableUpdateViewModel.Shutdown();
-        var stableUpdateService = new ApplicationUpdateService(
-            Path.Combine(serviceTestRoot, "stable-updates"), releasesClient, "0.2.0");
-        var stableUpdate = await stableUpdateService.CheckAsync();
-        Assert(!stableUpdate.IsUpdateAvailable && stableUpdate.Version == "0.2.0",
-            "Stable channel unexpectedly selected an application preview or a module release");
+        var currentUpdateService = new ApplicationUpdateService(
+            Path.Combine(serviceTestRoot, "current-updates"), releasesClient, "0.3.0");
+        var currentUpdate = await currentUpdateService.CheckAsync();
+        Assert(!currentUpdate.IsUpdateAvailable && currentUpdate.Version == "0.3.0",
+            "Current formal version unexpectedly selected a prerelease or module release");
 
         using var failingUpdateClient = new HttpClient(new StaticResponseHandler(_ =>
             new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)));
         var failingUpdateViewModel = new MainViewModel(new ApplicationUpdateService(
-            Path.Combine(serviceTestRoot, "failing-updates"), failingUpdateClient, "0.3.0-preview.2"));
+            Path.Combine(serviceTestRoot, "failing-updates"), failingUpdateClient, "0.3.0"));
         try
         {
             await failingUpdateViewModel.CheckApplicationUpdateAsync();
@@ -700,6 +713,44 @@ try
         Assert(updateService.TakeLastFailure()?.Message == "文件仍被占用" &&
                updateService.TakeLastFailure() is null,
             "Application update failure notice was not returned exactly once");
+
+        var bootstrapRoot = Path.Combine(serviceTestRoot, "bootstrap");
+        var bootstrapUpdates = Path.Combine(bootstrapRoot, "data", "updates");
+        var bootstrapVersionDirectory = Path.Combine(bootstrapUpdates, "1.0.0");
+        Directory.CreateDirectory(bootstrapVersionDirectory);
+        var bootstrapArchive = Path.Combine(bootstrapVersionDirectory, "GameValueEditor-v1.0.0-win-x64.zip");
+        var packagedUpdater = Encoding.UTF8.GetBytes("new-updater-from-verified-package");
+        using (var archive = ZipFile.Open(bootstrapArchive, ZipArchiveMode.Create))
+        {
+            var updaterEntry = archive.CreateEntry("GameValueEditor.Updater.exe");
+            await using (var updaterStream = updaterEntry.Open())
+                await updaterStream.WriteAsync(packagedUpdater);
+            var applicationEntry = archive.CreateEntry("GameValueEditor.exe");
+            await using (var applicationStream = applicationEntry.Open())
+                await applicationStream.WriteAsync(Encoding.UTF8.GetBytes("new-app"));
+        }
+        var bootstrapHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(bootstrapArchive)));
+        await File.WriteAllTextAsync(Path.Combine(bootstrapUpdates, "pending-update.json"),
+            $$"""{"Version":"1.0.0","ArchivePath":"{{bootstrapArchive.Replace("\\", "\\\\")}}","Sha256":"{{bootstrapHash}}","DownloadedUtc":"2026-10-05T00:00:00Z"}""");
+        await File.WriteAllTextAsync(Path.Combine(bootstrapUpdates, "updater-stale.exe"), "old-broken-updater");
+        await File.WriteAllTextAsync(Path.Combine(bootstrapUpdates, "failed-update-stale.json"), "{}");
+        await File.WriteAllTextAsync(Path.Combine(bootstrapUpdates, "update-error.log"), "retain latest error");
+        Directory.CreateDirectory(Path.Combine(bootstrapUpdates, "extract-stale"));
+        var staleVersionDirectory = Path.Combine(bootstrapUpdates, "0.9.0");
+        Directory.CreateDirectory(staleVersionDirectory);
+        await File.WriteAllTextAsync(Path.Combine(staleVersionDirectory, "old.zip"), "old");
+
+        var bootstrapService = new ApplicationUpdateService(bootstrapUpdates);
+        Assert(File.Exists(bootstrapArchive) && File.Exists(Path.Combine(bootstrapUpdates, "update-error.log")),
+            "Update cleanup removed the active package or latest diagnostic");
+        Assert(!File.Exists(Path.Combine(bootstrapUpdates, "updater-stale.exe")) &&
+               !File.Exists(Path.Combine(bootstrapUpdates, "failed-update-stale.json")) &&
+               !Directory.Exists(Path.Combine(bootstrapUpdates, "extract-stale")) &&
+               !Directory.Exists(staleVersionDirectory),
+            "Update cleanup left stale runners, manifests, extraction directories, or old packages");
+        var preparedRunner = bootstrapService.PrepareUpdaterRunner();
+        Assert((await File.ReadAllBytesAsync(preparedRunner)).SequenceEqual(packagedUpdater),
+            "Update bootstrap did not select the updater from the verified target package");
     }
     finally
     {

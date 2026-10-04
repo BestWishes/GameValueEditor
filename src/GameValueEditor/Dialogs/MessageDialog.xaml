@@ -12,10 +12,13 @@
         <TextBlock x:Name="TitleText" FontSize="20" FontWeight="SemiBold"/>
         <TextBlock x:Name="MessageText" Grid.Row="1" Margin="0,12,0,22"
                    Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap"/>
-        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button x:Name="CancelButton" Content="取消" IsCancel="True" MinWidth="80"/>
-            <Button Content="确定" IsDefault="True"
-                    MinWidth="80" Click="Confirm_OnClick"/>
-        </StackPanel>
+        <DockPanel Grid.Row="2" LastChildFill="False">
+            <StackPanel x:Name="ActionButtonsPanel" DockPanel.Dock="Left" Orientation="Horizontal"/>
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                <Button x:Name="CancelButton" Content="取消" IsCancel="True" MinWidth="80"/>
+                <Button Content="确定" IsDefault="True"
+                        MinWidth="80" Click="Confirm_OnClick"/>
+            </StackPanel>
+        </DockPanel>
     </Grid>
 </Window>

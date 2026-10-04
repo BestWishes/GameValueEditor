@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "0.3.0-preview.16"
+    [string]$Version = "0.3.0"
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,6 +24,12 @@ foreach ($path in @($publishDir, $updaterPublishDir, $packageDir)) {
 New-Item -ItemType Directory -Path $publishDir -Force | Out-Null
 New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
 New-Item -ItemType Directory -Path $distDir -Force | Out-Null
+
+foreach ($oldArchive in Get-ChildItem -LiteralPath $distDir -File -Filter "GameValueEditor-v*.zip") {
+    if (-not [string]::Equals($oldArchive.FullName, $archivePath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Remove-Item -LiteralPath $oldArchive.FullName -Force
+    }
+}
 
 dotnet publish (Join-Path $repoRoot "src\GameValueEditor\GameValueEditor.csproj") `
     -c Release `

@@ -86,7 +86,7 @@ games/example/
   "gameDisplayName": "示例游戏",
   "description": "示例游戏的背包编辑能力。",
   "assemblyFile": "GameValueEditor.Modules.Example.dll",
-  "hostApiVersion": 2,
+  "hostApiVersion": 3,
   "processNames": ["ExampleGame"],
   "compatibleBuilds": [
     {
