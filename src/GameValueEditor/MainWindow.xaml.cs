@@ -246,20 +246,23 @@ public partial class MainWindow : Window
     private async void RefreshAdapterInventory_OnClick(object sender, RoutedEventArgs e) =>
         await RunGuardedAsync(_viewModel.RefreshAdapterInventoryAsync);
 
-    private async void WriteAdapterItem_OnClick(object sender, RoutedEventArgs e) =>
-        await EditSelectedAdapterItemsAsync();
+    private async void WriteAdapterItem_OnClick(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is DataGrid grid)
+            await EditSelectedAdapterItemsAsync(grid);
+    }
 
     private async void AdapterInventoryGrid_OnMouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
         if (FindAncestor<DataGridRow>(e.OriginalSource as DependencyObject) is null) return;
-        await EditSelectedAdapterItemsAsync();
+        if (sender is DataGrid grid) await EditSelectedAdapterItemsAsync(grid);
     }
 
-    private async Task EditSelectedAdapterItemsAsync()
+    private async Task EditSelectedAdapterItemsAsync(DataGrid grid)
     {
         await RunGuardedAsync(async () =>
         {
-            var items = AdapterInventoryGrid.SelectedItems.Cast<AdapterInventoryItem>().ToList();
+            var items = grid.SelectedItems.Cast<AdapterInventoryItem>().ToList();
             if (items.Count == 0) throw new InvalidOperationException("请至少选择一个背包物品。");
             var initialValue = items.Count == 1 ? items[0].CountDisplay : string.Empty;
             var prompt = items.Count == 1
@@ -276,9 +279,10 @@ public partial class MainWindow : Window
 
     private async void SaveAdapterItem_OnClick(object sender, RoutedEventArgs e)
     {
+        if ((sender as FrameworkElement)?.Tag is not DataGrid grid) return;
         await RunGuardedAsync(async () =>
         {
-            var selected = AdapterInventoryGrid.SelectedItems.Cast<AdapterInventoryItem>().ToList();
+            var selected = grid.SelectedItems.Cast<AdapterInventoryItem>().ToList();
             if (selected.Count != 1) throw new InvalidOperationException("添加到已保存字段只支持单选，请只选择一种物品。");
             var item = selected[0];
             _viewModel.SelectedAdapterItem = item;
@@ -326,13 +330,6 @@ public partial class MainWindow : Window
         if (SaveScanFieldButton is not null) SaveScanFieldButton.IsEnabled = count == 1;
     }
 
-    private void AdapterInventoryGrid_OnSelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        var count = AdapterInventoryGrid.SelectedItems.Count;
-        if (WriteAdapterItemsButton is not null) WriteAdapterItemsButton.IsEnabled = count > 0;
-        if (SaveAdapterFieldButton is not null) SaveAdapterFieldButton.IsEnabled = count == 1;
-    }
-
     private async void RefreshAdapterCharacters_OnClick(object sender, RoutedEventArgs e) =>
         await RunGuardedAsync(_viewModel.RefreshAdapterCharactersAsync);
 
@@ -353,7 +350,7 @@ public partial class MainWindow : Window
                             ?? throw new InvalidOperationException("请先选择一个人物。");
             var attribute = _viewModel.SelectedCharacterAttribute
                             ?? throw new InvalidOperationException("请先选择一个人物属性。");
-            var lifetimeNote = _viewModel.IsCharacterEditorSessionOnly ? "（仅本次游戏运行有效）" : string.Empty;
+            var lifetimeNote = _viewModel.IsSelectedCharacterFieldSessionOnly ? "（仅本次游戏运行有效）" : string.Empty;
             var dialog = new TextInputDialog(
                 "修改人物属性",
                 $"输入“{character.DisplayName}”的{attribute.DisplayName}目标值{lifetimeNote}：",
@@ -379,13 +376,6 @@ public partial class MainWindow : Window
             if (dialog.ShowDialog() != true) return;
             await _viewModel.AddCharacterAttributeFieldAsync(dialog.DisplayName, dialog.GroupName);
         });
-    }
-
-    private void AdapterCharacterAttributesGrid_OnSelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        var enabled = AdapterCharacterAttributesGrid.SelectedItem is AdapterCharacterAttribute { CanWrite: true };
-        if (WriteCharacterAttributeButton is not null) WriteCharacterAttributeButton.IsEnabled = enabled;
-        if (SaveCharacterFieldButton is not null) SaveCharacterFieldButton.IsEnabled = enabled;
     }
 
     private async void RefreshEntityEditor_OnClick(object sender, RoutedEventArgs e)

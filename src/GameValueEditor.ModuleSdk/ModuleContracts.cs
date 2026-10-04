@@ -4,7 +4,7 @@ namespace GameValueEditor.ModuleSdk;
 
 public static class ModuleHostApi
 {
-    public const int CurrentVersion = 3;
+    public const int CurrentVersion = 4;
 }
 
 public static class ModuleFieldKey
@@ -57,6 +57,39 @@ public sealed record GameEditorDescriptor(
     int Order,
     string Description,
     bool SessionOnly = false);
+
+public enum GameEditorPageRole
+{
+    Inventory,
+    CharacterAttributes,
+    Entity
+}
+
+/// <summary>
+/// Binds a module-owned editor identity to one of the host's reusable page templates.
+/// The module controls which pages exist and their semantic identity; the host only
+/// supplies the shared visual shell for the selected role.
+/// </summary>
+public sealed record GameEditorPageRegistration(
+    string EditorId,
+    GameEditorPageRole Role,
+    string EmptyMessage = "");
+
+public interface IGameEditorPageProvider : IGameAdapter
+{
+    IReadOnlyList<GameEditorPageRegistration> EditorPages { get; }
+}
+
+public sealed record GameEditorFieldPolicy(bool SessionOnly, bool CanLock);
+
+/// <summary>
+/// Optional per-field lifetime policy. Modules use this when one editor contains a
+/// mix of persisted fields and fields that only live for the current game session.
+/// </summary>
+public interface IGameEditorFieldPolicyProvider : IGameAdapter
+{
+    GameEditorFieldPolicy? GetFieldPolicy(string editorId, string entityId, string fieldId);
+}
 
 public interface IGameAdapter
 {

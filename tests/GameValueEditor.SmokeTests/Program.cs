@@ -157,12 +157,17 @@ try
     Assert(SemanticVersion.TryParse("1.2.10", out var higherPatch) &&
            SemanticVersion.TryParse("1.2.9", out var lowerPatch) && higherPatch.CompareTo(lowerPatch) > 0,
         "Semantic patch comparison failed");
-    Assert(ModuleHostApi.CurrentVersion == 3, "Host API version was not advanced for entity editor contracts");
+    Assert(ModuleHostApi.CurrentVersion == 4, "Host API version was not advanced for module-owned page contracts");
+    var api4Adapter = new SmokeTestModuleAdapter();
+    GameEditorPageResolver.ValidateApi4Provider(api4Adapter);
+    Assert(GameEditorPageResolver.Resolve(api4Adapter).Select(page => page.EditorId)
+               .SequenceEqual(api4Adapter.Editors.Select(editor => editor.Id)),
+        "Host API 4 module-owned page order or identity was not retained");
 
     if (args.Contains("--update-live", StringComparer.OrdinalIgnoreCase))
     {
         var liveUpdateRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-LiveUpdate-{Guid.NewGuid():N}");
-        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0");
+        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.4.0");
         var liveUpdate = await liveUpdateService.CheckAsync();
         Assert(liveUpdate.AssetName.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
                liveUpdate.AssetName.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase),
@@ -907,20 +912,28 @@ try
                     "Editor disconnect button must follow the selected library game");
                 var editorModulesTabControl = (TabControl?)mainWindow.FindName("EditorModulesTabControl")
                                               ?? throw new InvalidOperationException("Editor modules tab control was not created");
-                var inventoryEditorTab = (TabItem?)mainWindow.FindName("InventoryEditorTab")
-                                         ?? throw new InvalidOperationException("Inventory editor tab was not created");
-                var characterAttributesEditorTab = (TabItem?)mainWindow.FindName("CharacterAttributesEditorTab")
-                                                   ?? throw new InvalidOperationException("Character attributes editor tab was not created");
                 var mainTabs = (TabControl?)mainWindow.FindName("MainTabs")
                                ?? throw new InvalidOperationException("Main tab control was not created");
+                var renderViewModel = (MainViewModel)mainWindow.DataContext;
+                renderViewModel.AdapterEditorPages.Add(new AdapterInventoryEditorPageState(
+                    new("test.inventory", "背包物品", GameEditorKind.Collection, 100, "测试集合页面"),
+                    new("test.inventory", GameEditorPageRole.Inventory)));
+                renderViewModel.AdapterEditorPages.Add(new AdapterCharacterEditorPageState(
+                    new("test.characters", "人物属性", GameEditorKind.MasterDetail, 200, "测试人物页面"),
+                    new("test.characters", GameEditorPageRole.CharacterAttributes),
+                    true));
+                renderViewModel.SelectedAdapterEditorPage = renderViewModel.AdapterEditorPages[0];
                 mainTabs.SelectedIndex = 0;
                 editorModulesTabControl.Visibility = Visibility.Visible;
-                characterAttributesEditorTab.Visibility = Visibility.Visible;
                 editorModulesTabControl.ApplyTemplate();
                 var root = (FrameworkElement)mainWindow.Content;
                 root.Measure(new Size(1320, 820));
                 root.Arrange(new Rect(0, 0, 1320, 820));
                 mainWindow.UpdateLayout();
+                var inventoryEditorTab = (TabItem?)editorModulesTabControl.ItemContainerGenerator.ContainerFromIndex(0)
+                                         ?? throw new InvalidOperationException("Dynamic inventory page tab was not created");
+                var characterAttributesEditorTab = (TabItem?)editorModulesTabControl.ItemContainerGenerator.ContainerFromIndex(1)
+                                                   ?? throw new InvalidOperationException("Dynamic character page tab was not created");
                 var editorModuleHeaderPanel = (TabPanel?)editorModulesTabControl.Template.FindName(
                                                   "PART_EditorModuleHeaderPanel", editorModulesTabControl)
                                               ?? throw new InvalidOperationException("Vertical editor module header panel was not created");
@@ -936,7 +949,6 @@ try
                 var characterTabPosition = characterAttributesEditorTab.TranslatePoint(new Point(), editorModuleHeaderPanel);
                 Assert(characterTabPosition.Y >= inventoryTabPosition.Y + inventoryEditorTab.ActualHeight,
                     "Editor module names must stack vertically in the left navigation");
-                var renderViewModel = (MainViewModel)mainWindow.DataContext;
                 Assert(renderViewModel.Themes.Select(choice => choice.Display).SequenceEqual(
                         ["浅色", "深色", "护眼墨绿", "暖砂纸张", "雾蓝灰"]),
                     "Theme selector does not expose the five expected themes");
@@ -1175,7 +1187,7 @@ static byte[] CreateModuleArchive(string id, string version, string assemblyPath
         var manifest = archive.CreateEntry("module.json");
         using (var writer = new StreamWriter(manifest.Open(), Encoding.UTF8, leaveOpen: false))
             writer.Write($$"""
-            {"id":"{{id}}","version":"{{version}}","displayName":"测试专属模块","gameDisplayName":"测试游戏","description":"测试","assemblyFile":"{{Path.GetFileName(assemblyPath)}}","hostApiVersion":2,"processNames":["MatchedGame"],"compatibleBuilds":[{"executableSha256":"EXE","gameAssemblySha256":"ASM","metadataSha256":"META"}],"contributors":[{"githubLogin":"tester","displayName":"测试贡献者","profileUrl":"https://github.com/tester","firstContributionDate":"2026-01-01","latestContributionDate":"2026-01-02"}],"editors":[{"id":"test.inventory","displayName":"背包物品","kind":"collection","order":100,"sessionOnly":false},{"id":"test.characters","displayName":"人物属性","kind":"master-detail","order":200,"sessionOnly":true}]}
+            {"id":"{{id}}","version":"{{version}}","displayName":"测试专属模块","gameDisplayName":"测试游戏","description":"测试","assemblyFile":"{{Path.GetFileName(assemblyPath)}}","hostApiVersion":2,"processNames":["MatchedGame"],"compatibleBuilds":[{"executableSha256":"EXE","gameAssemblySha256":"ASM","metadataSha256":"META"}],"contributors":[{"githubId":1,"githubLogin":"tester","displayName":"测试贡献者","profileUrl":"https://github.com/tester","firstContributionDate":"2026-01-01","latestContributionDate":"2026-01-02"}],"editors":[{"id":"test.inventory","displayName":"背包物品","kind":"collection","order":100,"sessionOnly":false},{"id":"test.characters","displayName":"人物属性","kind":"master-detail","order":200,"sessionOnly":true}]}
             """);
         var assembly = archive.CreateEntry(Path.GetFileName(assemblyPath));
         using var assemblyStream = assembly.Open();
@@ -1195,7 +1207,10 @@ static GameAdapterRegistry LoadAndVerifyInstalledModule(string modulesDirectory)
     return installedRegistry;
 }
 
-public sealed class SmokeTestModuleAdapter : IInventoryGameAdapter, ICharacterAttributesGameAdapter
+public sealed class SmokeTestModuleAdapter :
+    IInventoryGameAdapter,
+    ICharacterAttributesGameAdapter,
+    IGameEditorPageProvider
 {
     public string Id => "game.test.multi-editor";
     public string DisplayName => "测试多编辑器游戏模块";
@@ -1204,6 +1219,11 @@ public sealed class SmokeTestModuleAdapter : IInventoryGameAdapter, ICharacterAt
     [
         new("test.inventory", "背包物品", GameEditorKind.Collection, 100, "测试集合编辑器"),
         new("test.characters", "人物属性", GameEditorKind.MasterDetail, 200, "测试主从编辑器", true)
+    ];
+    public IReadOnlyList<GameEditorPageRegistration> EditorPages { get; } =
+    [
+        new("test.inventory", GameEditorPageRole.Inventory),
+        new("test.characters", GameEditorPageRole.CharacterAttributes)
     ];
     public bool Supports(GameProcessContext process, GameBuildIdentity fingerprint) => true;
     public AdapterFieldValue ReadField(GameProcessContext process, string fieldKey) => new(fieldKey, "1", "测试");

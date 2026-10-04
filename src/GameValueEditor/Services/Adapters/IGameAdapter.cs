@@ -254,6 +254,7 @@ public sealed class GameAdapterRegistry : IDisposable
             if (manifestIds.Count != manifest.Editors.Count || !manifestIds.SetEquals(adapterIds))
                 throw new InvalidOperationException("module.json 的编辑模块列表与程序集不一致。");
         }
+        if (manifest.HostApiVersion >= 4) GameEditorPageResolver.ValidateApi4Provider(adapter);
     }
 
     private static bool IsSafePathSegment(string value) =>

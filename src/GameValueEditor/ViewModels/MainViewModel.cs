@@ -68,10 +68,9 @@ public sealed class MainViewModel : ObservableObject
     private AdapterInventoryItem? _selectedAdapterItem;
     private AdapterCharacterItem? _selectedAdapterCharacter;
     private AdapterCharacterAttribute? _selectedCharacterAttribute;
-    private AdapterEntityEditorState? _equipmentEditor;
-    private AdapterEntityEditorState? _materialsEditor;
-    private AdapterEntityEditorState? _monolithEditor;
-    private AdapterEntityEditorState? _worldEditor;
+    private readonly ObservableCollection<AdapterEditorPageState> _adapterEditorPages = [];
+    private AdapterCharacterEditorPageState? _characterEditorPage;
+    private AdapterEditorPageState? _selectedAdapterEditorPage;
     private string _adapterItemNameFilter = string.Empty;
     private string _adapterItemCountFilter = string.Empty;
     private string _characterAttributeNameFilter = string.Empty;
@@ -174,10 +173,12 @@ public sealed class MainViewModel : ObservableObject
     public ICollectionView? CharacterAttributesView => _characterAttributesView;
     public ObservableCollection<AdapterInventoryItem> AdapterInventoryItems => _adapterInventoryItems;
     public ObservableCollection<AdapterCharacterItem> AdapterCharacters => _adapterCharacters;
-    public AdapterEntityEditorState? EquipmentEditor { get => _equipmentEditor; private set => SetProperty(ref _equipmentEditor, value); }
-    public AdapterEntityEditorState? MaterialsEditor { get => _materialsEditor; private set => SetProperty(ref _materialsEditor, value); }
-    public AdapterEntityEditorState? MonolithEditor { get => _monolithEditor; private set => SetProperty(ref _monolithEditor, value); }
-    public AdapterEntityEditorState? WorldEditor { get => _worldEditor; private set => SetProperty(ref _worldEditor, value); }
+    public ObservableCollection<AdapterEditorPageState> AdapterEditorPages => _adapterEditorPages;
+    public AdapterEditorPageState? SelectedAdapterEditorPage
+    {
+        get => _selectedAdapterEditorPage;
+        set => SetProperty(ref _selectedAdapterEditorPage, value);
+    }
     public ObservableCollection<ScanCandidate> VisibleScanResults { get => _visibleScanResults; private set => SetProperty(ref _visibleScanResults, value); }
     public GameProfile? SelectedGame
     {
@@ -280,7 +281,11 @@ public sealed class MainViewModel : ObservableObject
     public AdapterCharacterAttribute? SelectedCharacterAttribute
     {
         get => _selectedCharacterAttribute;
-        set => SetProperty(ref _selectedCharacterAttribute, value);
+        set
+        {
+            if (!SetProperty(ref _selectedCharacterAttribute, value)) return;
+            OnPropertyChanged(nameof(IsSelectedCharacterFieldSessionOnly));
+        }
     }
     public string AdapterItemNameFilter
     {
@@ -399,18 +404,12 @@ public sealed class MainViewModel : ObservableObject
     public bool HasScanSession => _scanCandidates is { Count: > 0 };
     public bool CanUndoScan => !IsBusy && _scanHistory.Count > 0;
     public bool HasActiveAdapter => _activeAdapter is not null;
-    public bool HasActiveInventoryAdapter => _activeAdapter is IInventoryGameAdapter;
-    public bool HasCharacterEditor => _activeAdapter is ICharacterAttributesGameAdapter;
-    public bool HasActiveCharacterAdapter =>
-        _activeAdapter is ICharacterAttributesGameAdapter adapter && AttachedProcess is not null &&
-        adapter.SupportsCharacterAttributes(AttachedProcess);
-    public bool HasUnsupportedCharacterAdapter =>
-        _activeAdapter is ICharacterAttributesGameAdapter && !HasActiveCharacterAdapter;
-    public bool HasEquipmentEditor => EquipmentEditor is not null;
-    public bool HasMaterialsEditor => MaterialsEditor is not null;
-    public bool HasMonolithEditor => MonolithEditor is not null;
-    public bool HasWorldEditor => WorldEditor is not null;
+    public bool HasActiveInventoryAdapter => AdapterEditorPages.OfType<AdapterInventoryEditorPageState>().Any();
+    public bool HasCharacterEditor => _characterEditorPage is not null;
+    public bool HasActiveCharacterAdapter => _characterEditorPage?.IsSupported == true;
+    public bool HasUnsupportedCharacterAdapter => _characterEditorPage?.IsUnsupported == true;
     public bool IsCharacterEditorSessionOnly => ActiveCharacterEditorDescriptor?.SessionOnly == true;
+    public bool IsSelectedCharacterFieldSessionOnly => GetSelectedCharacterFieldPolicy().SessionOnly;
     public string ActiveCharacterEditorId => ActiveCharacterEditorDescriptor?.Id ?? string.Empty;
     public bool HasNoActiveAdapter => _activeAdapter is null;
     public string ActiveGameDisplayName => !string.IsNullOrWhiteSpace(SelectedGame?.Name)
@@ -1400,7 +1399,7 @@ public sealed class MainViewModel : ObservableObject
             string.Equals(item.CharacterId, character.CharacterId, StringComparison.Ordinal));
         SelectedCharacterAttribute = SelectedAdapterCharacter?.Attributes.FirstOrDefault(item =>
             string.Equals(item.Key, attribute.Key, StringComparison.Ordinal));
-        StatusText = IsCharacterEditorSessionOnly || attribute.Status.Contains("仅本次", StringComparison.Ordinal)
+        StatusText = IsSelectedCharacterFieldSessionOnly
             ? $"已实时修改 {character.DisplayName} 的{attribute.DisplayName}；关闭游戏后会失效"
             : $"已实时修改并保存 {character.DisplayName} 的{attribute.DisplayName}";
     }
@@ -1410,8 +1409,9 @@ public sealed class MainViewModel : ObservableObject
         var adapter = _activeAdapter ?? throw new InvalidOperationException("当前游戏构建没有可用的专属适配器。");
         var character = SelectedAdapterCharacter ?? throw new InvalidOperationException("请先选择一个人物。");
         var attribute = SelectedCharacterAttribute ?? throw new InvalidOperationException("请先选择一个人物属性。");
-        var editorId = adapter.Editors.First(editor => editor.Kind == GameEditorKind.MasterDetail).Id;
-        var fieldKey = ModuleFieldKey.Create(editorId, character.CharacterId, attribute.Key);
+        if (string.IsNullOrWhiteSpace(ActiveCharacterEditorId))
+            throw new InvalidOperationException("当前模块没有注册人物属性页面。");
+        var fieldKey = ModuleFieldKey.Create(ActiveCharacterEditorId, character.CharacterId, attribute.Key);
         return await AddAdapterFieldAsync(fieldKey, displayName, group);
     }
 
@@ -1655,8 +1655,8 @@ public sealed class MainViewModel : ObservableObject
         var field = SelectedSavedField ?? throw new InvalidOperationException("请先选择字段。");
         if (!field.IsValueLocked)
         {
-            if (IsSessionOnlyCharacterField(field))
-                throw new InvalidOperationException("人物属性模块仅本次游戏运行有效，不支持锁定或在重启后自动重应用。");
+            if (!GetAdapterFieldPolicy(_activeAdapter, field).CanLock)
+                throw new InvalidOperationException("该游戏专属字段仅本次运行有效，不支持锁定或在重启后自动重应用。");
             if (string.IsNullOrWhiteSpace(field.CurrentValue) || field.CurrentValue == "—")
                 throw new InvalidOperationException("请先刷新或修改字段数值，再启用锁定。");
             field.LockedValue = field.CurrentValue;
@@ -2033,47 +2033,74 @@ public sealed class MainViewModel : ObservableObject
     {
         _activeAdapter = adapter;
         if (_activeSession is not null) _activeSession.Adapter = adapter;
-        RebuildEntityEditors();
+        RebuildEditorPages();
         OnPropertyChanged(nameof(HasActiveAdapter));
         OnPropertyChanged(nameof(HasActiveInventoryAdapter));
         OnPropertyChanged(nameof(HasCharacterEditor));
         OnPropertyChanged(nameof(HasActiveCharacterAdapter));
         OnPropertyChanged(nameof(HasUnsupportedCharacterAdapter));
         OnPropertyChanged(nameof(IsCharacterEditorSessionOnly));
+        OnPropertyChanged(nameof(IsSelectedCharacterFieldSessionOnly));
         OnPropertyChanged(nameof(ActiveCharacterEditorId));
         OnPropertyChanged(nameof(HasNoActiveAdapter));
         OnPropertyChanged(nameof(ActiveAdapterText));
-        NotifyEntityEditorProperties();
+        NotifyEditorPageProperties();
         NotifyModuleControls();
     }
 
-    private void RebuildEntityEditors()
+    private void RebuildEditorPages()
     {
-        EquipmentEditor = CreateEntityEditor(".equipment");
-        MaterialsEditor = CreateEntityEditor(".materials");
-        MonolithEditor = CreateEntityEditor(".monolith");
-        WorldEditor = CreateEntityEditor(".world");
-        NotifyEntityEditorProperties();
+        var selectedEditorId = SelectedAdapterEditorPage?.Descriptor.Id;
+        AdapterEditorPages.Clear();
+        _characterEditorPage = null;
+        if (_activeAdapter is null)
+        {
+            SelectedAdapterEditorPage = null;
+            return;
+        }
+
+        var descriptors = _activeAdapter.Editors.ToDictionary(editor => editor.Id, StringComparer.Ordinal);
+        foreach (var registration in GameEditorPageResolver.Resolve(_activeAdapter)
+                     .OrderBy(page => descriptors.TryGetValue(page.EditorId, out var descriptor)
+                         ? descriptor.Order
+                         : int.MaxValue))
+        {
+            if (!descriptors.TryGetValue(registration.EditorId, out var descriptor)) continue;
+            AdapterEditorPageState? page = registration.Role switch
+            {
+                GameEditorPageRole.Inventory when _activeAdapter is IInventoryGameAdapter =>
+                    new AdapterInventoryEditorPageState(descriptor, registration),
+                GameEditorPageRole.CharacterAttributes when _activeAdapter is ICharacterAttributesGameAdapter characters =>
+                    new AdapterCharacterEditorPageState(
+                        descriptor,
+                        registration,
+                        AttachedProcess is not null && characters.SupportsCharacterAttributes(AttachedProcess)),
+                GameEditorPageRole.Entity when _activeAdapter is IEntityEditorsGameAdapter entities =>
+                    new AdapterEntityEditorState(
+                        descriptor,
+                        registration,
+                        AttachedProcess is not null && entities.SupportsEntityEditor(AttachedProcess, descriptor.Id)),
+                _ => null
+            };
+            if (page is null) continue;
+            AdapterEditorPages.Add(page);
+            if (page is AdapterCharacterEditorPageState characterPage) _characterEditorPage = characterPage;
+        }
+        SelectedAdapterEditorPage = AdapterEditorPages.FirstOrDefault(page =>
+                                        string.Equals(page.Descriptor.Id, selectedEditorId, StringComparison.Ordinal))
+                                    ?? AdapterEditorPages.FirstOrDefault();
     }
 
-    private AdapterEntityEditorState? CreateEntityEditor(string idSuffix)
+    private void NotifyEditorPageProperties()
     {
-        if (_activeAdapter is not IEntityEditorsGameAdapter) return null;
-        var descriptor = _activeAdapter.Editors.FirstOrDefault(editor =>
-            editor.Id.EndsWith(idSuffix, StringComparison.Ordinal));
-        return descriptor is null ? null : new AdapterEntityEditorState(descriptor);
-    }
-
-    private void NotifyEntityEditorProperties()
-    {
-        OnPropertyChanged(nameof(EquipmentEditor));
-        OnPropertyChanged(nameof(MaterialsEditor));
-        OnPropertyChanged(nameof(MonolithEditor));
-        OnPropertyChanged(nameof(WorldEditor));
-        OnPropertyChanged(nameof(HasEquipmentEditor));
-        OnPropertyChanged(nameof(HasMaterialsEditor));
-        OnPropertyChanged(nameof(HasMonolithEditor));
-        OnPropertyChanged(nameof(HasWorldEditor));
+        OnPropertyChanged(nameof(AdapterEditorPages));
+        OnPropertyChanged(nameof(HasActiveInventoryAdapter));
+        OnPropertyChanged(nameof(HasCharacterEditor));
+        OnPropertyChanged(nameof(HasActiveCharacterAdapter));
+        OnPropertyChanged(nameof(HasUnsupportedCharacterAdapter));
+        OnPropertyChanged(nameof(IsCharacterEditorSessionOnly));
+        OnPropertyChanged(nameof(IsSelectedCharacterFieldSessionOnly));
+        OnPropertyChanged(nameof(ActiveCharacterEditorId));
     }
 
     private void NotifyModuleControls()
@@ -2193,8 +2220,8 @@ public sealed class MainViewModel : ObservableObject
         _attachedFingerprint = session.Fingerprint;
         _attachedGameId = session.GameId;
         _activeAdapter = session.Adapter;
-        RebuildEntityEditors();
         AttachedProcess = session.Process;
+        RebuildEditorPages();
         _scanCandidates = session.ScanCandidates;
         _scanHistory = session.ScanHistory;
         VisibleScanResults = session.VisibleScanResults;
@@ -2237,7 +2264,7 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(ActiveCharacterEditorId));
         OnPropertyChanged(nameof(HasNoActiveAdapter));
         OnPropertyChanged(nameof(ActiveAdapterText));
-        NotifyEntityEditorProperties();
+        NotifyEditorPageProperties();
         OnPropertyChanged(nameof(SpeedStatusText));
         OnPropertyChanged(nameof(HasScanSession));
         OnPropertyChanged(nameof(CanUndoScan));
@@ -2296,7 +2323,7 @@ public sealed class MainViewModel : ObservableObject
         _attachedFingerprint = null;
         _attachedGameId = null;
         _activeAdapter = null;
-        RebuildEntityEditors();
+        RebuildEditorPages();
         AttachedProcess = null;
         _scanCandidates = null;
         _scanHistory = new Stack<ScanCandidateStore>();
@@ -2319,7 +2346,7 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(ActiveCharacterEditorId));
         OnPropertyChanged(nameof(HasNoActiveAdapter));
         OnPropertyChanged(nameof(ActiveAdapterText));
-        NotifyEntityEditorProperties();
+        NotifyEditorPageProperties();
         OnPropertyChanged(nameof(SpeedStatusText));
         OnPropertyChanged(nameof(HasScanSession));
         OnPropertyChanged(nameof(CanUndoScan));
@@ -2619,8 +2646,7 @@ public sealed class MainViewModel : ObservableObject
         return view;
     }
 
-    private GameEditorDescriptor? ActiveCharacterEditorDescriptor =>
-        _activeAdapter?.Editors.FirstOrDefault(editor => editor.Kind == GameEditorKind.MasterDetail);
+    private GameEditorDescriptor? ActiveCharacterEditorDescriptor => _characterEditorPage?.Descriptor;
 
     private void RebuildCharacterAttributesView(AdapterCharacterItem? character)
     {
@@ -2738,7 +2764,7 @@ public sealed class MainViewModel : ObservableObject
             {
                 IReadOnlyList<SavedField> lockedFields = [];
                 await RunOnUiAsync(() => lockedFields = version.Fields
-                    .Where(field => field.IsValueLocked && !IsSessionOnlyCharacterField(field) &&
+                    .Where(field => field.IsValueLocked && GetAdapterFieldPolicy(sessionAdapter, field).CanLock &&
                                     (field.LocatorKind != "GameAdapter" || sessionAdapter is not null)).ToList());
                 if (lockedFields.Count == 0) return;
 
@@ -2792,10 +2818,41 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
-    private static bool IsSessionOnlyCharacterField(SavedField field) =>
-        string.Equals(field.LocatorKind, "GameAdapter", StringComparison.Ordinal) &&
-        ModuleFieldKey.TryParse(field.AdapterFieldKey, out var editorId, out _, out _) &&
-        string.Equals(editorId, "game.fzzml.character-attributes", StringComparison.Ordinal);
+    private GameEditorFieldPolicy GetSelectedCharacterFieldPolicy()
+    {
+        if (_characterEditorPage is null || SelectedAdapterCharacter is null || SelectedCharacterAttribute is null)
+        {
+            var sessionOnly = _characterEditorPage?.Descriptor.SessionOnly == true;
+            return new(sessionOnly, !sessionOnly);
+        }
+        return GetAdapterFieldPolicy(
+            _activeAdapter,
+            _characterEditorPage.Descriptor.Id,
+            SelectedAdapterCharacter.CharacterId,
+            SelectedCharacterAttribute.Key);
+    }
+
+    private static GameEditorFieldPolicy GetAdapterFieldPolicy(IGameAdapter? adapter, SavedField field)
+    {
+        if (!string.Equals(field.LocatorKind, "GameAdapter", StringComparison.Ordinal) ||
+            !ModuleFieldKey.TryParse(field.AdapterFieldKey, out var editorId, out var entityId, out var fieldId))
+            return new(false, true);
+        return GetAdapterFieldPolicy(adapter, editorId, entityId, fieldId);
+    }
+
+    private static GameEditorFieldPolicy GetAdapterFieldPolicy(
+        IGameAdapter? adapter,
+        string editorId,
+        string entityId,
+        string fieldId)
+    {
+        var descriptor = adapter?.Editors.FirstOrDefault(editor =>
+            string.Equals(editor.Id, editorId, StringComparison.Ordinal));
+        var fallbackSessionOnly = descriptor?.SessionOnly == true;
+        return adapter is IGameEditorFieldPolicyProvider provider
+            ? provider.GetFieldPolicy(editorId, entityId, fieldId) ?? new(fallbackSessionOnly, !fallbackSessionOnly)
+            : new(fallbackSessionOnly, !fallbackSessionOnly);
+    }
 
     private static async Task RunOnUiAsync(Action action)
     {

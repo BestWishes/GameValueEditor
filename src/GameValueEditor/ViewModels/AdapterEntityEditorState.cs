@@ -6,7 +6,7 @@ using GameValueEditor.ModuleSdk;
 
 namespace GameValueEditor.ViewModels;
 
-public sealed class AdapterEntityEditorState : ObservableObject
+public sealed class AdapterEntityEditorState : AdapterEditorPageState
 {
     private AdapterEditorEntity? _selectedEntity;
     private AdapterEditorField? _selectedField;
@@ -14,9 +14,11 @@ public sealed class AdapterEntityEditorState : ObservableObject
     private string _filterText = string.Empty;
     private string _selectedGroup = "全部类别";
 
-    public AdapterEntityEditorState(GameEditorDescriptor descriptor)
+    public AdapterEntityEditorState(
+        GameEditorDescriptor descriptor,
+        GameEditorPageRegistration registration,
+        bool isSupported) : base(descriptor, registration, isSupported)
     {
-        Descriptor = descriptor;
         EntitiesView = CollectionViewSource.GetDefaultView(Entities);
         EntitiesView.Filter = item =>
             item is AdapterEditorEntity entity &&
@@ -27,16 +29,15 @@ public sealed class AdapterEntityEditorState : ObservableObject
                  field.DisplayName.Contains(FilterText.Trim(), StringComparison.CurrentCultureIgnoreCase)));
     }
 
-    public GameEditorDescriptor Descriptor { get; }
     public ObservableCollection<AdapterEditorEntity> Entities { get; } = [];
     public ObservableCollection<string> GroupOptions { get; } = ["全部类别"];
     public ICollectionView EntitiesView { get; }
     public ICollectionView? FieldsView => _fieldsView;
     public bool IsEmpty => Entities.Count == 0;
     public bool HasGroups => GroupOptions.Count > 2;
-    public string EmptyText => Descriptor.Id.EndsWith(".monolith", StringComparison.Ordinal)
-        ? "当前角色尚无异界时间线记录；进入异界后刷新即可显示。"
-        : "当前没有可显示的项目。";
+    public string EmptyText => string.IsNullOrWhiteSpace(Registration.EmptyMessage)
+        ? "当前没有可显示的项目。"
+        : Registration.EmptyMessage;
 
     public string FilterText
     {
