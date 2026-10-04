@@ -52,6 +52,14 @@ try
     Assert(BitConverter.ToInt32(scaledBytes) == 369, "Scaled Int32 encoding failed");
     Assert(MemoryValueCodec.FormatDecoded(scaledBytes, MemoryValueType.Int32, 3) == "123", "Scaled Int32 decoding failed");
 
+    var semanticFieldKey = ModuleFieldKey.Create("game.test.materials", "container:rune shattering", "quantity");
+    Assert(ModuleFieldKey.TryParse(semanticFieldKey, out var editorId, out var entityId, out var fieldId) &&
+           editorId == "game.test.materials" && entityId == "container:rune shattering" && fieldId == "quantity",
+        "Generic entity editor semantic field key roundtrip failed");
+    var genericField = new AdapterEditorField("quantity", "数量", 12, 0, 99);
+    Assert(genericField.ValueDisplay == "12" && genericField.RangeDisplay == "0 ~ 99",
+        "Generic entity editor field display contract failed");
+
     const int marker = 0x13579BDF;
     const int replacement = 0x2468ACE;
     var payload = new byte[128];
@@ -152,7 +160,7 @@ try
     if (args.Contains("--update-live", StringComparer.OrdinalIgnoreCase))
     {
         var liveUpdateRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-LiveUpdate-{Guid.NewGuid():N}");
-        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.14");
+        var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.3.0-preview.15");
         var liveUpdate = await liveUpdateService.CheckAsync();
         Assert(liveUpdate.AssetName.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
                liveUpdate.AssetName.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase),

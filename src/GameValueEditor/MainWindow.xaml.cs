@@ -381,6 +381,59 @@ public partial class MainWindow : Window
         if (SaveCharacterFieldButton is not null) SaveCharacterFieldButton.IsEnabled = enabled;
     }
 
+    private async void RefreshEntityEditor_OnClick(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not AdapterEntityEditorState editor) return;
+        await RunGuardedAsync(() => _viewModel.RefreshEntityEditorAsync(editor));
+    }
+
+    private async void WriteEntityEditorField_OnClick(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not AdapterEntityEditorState editor) return;
+        await EditEntityEditorFieldAsync(editor);
+    }
+
+    private async void EntityEditorFieldsGrid_OnMouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (FindAncestor<DataGridRow>(e.OriginalSource as DependencyObject) is null ||
+            (sender as FrameworkElement)?.DataContext is not AdapterEntityEditorState editor)
+            return;
+        await EditEntityEditorFieldAsync(editor);
+    }
+
+    private async Task EditEntityEditorFieldAsync(AdapterEntityEditorState editor)
+    {
+        await RunGuardedAsync(async () =>
+        {
+            var entity = editor.SelectedEntity ?? throw new InvalidOperationException("请先选择一个修改项目。");
+            var field = editor.SelectedField ?? throw new InvalidOperationException("请先选择一个可修改字段。");
+            if (!field.CanWrite) throw new InvalidOperationException("该字段当前不可修改。");
+            var dialog = new TextInputDialog(
+                $"修改{editor.Descriptor.DisplayName}",
+                $"输入“{entity.DisplayName}”的{field.DisplayName}目标值（{field.RangeDisplay}）：",
+                field.ValueDisplay) { Owner = this };
+            if (dialog.ShowDialog() != true) return;
+            await _viewModel.WriteEntityEditorFieldAsync(editor, dialog.Value);
+        });
+    }
+
+    private async void SaveEntityEditorField_OnClick(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not AdapterEntityEditorState editor) return;
+        await RunGuardedAsync(async () =>
+        {
+            var entity = editor.SelectedEntity ?? throw new InvalidOperationException("请先选择一个修改项目。");
+            var field = editor.SelectedField ?? throw new InvalidOperationException("请先选择一个可修改字段。");
+            if (_viewModel.SelectedGame is null || _viewModel.SelectedVersion is null)
+                throw new InvalidOperationException("请先点击游戏名称后的“保存入库”，再保存字段。");
+            var fieldKey = ModuleFieldKey.Create(editor.Descriptor.Id, entity.EntityId, field.Key);
+            var dialog = new AdapterFieldDialog(
+                _viewModel.GetAvailableGroups(), fieldKey, $"{entity.DisplayName} {field.DisplayName}") { Owner = this };
+            if (dialog.ShowDialog() != true) return;
+            await _viewModel.AddEntityEditorFieldAsync(editor, dialog.DisplayName, dialog.GroupName);
+        });
+    }
+
     private async void SavedFieldsGrid_OnMouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
         var cell = FindAncestor<DataGridCell>(e.OriginalSource as DependencyObject);

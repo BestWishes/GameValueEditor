@@ -345,6 +345,27 @@ public static class AdapterHostExtensions
         int targetValue) =>
         adapter.WriteCharacterAttribute(process.ToModuleContext(), characterId, attributeKey, targetValue);
 
+    public static bool SupportsEntityEditor(
+        this IEntityEditorsGameAdapter adapter,
+        ProcessItem process,
+        string editorId) =>
+        adapter.SupportsEntityEditor(process.ToModuleContext(), editorId);
+
+    public static IReadOnlyList<AdapterEditorEntity> ReadEditorEntities(
+        this IEntityEditorsGameAdapter adapter,
+        ProcessItem process,
+        string editorId) =>
+        adapter.ReadEditorEntities(process.ToModuleContext(), editorId);
+
+    public static AdapterEditorEntity WriteEditorField(
+        this IEntityEditorsGameAdapter adapter,
+        ProcessItem process,
+        string editorId,
+        string entityId,
+        string fieldKey,
+        long targetValue) =>
+        adapter.WriteEditorField(process.ToModuleContext(), editorId, entityId, fieldKey, targetValue);
+
     public static bool Supports(this IGameAdapter adapter, ProcessItem process, VersionFingerprint fingerprint) =>
         adapter.Supports(process.ToModuleContext(), fingerprint.ToModuleIdentity());
 }

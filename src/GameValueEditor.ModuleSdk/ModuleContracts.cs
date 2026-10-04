@@ -87,6 +87,23 @@ public interface ICharacterAttributesGameAdapter : IGameAdapter
 }
 
 /// <summary>
+/// Optional contract for game-specific editors whose rows and numeric fields do not fit
+/// the legacy inventory or character-attribute shapes. Editor, entity and field IDs are
+/// semantic identities and must remain stable across supported builds.
+/// </summary>
+public interface IEntityEditorsGameAdapter : IGameAdapter
+{
+    bool SupportsEntityEditor(GameProcessContext process, string editorId);
+    IReadOnlyList<AdapterEditorEntity> ReadEditorEntities(GameProcessContext process, string editorId);
+    AdapterEditorEntity WriteEditorField(
+        GameProcessContext process,
+        string editorId,
+        string entityId,
+        string fieldKey,
+        long targetValue);
+}
+
+/// <summary>
 /// Optional metadata provider for versions declared by the game itself. The host keeps
 /// platform build identifiers and executable/engine versions separate from these values.
 /// </summary>
@@ -122,9 +139,31 @@ public sealed record AdapterCharacterAttribute(
     int RawValue,
     int AggregatedValue,
     float GrowthValue,
-    bool CanWrite = true)
+    bool CanWrite = true,
+    string Status = "")
 {
     public string RawValueDisplay => RawValue.ToString(CultureInfo.InvariantCulture);
     public string AggregatedValueDisplay => AggregatedValue.ToString(CultureInfo.InvariantCulture);
     public string GrowthValueDisplay => GrowthValue.ToString("0.###", CultureInfo.InvariantCulture);
+}
+
+public sealed record AdapterEditorEntity(
+    string EntityId,
+    string DisplayName,
+    string Summary,
+    IReadOnlyList<AdapterEditorField> Fields);
+
+public sealed record AdapterEditorField(
+    string Key,
+    string DisplayName,
+    long Value,
+    long Minimum,
+    long Maximum,
+    bool CanWrite = true,
+    string Status = "")
+{
+    public string ValueDisplay => Value.ToString(CultureInfo.InvariantCulture);
+    public string RangeDisplay => Minimum == Maximum
+        ? string.Empty
+        : $"{Minimum.ToString(CultureInfo.InvariantCulture)} ~ {Maximum.ToString(CultureInfo.InvariantCulture)}";
 }

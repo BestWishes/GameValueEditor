@@ -68,6 +68,10 @@ public sealed class MainViewModel : ObservableObject
     private AdapterInventoryItem? _selectedAdapterItem;
     private AdapterCharacterItem? _selectedAdapterCharacter;
     private AdapterCharacterAttribute? _selectedCharacterAttribute;
+    private AdapterEntityEditorState? _equipmentEditor;
+    private AdapterEntityEditorState? _materialsEditor;
+    private AdapterEntityEditorState? _monolithEditor;
+    private AdapterEntityEditorState? _worldEditor;
     private string _adapterItemNameFilter = string.Empty;
     private string _adapterItemCountFilter = string.Empty;
     private string _characterAttributeNameFilter = string.Empty;
@@ -170,6 +174,10 @@ public sealed class MainViewModel : ObservableObject
     public ICollectionView? CharacterAttributesView => _characterAttributesView;
     public ObservableCollection<AdapterInventoryItem> AdapterInventoryItems => _adapterInventoryItems;
     public ObservableCollection<AdapterCharacterItem> AdapterCharacters => _adapterCharacters;
+    public AdapterEntityEditorState? EquipmentEditor { get => _equipmentEditor; private set => SetProperty(ref _equipmentEditor, value); }
+    public AdapterEntityEditorState? MaterialsEditor { get => _materialsEditor; private set => SetProperty(ref _materialsEditor, value); }
+    public AdapterEntityEditorState? MonolithEditor { get => _monolithEditor; private set => SetProperty(ref _monolithEditor, value); }
+    public AdapterEntityEditorState? WorldEditor { get => _worldEditor; private set => SetProperty(ref _worldEditor, value); }
     public ObservableCollection<ScanCandidate> VisibleScanResults { get => _visibleScanResults; private set => SetProperty(ref _visibleScanResults, value); }
     public GameProfile? SelectedGame
     {
@@ -398,6 +406,10 @@ public sealed class MainViewModel : ObservableObject
         adapter.SupportsCharacterAttributes(AttachedProcess);
     public bool HasUnsupportedCharacterAdapter =>
         _activeAdapter is ICharacterAttributesGameAdapter && !HasActiveCharacterAdapter;
+    public bool HasEquipmentEditor => EquipmentEditor is not null;
+    public bool HasMaterialsEditor => MaterialsEditor is not null;
+    public bool HasMonolithEditor => MonolithEditor is not null;
+    public bool HasWorldEditor => WorldEditor is not null;
     public bool IsCharacterEditorSessionOnly => ActiveCharacterEditorDescriptor?.SessionOnly == true;
     public string ActiveCharacterEditorId => ActiveCharacterEditorDescriptor?.Id ?? string.Empty;
     public bool HasNoActiveAdapter => _activeAdapter is null;
@@ -1378,8 +1390,8 @@ public sealed class MainViewModel : ObservableObject
             throw new InvalidOperationException("当前游戏构建没有可用的人物属性编辑模块。");
         var character = SelectedAdapterCharacter ?? throw new InvalidOperationException("请先选择一个人物。");
         var attribute = SelectedCharacterAttribute ?? throw new InvalidOperationException("请先选择一个人物属性。");
-        if (!int.TryParse(value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var target) || target < 0)
-            throw new InvalidOperationException("人物属性必须是 0 到 2147483647 之间的整数。");
+        if (!int.TryParse(value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var target))
+            throw new InvalidOperationException("人物属性必须是整数；具体允许范围由游戏专属模块校验。");
 
         StatusText = $"正在修改 {character.DisplayName} 的{attribute.DisplayName}…";
         await Task.Run(() => adapter.WriteCharacterAttribute(process, character.CharacterId, attribute.Key, target));
@@ -1388,7 +1400,7 @@ public sealed class MainViewModel : ObservableObject
             string.Equals(item.CharacterId, character.CharacterId, StringComparison.Ordinal));
         SelectedCharacterAttribute = SelectedAdapterCharacter?.Attributes.FirstOrDefault(item =>
             string.Equals(item.Key, attribute.Key, StringComparison.Ordinal));
-        StatusText = IsCharacterEditorSessionOnly
+        StatusText = IsCharacterEditorSessionOnly || attribute.Status.Contains("仅本次", StringComparison.Ordinal)
             ? $"已实时修改 {character.DisplayName} 的{attribute.DisplayName}；关闭游戏后会失效"
             : $"已实时修改并保存 {character.DisplayName} 的{attribute.DisplayName}";
     }
@@ -1400,6 +1412,61 @@ public sealed class MainViewModel : ObservableObject
         var attribute = SelectedCharacterAttribute ?? throw new InvalidOperationException("请先选择一个人物属性。");
         var editorId = adapter.Editors.First(editor => editor.Kind == GameEditorKind.MasterDetail).Id;
         var fieldKey = ModuleFieldKey.Create(editorId, character.CharacterId, attribute.Key);
+        return await AddAdapterFieldAsync(fieldKey, displayName, group);
+    }
+
+    public async Task RefreshEntityEditorAsync(AdapterEntityEditorState editor)
+    {
+        var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
+        if (_activeAdapter is not IEntityEditorsGameAdapter adapter ||
+            !adapter.SupportsEntityEditor(process, editor.Descriptor.Id))
+            throw new InvalidOperationException("当前游戏构建没有可用的该项专属修改器。");
+
+        var selectedEntityId = editor.SelectedEntity?.EntityId;
+        var selectedFieldKey = editor.SelectedField?.Key;
+        StatusText = $"正在读取{editor.Descriptor.DisplayName}…";
+        var entities = await Task.Run(() => adapter.ReadEditorEntities(process, editor.Descriptor.Id));
+        editor.ReplaceEntities(entities, selectedEntityId, selectedFieldKey);
+        StatusText = entities.Count == 0
+            ? $"当前没有可显示的{editor.Descriptor.DisplayName}数据"
+            : $"已读取 {entities.Count:N0} 项{editor.Descriptor.DisplayName}数据";
+    }
+
+    public async Task WriteEntityEditorFieldAsync(AdapterEntityEditorState editor, string value)
+    {
+        var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
+        if (_activeAdapter is not IEntityEditorsGameAdapter adapter ||
+            !adapter.SupportsEntityEditor(process, editor.Descriptor.Id))
+            throw new InvalidOperationException("当前游戏构建没有可用的该项专属修改器。");
+        var entity = editor.SelectedEntity ?? throw new InvalidOperationException("请先选择一个修改项目。");
+        var field = editor.SelectedField ?? throw new InvalidOperationException("请先选择一个可修改字段。");
+        if (!field.CanWrite) throw new InvalidOperationException("该字段当前不可修改。");
+        if (!long.TryParse(value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var target) ||
+            target < field.Minimum || target > field.Maximum)
+            throw new InvalidOperationException(
+                $"{field.DisplayName}必须是 {field.Minimum:N0} 到 {field.Maximum:N0} 之间的整数。");
+
+        StatusText = $"正在修改 {entity.DisplayName} 的{field.DisplayName}…";
+        await Task.Run(() => adapter.WriteEditorField(
+            process, editor.Descriptor.Id, entity.EntityId, field.Key, target));
+        await RefreshEntityEditorAsync(editor);
+        editor.SelectedEntity = editor.Entities.FirstOrDefault(item =>
+            string.Equals(item.EntityId, entity.EntityId, StringComparison.Ordinal));
+        editor.SelectedField = editor.SelectedEntity?.Fields.FirstOrDefault(item =>
+            string.Equals(item.Key, field.Key, StringComparison.Ordinal));
+        StatusText = editor.Descriptor.SessionOnly
+            ? $"已实时修改 {entity.DisplayName} 的{field.DisplayName} = {target:N0}；场景切换或关闭游戏后可能恢复"
+            : $"已实时修改并保存 {entity.DisplayName} 的{field.DisplayName} = {target:N0}";
+    }
+
+    public async Task<SavedField> AddEntityEditorFieldAsync(
+        AdapterEntityEditorState editor,
+        string displayName,
+        string group)
+    {
+        var entity = editor.SelectedEntity ?? throw new InvalidOperationException("请先选择一个修改项目。");
+        var field = editor.SelectedField ?? throw new InvalidOperationException("请先选择一个可修改字段。");
+        var fieldKey = ModuleFieldKey.Create(editor.Descriptor.Id, entity.EntityId, field.Key);
         return await AddAdapterFieldAsync(fieldKey, displayName, group);
     }
 
@@ -1966,6 +2033,7 @@ public sealed class MainViewModel : ObservableObject
     {
         _activeAdapter = adapter;
         if (_activeSession is not null) _activeSession.Adapter = adapter;
+        RebuildEntityEditors();
         OnPropertyChanged(nameof(HasActiveAdapter));
         OnPropertyChanged(nameof(HasActiveInventoryAdapter));
         OnPropertyChanged(nameof(HasCharacterEditor));
@@ -1975,7 +2043,37 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(ActiveCharacterEditorId));
         OnPropertyChanged(nameof(HasNoActiveAdapter));
         OnPropertyChanged(nameof(ActiveAdapterText));
+        NotifyEntityEditorProperties();
         NotifyModuleControls();
+    }
+
+    private void RebuildEntityEditors()
+    {
+        EquipmentEditor = CreateEntityEditor(".equipment");
+        MaterialsEditor = CreateEntityEditor(".materials");
+        MonolithEditor = CreateEntityEditor(".monolith");
+        WorldEditor = CreateEntityEditor(".world");
+        NotifyEntityEditorProperties();
+    }
+
+    private AdapterEntityEditorState? CreateEntityEditor(string idSuffix)
+    {
+        if (_activeAdapter is not IEntityEditorsGameAdapter) return null;
+        var descriptor = _activeAdapter.Editors.FirstOrDefault(editor =>
+            editor.Id.EndsWith(idSuffix, StringComparison.Ordinal));
+        return descriptor is null ? null : new AdapterEntityEditorState(descriptor);
+    }
+
+    private void NotifyEntityEditorProperties()
+    {
+        OnPropertyChanged(nameof(EquipmentEditor));
+        OnPropertyChanged(nameof(MaterialsEditor));
+        OnPropertyChanged(nameof(MonolithEditor));
+        OnPropertyChanged(nameof(WorldEditor));
+        OnPropertyChanged(nameof(HasEquipmentEditor));
+        OnPropertyChanged(nameof(HasMaterialsEditor));
+        OnPropertyChanged(nameof(HasMonolithEditor));
+        OnPropertyChanged(nameof(HasWorldEditor));
     }
 
     private void NotifyModuleControls()
@@ -2095,6 +2193,7 @@ public sealed class MainViewModel : ObservableObject
         _attachedFingerprint = session.Fingerprint;
         _attachedGameId = session.GameId;
         _activeAdapter = session.Adapter;
+        RebuildEntityEditors();
         AttachedProcess = session.Process;
         _scanCandidates = session.ScanCandidates;
         _scanHistory = session.ScanHistory;
@@ -2138,6 +2237,7 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(ActiveCharacterEditorId));
         OnPropertyChanged(nameof(HasNoActiveAdapter));
         OnPropertyChanged(nameof(ActiveAdapterText));
+        NotifyEntityEditorProperties();
         OnPropertyChanged(nameof(SpeedStatusText));
         OnPropertyChanged(nameof(HasScanSession));
         OnPropertyChanged(nameof(CanUndoScan));
@@ -2196,6 +2296,7 @@ public sealed class MainViewModel : ObservableObject
         _attachedFingerprint = null;
         _attachedGameId = null;
         _activeAdapter = null;
+        RebuildEntityEditors();
         AttachedProcess = null;
         _scanCandidates = null;
         _scanHistory = new Stack<ScanCandidateStore>();
@@ -2218,6 +2319,7 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(ActiveCharacterEditorId));
         OnPropertyChanged(nameof(HasNoActiveAdapter));
         OnPropertyChanged(nameof(ActiveAdapterText));
+        NotifyEntityEditorProperties();
         OnPropertyChanged(nameof(SpeedStatusText));
         OnPropertyChanged(nameof(HasScanSession));
         OnPropertyChanged(nameof(CanUndoScan));

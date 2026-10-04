@@ -4,6 +4,73 @@
         Title="肝肾大圣-单机游戏数值编辑器" Icon="pack://application:,,,/GameValueEditor;component/Assets/GameValueEditorIcon.png" Height="820" Width="1320"
         Style="{StaticResource ThemedWindowStyle}"
         MinHeight="700" MinWidth="1080" WindowStartupLocation="CenterScreen">
+    <Window.Resources>
+        <DataTemplate x:Key="EntityEditorTemplate">
+            <Grid Margin="12">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="180"/>
+                        <ColumnDefinition Width="260"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="{Binding Descriptor.Description}" VerticalAlignment="Center"
+                               Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap"/>
+                    <ComboBox Grid.Column="1" Margin="8,0,0,0"
+                              ItemsSource="{Binding GroupOptions}" SelectedItem="{Binding SelectedGroup}"
+                              Visibility="{Binding HasGroups, Converter={StaticResource BooleanToVisibilityConverter}}"
+                              ToolTip="按类别筛选"/>
+                    <TextBox Grid.Column="2" Margin="8,0,0,0"
+                             Text="{Binding FilterText, UpdateSourceTrigger=PropertyChanged}"
+                             ToolTip="按项目或字段名称查找"/>
+                    <Button Grid.Column="3" Content="刷新" Click="RefreshEntityEditor_OnClick"/>
+                </Grid>
+                <Grid Grid.Row="1" Margin="0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="280"/>
+                        <ColumnDefinition Width="10"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <ListBox ItemsSource="{Binding EntitiesView}" SelectedItem="{Binding SelectedEntity}">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Margin="4">
+                                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
+                                    <TextBlock Text="{Binding Summary}" Foreground="{DynamicResource MutedTextBrush}"
+                                               FontSize="12" TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                    <DataGrid Grid.Column="2" ItemsSource="{Binding FieldsView}" SelectedItem="{Binding SelectedField}"
+                              IsReadOnly="True" SelectionMode="Single"
+                              MouseDoubleClick="EntityEditorFieldsGrid_OnMouseDoubleClick">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="字段" Binding="{Binding DisplayName}" Width="2*"/>
+                            <DataGridTextColumn Header="当前值" Binding="{Binding ValueDisplay}" Width="*"/>
+                            <DataGridTextColumn Header="允许范围" Binding="{Binding RangeDisplay}" Width="*"/>
+                            <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="2*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                    <TextBlock Grid.ColumnSpan="3" Text="{Binding EmptyText}"
+                               Visibility="{Binding IsEmpty, Converter={StaticResource BooleanToVisibilityConverter}}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               FontSize="17" Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap"/>
+                </Grid>
+                <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button Content="添加到已保存字段…" Click="SaveEntityEditorField_OnClick"
+                            IsEnabled="{Binding SelectedField.CanWrite}"/>
+                    <Button Content="修改选中字段…" Click="WriteEntityEditorField_OnClick"
+                            IsEnabled="{Binding SelectedField.CanWrite}"/>
+                </StackPanel>
+            </Grid>
+        </DataTemplate>
+    </Window.Resources>
     <Grid Background="{DynamicResource WindowBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="68"/>
@@ -330,10 +397,13 @@
                                     <Grid x:Name="InventoryEditorContent" Margin="12">
                                         <Grid.RowDefinitions>
                                             <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
                                             <RowDefinition Height="*"/>
                                             <RowDefinition Height="Auto"/>
                                         </Grid.RowDefinitions>
-                                         <Grid>
+                                        <TextBlock Text="仅显示当前背包中的可堆叠物品。"
+                                                   Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,8"/>
+                                         <Grid Grid.Row="1">
                                              <Grid.ColumnDefinitions>
                                                  <ColumnDefinition Width="*"/>
                                                  <ColumnDefinition Width="150"/>
@@ -347,7 +417,7 @@
                                                       ToolTip="按物品数量精确查找"/>
                                              <Button Grid.Column="2" Content="刷新背包" Click="RefreshAdapterInventory_OnClick"/>
                                         </Grid>
-                                        <DataGrid x:Name="AdapterInventoryGrid" Grid.Row="1" Margin="0,10"
+                                        <DataGrid x:Name="AdapterInventoryGrid" Grid.Row="2" Margin="0,10"
                                                    ItemsSource="{Binding AdapterItemsView}" SelectedItem="{Binding SelectedAdapterItem}"
                                                    IsReadOnly="True" SelectionMode="Extended"
                                                    SelectionChanged="AdapterInventoryGrid_OnSelectionChanged"
@@ -357,7 +427,7 @@
                                                 <DataGridTextColumn Header="物品总数" Binding="{Binding CountDisplay}" Width="*"/>
                                             </DataGrid.Columns>
                                         </DataGrid>
-                                        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+                                        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
                                             <Button x:Name="SaveAdapterFieldButton" Content="添加到已保存字段…" IsEnabled="False" Click="SaveAdapterItem_OnClick"/>
                                             <Button x:Name="WriteAdapterItemsButton" Content="修改选中物品…" IsEnabled="False" Click="WriteAdapterItem_OnClick"/>
                                         </StackPanel>
@@ -418,6 +488,7 @@
                                                         <DataGridTextColumn Header="基础结果" Binding="{Binding RawValueDisplay}" Width="*"/>
                                                         <DataGridTextColumn Header="游戏界面总值" Binding="{Binding AggregatedValueDisplay}" Width="*"/>
                                                         <DataGridTextColumn Header="成长" Binding="{Binding GrowthValueDisplay}" Width="*"/>
+                                                        <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="1.4*"/>
                                                     </DataGrid.Columns>
                                                 </DataGrid>
                                             </Grid>
@@ -429,6 +500,26 @@
                                             </StackPanel>
                                         </Grid>
                                     </Grid>
+                                </TabItem>
+                                <TabItem Header="装备编辑"
+                                         Visibility="{Binding HasEquipmentEditor, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                    <ContentControl Content="{Binding EquipmentEditor}"
+                                                    ContentTemplate="{StaticResource EntityEditorTemplate}"/>
+                                </TabItem>
+                                <TabItem Header="资源"
+                                         Visibility="{Binding HasMaterialsEditor, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                    <ContentControl Content="{Binding MaterialsEditor}"
+                                                    ContentTemplate="{StaticResource EntityEditorTemplate}"/>
+                                </TabItem>
+                                <TabItem Header="异界进度"
+                                         Visibility="{Binding HasMonolithEditor, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                    <ContentControl Content="{Binding MonolithEditor}"
+                                                    ContentTemplate="{StaticResource EntityEditorTemplate}"/>
+                                </TabItem>
+                                <TabItem Header="世界功能"
+                                         Visibility="{Binding HasWorldEditor, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                    <ContentControl Content="{Binding WorldEditor}"
+                                                    ContentTemplate="{StaticResource EntityEditorTemplate}"/>
                                 </TabItem>
                                 </TabControl>
                             </Grid>
