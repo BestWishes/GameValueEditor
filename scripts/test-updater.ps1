@@ -57,9 +57,13 @@ function New-UpdateFixture([string]$name, [bool]$includeLockedFile) {
     }
 }
 
-function Start-Updater([string]$resolvedUpdater, $fixture) {
+function Start-Updater([string]$resolvedUpdater, $fixture, [bool]$appendDirectorySeparator = $false) {
+    $appDirectoryArgument = $fixture.AppDirectory
+    if ($appendDirectorySeparator -and -not [System.IO.Path]::EndsInDirectorySeparator($appDirectoryArgument)) {
+        $appDirectoryArgument += [System.IO.Path]::DirectorySeparatorChar
+    }
     return Start-Process -FilePath $resolvedUpdater -WindowStyle Hidden -PassThru -ArgumentList @(
-        "--pending", $fixture.PendingPath, "--pid", "2147483647", "--app-dir", $fixture.AppDirectory)
+        "--pending", $fixture.PendingPath, "--pid", "2147483647", "--app-dir", $appDirectoryArgument)
 }
 
 function Wait-Updater($process, [int]$timeoutMilliseconds = 30000) {
@@ -79,7 +83,8 @@ try {
     $transientLock = [System.IO.File]::Open($applicationPath, [System.IO.FileMode]::Open,
         [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
     try {
-        $transientProcess = Start-Updater $resolvedUpdater $transient
+        # AppContext.BaseDirectory ends with a directory separator in the real application.
+        $transientProcess = Start-Updater $resolvedUpdater $transient $true
         Start-Sleep -Milliseconds 900
         if ($transientProcess.HasExited) { throw "Updater did not retry a temporarily locked application file." }
     }

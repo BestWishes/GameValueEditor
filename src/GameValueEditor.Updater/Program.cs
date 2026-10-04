@@ -98,7 +98,9 @@ catch (Exception exception)
 
 static async Task InstallUpdateAsync(string extractionDirectory, string appDirectory)
 {
-    var applicationRoot = Path.GetFullPath(appDirectory) + Path.DirectorySeparatorChar;
+    var applicationRoot = Path.GetFullPath(appDirectory);
+    if (!Path.EndsInDirectorySeparator(applicationRoot))
+        applicationRoot += Path.DirectorySeparatorChar;
     var transactionDirectory = Path.Combine(appDirectory, $".update-transaction-{Guid.NewGuid():N}");
     var stagedRoot = Path.Combine(transactionDirectory, "staged");
     var backupRoot = Path.Combine(transactionDirectory, "backup");
