@@ -357,6 +357,7 @@ public sealed class InstalledModuleManifest
     public string Description { get; set; } = string.Empty;
     public string AssemblyFile { get; set; } = string.Empty;
     public int HostApiVersion { get; set; } = 1;
+    public bool SupportsUnlistedBuildValidation { get; set; }
     public string MinimumHostVersion { get; set; } = string.Empty;
     public string? MaximumHostVersion { get; set; }
     public List<string> ProcessNames { get; set; } = [];

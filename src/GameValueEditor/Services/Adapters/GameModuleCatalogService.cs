@@ -107,26 +107,36 @@ public sealed class GameModuleCatalogService
                     ? "服务器暂无适用于当前游戏的专属模块。"
                     : $"服务器有当前游戏的专属模块，但没有兼容主程序 v{_currentHostVersion} 与 Host API {ModuleHostApi.CurrentVersion} 的版本。");
 
-        var candidates = hostCompatibleCandidates.Where(module => MatchesBuild(module, buildFingerprint,
+        var exactCandidates = hostCompatibleCandidates.Where(module => MatchesBuild(module, buildFingerprint,
                 executableSha256, gameAssemblySha256, metadataSha256))
             .ToList();
+        var exactBuildMatch = exactCandidates.Count > 0;
+        var candidates = exactBuildMatch
+            ? exactCandidates
+            : hostCompatibleCandidates
+                .Where(module => module.SupportsUnlistedBuildValidation && module.HostApiVersion >= 5)
+                .ToList();
         if (candidates.Count == 0)
             return new GameModuleCheckResult(GameModuleAvailability.NotAvailable, null, null,
-                "服务器有当前游戏的专属模块，但保留的版本都不兼容当前游戏构建。");
+                "服务器有当前游戏的专属模块，但没有精确兼容当前构建的版本，模块也未声明可对未知构建执行本地安全验证。",
+                CatalogReferenceModule: hostCompatibleCandidates[0]);
 
         var compatible = candidates[0];
         candidates = candidates.Where(module => string.Equals(module.Id, compatible.Id, StringComparison.Ordinal))
             .ToList();
-        const bool exactBuildMatch = true;
 
         var installed = FindInstalled(compatible.Id);
         if (installed is null)
             return new GameModuleCheckResult(GameModuleAvailability.Available, compatible, null,
-                $"发现可下载模块：{compatible.DisplayName} v{compatible.Version}",
-                exactBuildMatch);
+                exactBuildMatch
+                    ? $"发现可下载模块：{compatible.DisplayName} v{compatible.Version}"
+                    : $"发现可下载模块：{compatible.DisplayName} v{compatible.Version}；当前构建尚未精确收录，下载后必须通过本地只读兼容验证才会启用。",
+                exactBuildMatch, CatalogReferenceModule: compatible);
         var installedVersion = ParseVersion(installed.Version);
         var updateTarget = candidates.FirstOrDefault(module => ParseVersion(module.Version).CompareTo(installedVersion) > 0);
-        var rollbackTarget = candidates.FirstOrDefault(module => ParseVersion(module.Version).CompareTo(installedVersion) < 0);
+        var rollbackTarget = exactBuildMatch
+            ? candidates.FirstOrDefault(module => ParseVersion(module.Version).CompareTo(installedVersion) < 0)
+            : null;
         if (updateTarget is not null)
         {
             var updateExact = MatchesBuild(updateTarget, buildFingerprint, executableSha256,
@@ -135,7 +145,7 @@ public sealed class GameModuleCatalogService
                 updateExact
                     ? $"发现模块更新：v{installed.Version} → v{updateTarget.Version}"
                     : $"发现模块更新 v{updateTarget.Version}；更新后会在本地安全验证当前构建。",
-                updateExact, rollbackTarget);
+                updateExact, rollbackTarget, updateTarget);
         }
 
         var currentEntry = candidates.FirstOrDefault(module =>
@@ -146,7 +156,7 @@ public sealed class GameModuleCatalogService
             exactBuildMatch
                 ? $"本地专属模块已是最新：v{installed.Version}{rollbackSuffix}"
                 : $"本地模块已是最新 v{installed.Version}；当前构建尚未明确收录，将由本地安全校验决定是否启用{rollbackSuffix}。",
-            exactBuildMatch, rollbackTarget);
+            exactBuildMatch, rollbackTarget, currentEntry);
     }
 
     public async Task InstallAsync(
@@ -366,9 +376,11 @@ public sealed class GameModuleCatalogService
         if (!string.Equals(manifest.Id, catalogEntry.Id, StringComparison.Ordinal) ||
             !string.Equals(manifest.Version, catalogEntry.Version, StringComparison.OrdinalIgnoreCase) ||
             manifest.HostApiVersion != catalogEntry.HostApiVersion ||
+            manifest.SupportsUnlistedBuildValidation != catalogEntry.SupportsUnlistedBuildValidation ||
             !string.Equals(manifestMinimumHostVersion, catalogEntry.MinimumHostVersion, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(manifest.MaximumHostVersion ?? string.Empty, catalogEntry.MaximumHostVersion ?? string.Empty,
                 StringComparison.OrdinalIgnoreCase) ||
+            manifest.SupportsUnlistedBuildValidation && manifest.HostApiVersion < 5 ||
             manifest.HostApiVersion is < 1 or > ModuleHostApi.CurrentVersion)
             throw new InvalidOperationException("专属模块包与服务器清单不一致。");
         if (!string.Equals(manifest.GameDisplayName, catalogEntry.GameDisplayName, StringComparison.Ordinal) ||
@@ -464,6 +476,7 @@ public sealed class GameModuleCatalogService
                 GameDisplayName = module.GameDisplayName,
                 Description = module.Description,
                 HostApiVersion = release.HostApiVersion,
+                SupportsUnlistedBuildValidation = release.SupportsUnlistedBuildValidation,
                 MinimumHostVersion = release.MinimumHostVersion,
                 MaximumHostVersion = release.MaximumHostVersion,
                 LegacyIds = [.. module.LegacyIds],
@@ -512,7 +525,8 @@ public sealed record GameModuleCheckResult(
     InstalledModuleRecord? InstalledModule,
     string StatusText,
     bool IsExactBuildMatch = false,
-    GameModuleCatalogEntry? RollbackModule = null);
+    GameModuleCatalogEntry? RollbackModule = null,
+    GameModuleCatalogEntry? CatalogReferenceModule = null);
 
 public sealed class GameModuleCatalog
 {
@@ -529,6 +543,7 @@ public sealed class GameModuleCatalogEntry
     public string GameDisplayName { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
     public int HostApiVersion { get; set; } = 1;
+    public bool SupportsUnlistedBuildValidation { get; set; }
     public string MinimumHostVersion { get; set; } = string.Empty;
     public string? MaximumHostVersion { get; set; }
     public List<string> LegacyIds { get; set; } = [];
@@ -546,6 +561,7 @@ public sealed class GameModuleReleaseEntry
 {
     public string Version { get; set; } = string.Empty;
     public int HostApiVersion { get; set; } = 1;
+    public bool SupportsUnlistedBuildValidation { get; set; }
     public string MinimumHostVersion { get; set; } = string.Empty;
     public string? MaximumHostVersion { get; set; }
     public List<GameModuleEditorEntry> Editors { get; set; } = [];

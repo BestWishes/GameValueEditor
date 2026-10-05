@@ -447,8 +447,8 @@ public sealed class MainViewModel : ObservableObject
     public bool CanInstallGameModule => !_isModuleControlBlocked && _moduleCheckResult?.Availability is
         GameModuleAvailability.Available or GameModuleAvailability.UpdateAvailable;
     public string ModuleInstallActionText => _moduleCheckResult?.Availability == GameModuleAvailability.Available
-        ? "可下载"
-        : "可更新";
+        ? _moduleCheckResult.IsExactBuildMatch ? "可下载" : "下载后验证"
+        : _moduleCheckResult?.IsExactBuildMatch == false ? "更新后验证" : "可更新";
     public bool CanRollbackGameModule => !_isModuleControlBlocked && _moduleCheckResult?.RollbackModule is not null;
     public string ModuleRollbackActionText => _moduleCheckResult?.RollbackModule is { } rollback
         ? $"回退到 v{rollback.Version}"
@@ -1749,6 +1749,7 @@ public sealed class MainViewModel : ObservableObject
         var process = AttachedProcess;
         var originalSession = _activeSession;
         var installedBefore = _moduleCatalogService.FindInstalled(module.Id);
+        var exactBuildMatch = _moduleCheckResult?.IsExactBuildMatch == true;
         if (_moduleCheckResult?.Availability is not (GameModuleAvailability.Available or GameModuleAvailability.UpdateAvailable))
             throw new InvalidOperationException("当前没有可下载或更新的专属模块。");
         if (_isModuleControlBlocked) return;
@@ -1798,12 +1799,21 @@ public sealed class MainViewModel : ObservableObject
             await SaveLibraryAsync();
             GamesView.Refresh();
             _moduleCheckResult = new GameModuleCheckResult(GameModuleAvailability.Current, module,
-                _moduleCatalogService.FindInstalled(module.Id), $"已安装最新专属模块：{module.DisplayName} v{module.Version}");
+                _moduleCatalogService.FindInstalled(module.Id), $"已安装最新专属模块：{module.DisplayName} v{module.Version}",
+                exactBuildMatch, CatalogReferenceModule: module);
             ModuleStatusText = replacementRequiresRestart
-                ? $"已安装 {module.DisplayName} v{module.Version}；该模块已停用，请手动重启主程序后启用。"
-                : installedAdapter is null
-                    ? $"已安装 {module.DisplayName} v{module.Version}，连接兼容游戏版本后启用。"
-                    : _moduleCheckResult.StatusText;
+                ? exactBuildMatch
+                    ? $"已安装 {module.DisplayName} v{module.Version}；该模块已停用，请手动重启主程序后启用。"
+                    : $"已安装 {module.DisplayName} v{module.Version}；该模块已停用，请手动重启主程序并连接游戏完成本地只读兼容验证。"
+                : exactBuildMatch
+                    ? installedAdapter is null
+                        ? $"已安装 {module.DisplayName} v{module.Version}，连接兼容游戏版本后启用。"
+                        : _moduleCheckResult.StatusText
+                    : process is null
+                        ? $"已安装 {module.DisplayName} v{module.Version}；连接游戏后将执行本地只读兼容验证。"
+                        : installedAdapter is null
+                            ? $"已安装 {module.DisplayName} v{module.Version}，但当前构建未通过本地只读兼容验证，模块未启用。"
+                            : $"已安装 {module.DisplayName} v{module.Version}；当前构建已通过本地只读兼容验证并启用。";
             NotifyModuleControls();
         }
         finally

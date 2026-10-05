@@ -133,19 +133,27 @@ internal static partial class ModuleCompatibilityDiagnosticsService
                 GameModuleAvailability.Current => GameCompatibilityDiagnosticStatus.Passed,
                 GameModuleAvailability.UpdateAvailable or GameModuleAvailability.Available =>
                     GameCompatibilityDiagnosticStatus.Warning,
-                GameModuleAvailability.NotAvailable => GameCompatibilityDiagnosticStatus.Information,
+                GameModuleAvailability.NotAvailable => GameCompatibilityDiagnosticStatus.Failed,
                 _ => GameCompatibilityDiagnosticStatus.Information
             };
             Add(items, "专属模块", "服务器目录", status, context.CheckResult.StatusText);
-            if (context.CheckResult.RemoteModule is not null)
+            var catalogModule = context.CheckResult.RemoteModule ?? context.CheckResult.CatalogReferenceModule;
+            if (catalogModule is not null)
             {
+                var canValidateLocally = catalogModule.SupportsUnlistedBuildValidation &&
+                                         context.CheckResult.Availability != GameModuleAvailability.NotAvailable;
                 Add(items, "专属模块", "目录构建记录",
                     context.CheckResult.IsExactBuildMatch
                         ? GameCompatibilityDiagnosticStatus.Passed
-                        : GameCompatibilityDiagnosticStatus.Warning,
+                        : canValidateLocally
+                            ? GameCompatibilityDiagnosticStatus.Warning
+                            : GameCompatibilityDiagnosticStatus.Failed,
                     context.CheckResult.IsExactBuildMatch
                         ? "当前构建指纹已被服务器目录明确收录。"
-                        : "服务器目录未明确收录当前构建；最终由本地模块执行安全兼容检查。");
+                        : canValidateLocally
+                            ? "服务器目录未明确收录当前构建；允许下载，但只有本地模块只读兼容检查通过后才会启用。"
+                            : "服务器目录未明确收录当前构建，且模块未声明可对未知构建执行本地安全验证。");
+                AddCatalogBuildComparisonItems(items, context, catalogModule, canValidateLocally);
             }
         }
         else
@@ -295,6 +303,58 @@ internal static partial class ModuleCompatibilityDiagnosticsService
             ? GameCompatibilityDiagnosticStatus.Information
             : GameCompatibilityDiagnosticStatus.Passed,
         string.IsNullOrWhiteSpace(value) ? "未提供" : value);
+
+    private static void AddCatalogBuildComparisonItems(
+        ICollection<ModuleCompatibilityReportItem> items,
+        ModuleCompatibilityDiagnosticContext context,
+        GameModuleCatalogEntry module,
+        bool canValidateLocally)
+    {
+        var version = context.Version;
+        AddCatalogBuildComparison(items, "EXE 对照",
+            context.Fingerprint?.Sha256 ?? version?.ExecutableSha256 ?? string.Empty,
+            module.CompatibleBuilds.Select(build => build.ExecutableSha256), canValidateLocally);
+        AddCatalogBuildComparison(items, "GameAssembly 对照",
+            context.Fingerprint?.GameAssemblySha256 ?? version?.GameAssemblySha256 ?? string.Empty,
+            module.CompatibleBuilds.Select(build => build.GameAssemblySha256), canValidateLocally);
+        AddCatalogBuildComparison(items, "metadata 对照",
+            context.Fingerprint?.MetadataSha256 ?? version?.MetadataSha256 ?? string.Empty,
+            module.CompatibleBuilds.Select(build => build.MetadataSha256), canValidateLocally);
+    }
+
+    private static void AddCatalogBuildComparison(
+        ICollection<ModuleCompatibilityReportItem> items,
+        string displayName,
+        string current,
+        IEnumerable<string> catalogValues,
+        bool canValidateLocally)
+    {
+        var expected = catalogValues.Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (string.IsNullOrWhiteSpace(current) || expected.Count == 0)
+        {
+            Add(items, "目录指纹对照", displayName, GameCompatibilityDiagnosticStatus.Information,
+                "当前值或目录值未提供，无法逐项对照。");
+            return;
+        }
+
+        var matched = expected.Any(value => string.Equals(value, current, StringComparison.OrdinalIgnoreCase));
+        var status = matched
+            ? GameCompatibilityDiagnosticStatus.Passed
+            : canValidateLocally
+                ? GameCompatibilityDiagnosticStatus.Warning
+                : GameCompatibilityDiagnosticStatus.Failed;
+        var expectedDisplay = string.Join("、", expected.Take(3).Select(ShortHash));
+        if (expected.Count > 3) expectedDisplay += $" 等 {expected.Count} 个";
+        Add(items, "目录指纹对照", displayName, status,
+            matched
+                ? $"当前 {ShortHash(current)} 已命中目录登记值（共 {expected.Count} 个）。"
+                : $"当前 {ShortHash(current)} 未命中目录值：{expectedDisplay}。");
+    }
+
+    private static string ShortHash(string value) =>
+        value.Length <= 12 ? value : $"{value[..12]}…";
 
     private static void AddOptional(
         ICollection<ModuleCompatibilityReportItem> items,

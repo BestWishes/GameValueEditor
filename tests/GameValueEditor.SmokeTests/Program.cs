@@ -226,6 +226,37 @@ try
            !compatibilityReport.Text.Contains("0x1234", StringComparison.OrdinalIgnoreCase) &&
            !compatibilityReport.Text.Contains(@"C:\Users\", StringComparison.OrdinalIgnoreCase),
         "Compatibility report exposed a local path, username, PID, or memory address");
+    var comparisonModule = new GameModuleCatalogEntry
+    {
+        Id = api5Adapter.Id,
+        Version = "1.1.0",
+        DisplayName = api5Adapter.DisplayName,
+        SupportsUnlistedBuildValidation = true,
+        CompatibleBuilds =
+        [
+            new GameModuleBuildMatch
+            {
+                ExecutableSha256 = diagnosticFingerprint.Sha256,
+                GameAssemblySha256 = new string('E', 64),
+                MetadataSha256 = new string('F', 64)
+            }
+        ]
+    };
+    var comparisonReport = ModuleCompatibilityDiagnosticsService.Create(new ModuleCompatibilityDiagnosticContext(
+        "0.4.5", diagnosticVersion, diagnosticProcess, diagnosticFingerprint, api5Adapter.Id,
+        null, null,
+        new GameModuleCheckResult(GameModuleAvailability.Available, comparisonModule, null,
+            "当前构建需要本地验证。", false, CatalogReferenceModule: comparisonModule),
+        null, []));
+    Assert(comparisonReport.Items.Any(item =>
+               item.Category == "目录指纹对照" && item.DisplayName == "EXE 对照" &&
+               item.Status == GameCompatibilityDiagnosticStatus.Passed) &&
+           comparisonReport.Items.Any(item =>
+               item.Category == "目录指纹对照" && item.DisplayName == "GameAssembly 对照" &&
+               item.Status == GameCompatibilityDiagnosticStatus.Warning) &&
+           comparisonReport.Text.Contains("CCCCCCCCCCCC", StringComparison.Ordinal) &&
+           comparisonReport.Text.Contains("EEEEEEEEEEEE", StringComparison.Ordinal),
+        "Compatibility report did not explain catalog fingerprint matches and differences");
     var throwingDiagnosticAdapter = new SmokeTestModuleAdapter { ThrowCompatibilityDiagnostics = true };
     var isolatedFailureReport = ModuleCompatibilityDiagnosticsService.Create(new ModuleCompatibilityDiagnosticContext(
         "0.4.3", diagnosticVersion, diagnosticProcess, diagnosticFingerprint, throwingDiagnosticAdapter.Id,
@@ -538,6 +569,7 @@ try
             "displayName": "测试专属模块",
             "gameDisplayName": "测试游戏",
             "hostApiVersion": 5,
+            "supportsUnlistedBuildValidation": true,
             "minimumHostVersion": "0.4.4",
             "processNames": ["MatchedGame"],
             "compatibleBuilds": [{"executableSha256": "EXE", "gameAssemblySha256": "ASM", "metadataSha256": "META"}],
@@ -549,6 +581,7 @@ try
               {
                 "version": "1.1.0",
                 "hostApiVersion": 5,
+                "supportsUnlistedBuildValidation": true,
                 "minimumHostVersion": "0.4.4",
                 "compatibleBuilds": [{"executableSha256": "EXE", "gameAssemblySha256": "ASM", "metadataSha256": "META"}],
                 "editors": [{"id":"test.inventory"},{"id":"test.characters"}],
@@ -596,9 +629,82 @@ try
             "An unlisted connected game could not check for a compatible module");
         var changedBuild = new VersionFingerprint("test", "", "", "OTHER-EXE", 1, "x64", "", "OTHER-ASM", "OTHER-META");
         var changedBuildAvailable = await catalogService.CheckAsync("MatchedGame", changedBuild);
-        Assert(changedBuildAvailable.Availability == GameModuleAvailability.NotAvailable &&
-               changedBuildAvailable.StatusText.Contains("不兼容当前游戏构建", StringComparison.Ordinal),
-            "An unlisted game build was incorrectly offered a module package");
+        Assert(changedBuildAvailable.Availability == GameModuleAvailability.Available &&
+               changedBuildAvailable.RemoteModule?.Version == "1.1.0" &&
+               !changedBuildAvailable.IsExactBuildMatch && changedBuildAvailable.RollbackModule is null &&
+               changedBuildAvailable.StatusText.Contains("本地只读兼容验证", StringComparison.Ordinal),
+            "An opted-in module was not offered for local validation of an unlisted build");
+        var strictCatalogJson = moduleCatalogJson.Replace(
+            "\"supportsUnlistedBuildValidation\": true",
+            "\"supportsUnlistedBuildValidation\": false",
+            StringComparison.Ordinal);
+        using var strictCatalogClient = new HttpClient(new StaticResponseHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(strictCatalogJson, Encoding.UTF8, "application/json")
+            }));
+        var strictCatalogService = new GameModuleCatalogService(
+            Path.Combine(serviceTestRoot, "modules-strict-check"), strictCatalogClient);
+        var strictChangedBuild = await strictCatalogService.CheckAsync("MatchedGame", changedBuild);
+        Assert(strictChangedBuild.Availability == GameModuleAvailability.NotAvailable &&
+               strictChangedBuild.RemoteModule is null && strictChangedBuild.CatalogReferenceModule is not null &&
+               strictChangedBuild.StatusText.Contains("未声明", StringComparison.Ordinal),
+            "A module without explicit unlisted-build validation capability was offered for download");
+        var exactPriorityCatalogJson = """
+        {
+          "schemaVersion": 5,
+          "hostApiVersion": 7,
+          "modules": [{
+            "id": "game.test.priority",
+            "version": "1.1.0",
+            "displayName": "精确优先测试模块",
+            "gameDisplayName": "测试游戏",
+            "hostApiVersion": 5,
+            "supportsUnlistedBuildValidation": true,
+            "minimumHostVersion": "0.4.4",
+            "processNames": ["PriorityGame"],
+            "compatibleBuilds": [{"executableSha256": "NEW-EXE", "gameAssemblySha256": "NEW-ASM", "metadataSha256": "NEW-META"}],
+            "editors": [{"id":"test.inventory"}],
+            "downloadUrl": "https://example.invalid/module-new.zip",
+            "sizeBytes": 1,
+            "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "releases": [
+              {
+                "version": "1.1.0",
+                "hostApiVersion": 5,
+                "supportsUnlistedBuildValidation": true,
+                "minimumHostVersion": "0.4.4",
+                "compatibleBuilds": [{"executableSha256": "NEW-EXE", "gameAssemblySha256": "NEW-ASM", "metadataSha256": "NEW-META"}],
+                "editors": [{"id":"test.inventory"}],
+                "downloadUrl": "https://example.invalid/module-new.zip",
+                "sizeBytes": 1,
+                "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+              },
+              {
+                "version": "1.0.0",
+                "hostApiVersion": 5,
+                "minimumHostVersion": "0.4.4",
+                "compatibleBuilds": [{"executableSha256": "EXE", "gameAssemblySha256": "ASM", "metadataSha256": "META"}],
+                "editors": [{"id":"test.inventory"}],
+                "downloadUrl": "https://example.invalid/module-old.zip",
+                "sizeBytes": 1,
+                "sha256": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+              }
+            ]
+          }]
+        }
+        """;
+        using var exactPriorityClient = new HttpClient(new StaticResponseHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(exactPriorityCatalogJson, Encoding.UTF8, "application/json")
+            }));
+        var exactPriorityService = new GameModuleCatalogService(
+            Path.Combine(serviceTestRoot, "modules-exact-priority"), exactPriorityClient);
+        var exactPriorityResult = await exactPriorityService.CheckAsync("PriorityGame", transientFingerprint);
+        Assert(exactPriorityResult.Availability == GameModuleAvailability.Available &&
+               exactPriorityResult.RemoteModule?.Version == "1.0.0" && exactPriorityResult.IsExactBuildMatch,
+            "A newer unlisted-build fallback displaced an older exact build candidate");
 
         var steamApps = Path.Combine(serviceTestRoot, "Steam", "steamapps");
         var steamGameDirectory = Path.Combine(steamApps, "common", "A1");
@@ -640,6 +746,21 @@ try
             "Module download did not report completion progress");
         Assert(installService.FindInstalled(remoteModule.Id)?.Version == "1.1.0",
             "Verified module installation was not persisted");
+        remoteModule.SupportsUnlistedBuildValidation = false;
+        var mismatchService = new GameModuleCatalogService(
+            Path.Combine(serviceTestRoot, "modules-capability-mismatch"), moduleClient);
+        try
+        {
+            await mismatchService.InstallAsync(remoteModule);
+            throw new InvalidOperationException("A package/catalog unlisted-build capability mismatch was accepted");
+        }
+        catch (InvalidOperationException exception) when (exception.Message.Contains("清单不一致", StringComparison.Ordinal))
+        {
+        }
+        finally
+        {
+            remoteModule.SupportsUnlistedBuildValidation = true;
+        }
         var installedCheck = await installService.CheckAsync(matchingGame, matchingVersion);
         Assert(installedCheck.Availability == GameModuleAvailability.Current &&
                installedCheck.RollbackModule?.Version == "1.0.0",
@@ -1324,7 +1445,7 @@ static byte[] CreateModuleArchive(string id, string version, string assemblyPath
         var manifest = archive.CreateEntry("module.json");
         using (var writer = new StreamWriter(manifest.Open(), Encoding.UTF8, leaveOpen: false))
             writer.Write($$"""
-            {"id":"{{id}}","version":"{{version}}","displayName":"测试多编辑器游戏模块","gameDisplayName":"测试游戏","description":"测试","assemblyFile":"{{Path.GetFileName(assemblyPath)}}","hostApiVersion":5,"minimumHostVersion":"0.4.4","processNames":["MatchedGame"],"compatibleBuilds":[{"executableSha256":"EXE","gameAssemblySha256":"ASM","metadataSha256":"META"}],"contributors":[{"githubId":1,"githubLogin":"tester","displayName":"测试贡献者","profileUrl":"https://github.com/tester","firstContributionDate":"2026-01-01","latestContributionDate":"2026-01-02"}],"editors":[{"id":"test.inventory","displayName":"背包物品","kind":"collection","order":100,"sessionOnly":false},{"id":"test.characters","displayName":"人物属性","kind":"master-detail","order":200,"sessionOnly":true}]}
+            {"id":"{{id}}","version":"{{version}}","displayName":"测试多编辑器游戏模块","gameDisplayName":"测试游戏","description":"测试","assemblyFile":"{{Path.GetFileName(assemblyPath)}}","hostApiVersion":5,"supportsUnlistedBuildValidation":true,"minimumHostVersion":"0.4.4","processNames":["MatchedGame"],"compatibleBuilds":[{"executableSha256":"EXE","gameAssemblySha256":"ASM","metadataSha256":"META"}],"contributors":[{"githubId":1,"githubLogin":"tester","displayName":"测试贡献者","profileUrl":"https://github.com/tester","firstContributionDate":"2026-01-01","latestContributionDate":"2026-01-02"}],"editors":[{"id":"test.inventory","displayName":"背包物品","kind":"collection","order":100,"sessionOnly":false},{"id":"test.characters","displayName":"人物属性","kind":"master-detail","order":200,"sessionOnly":true}]}
             """);
         var assembly = archive.CreateEntry(Path.GetFileName(assemblyPath));
         using var assemblyStream = assembly.Open();
