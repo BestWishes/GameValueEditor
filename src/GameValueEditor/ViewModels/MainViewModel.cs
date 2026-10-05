@@ -1298,7 +1298,7 @@ public sealed class MainViewModel : ObservableObject
         var game = SelectedGame ?? throw new InvalidOperationException("请先把当前进程保存入库。");
         var version = SelectedVersion ?? throw new InvalidOperationException("请先保存并选择当前游戏版本。");
         EnsureSelectedVersionMatchesAttached();
-        if (string.IsNullOrWhiteSpace(fieldKey)) throw new InvalidOperationException("请填写游戏内的精确字段键，例如物品名“赤阳花”。");
+        if (string.IsNullOrWhiteSpace(fieldKey)) throw new InvalidOperationException("请填写模块定义的稳定字段键；物品模块通常使用精确物品名。");
         if (string.IsNullOrWhiteSpace(displayName)) throw new InvalidOperationException("字段备注名称必须由玩家填写。");
 
         var current = await Task.Run(() => adapter.ReadField(process, fieldKey.Trim()));

@@ -18,7 +18,7 @@
         <TextBlock Grid.Row="1" Margin="0,7,0,18" Foreground="{DynamicResource MutedTextBrush}"
                    Text="适配器用游戏内的稳定字段键重新定位对象；列表里的备注名称仍由你自己填写。" TextWrapping="Wrap"/>
         <Label Grid.Row="2" Content="游戏内字段键 *" Padding="0,0,0,5"/>
-        <TextBox x:Name="FieldKeyTextBox" Grid.Row="3" Margin="0,0,0,12" ToolTip="fzzml 背包适配器中填写精确物品名，例如：赤阳花"/>
+        <TextBox x:Name="FieldKeyTextBox" Grid.Row="3" Margin="0,0,0,12" ToolTip="填写模块定义的稳定字段键；物品模块通常使用精确物品名"/>
         <Label Grid.Row="4" Content="备注名称 *" Padding="0,0,0,5"/>
         <TextBox x:Name="DisplayNameTextBox" Grid.Row="5" Margin="0,0,0,12"/>
         <StackPanel Grid.Row="6">

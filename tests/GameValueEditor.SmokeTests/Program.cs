@@ -8,6 +8,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -1063,111 +1064,10 @@ try
     dialogThread.Join();
     if (dialogFailure is not null) throw new InvalidOperationException("Editable group dialog smoke test failed", dialogFailure);
 
-    if (args.Contains("--fzzml-live", StringComparer.OrdinalIgnoreCase))
+    foreach (var moduleArgument in args.Where(argument =>
+                 argument.StartsWith("--verify-module-package=", StringComparison.OrdinalIgnoreCase)))
     {
-        using var liveProcess = Process.GetProcessesByName("fzzml").FirstOrDefault()
-                                ?? throw new InvalidOperationException("fzzml is not running");
-        var path = liveProcess.MainModule?.FileName ?? throw new InvalidOperationException("Unable to resolve fzzml path");
-        var liveItem = new ProcessItem
-        {
-            ProcessId = liveProcess.Id,
-            ProcessName = liveProcess.ProcessName,
-            ExecutablePath = path,
-            StartTimeUtc = liveProcess.StartTime.ToUniversalTime()
-        };
-        var liveFingerprint = await new VersionFingerprintService().CreateAsync(path);
-        var liveModulesDirectory = Environment.GetEnvironmentVariable("GVE_MODULES_DIRECTORY");
-        using var liveRegistry = new GameAdapterRegistry(liveModulesDirectory);
-        var installedAdapter = liveRegistry.FindById("game.fzzml")
-                               ?? throw new InvalidOperationException(
-                                   $"Installed fzzml module could not be loaded: {string.Join(" | ", liveRegistry.LoadErrors)}");
-        var adapter = liveRegistry.Resolve(liveItem, liveFingerprint)
-                      ?? throw new InvalidOperationException(
-                          $"Installed fzzml module rejected the current build: exe={liveFingerprint.Sha256}, " +
-                          $"assembly={liveFingerprint.GameAssemblySha256}, metadata={liveFingerprint.MetadataSha256}, " +
-                          $"supports={installedAdapter.Supports(liveItem, liveFingerprint)}");
-        var liveValue = adapter.ReadField(liveItem, "赤阳花");
-        Assert(long.TryParse(liveValue.DisplayValue, out var liveCount) && liveCount >= 0,
-            $"Unexpected live 赤阳花 count: {liveValue.DisplayValue}");
-        Assert(adapter is IInventoryGameAdapter, "fzzml adapter does not expose inventory enumeration");
-        var inventory = ((IInventoryGameAdapter)adapter).ReadInventory(liveItem);
-        var liveInventoryItem = inventory.Single(item => item.FieldKey == "赤阳花");
-        Assert(liveInventoryItem.Count == liveCount, "Inventory enumeration and keyed read disagree");
-        Console.WriteLine($"Live adapter passed: {adapter.DisplayName}, 赤阳花={liveValue.DisplayValue}, {liveValue.Status}.");
-        var characterAdapter = adapter as ICharacterAttributesGameAdapter;
-        Assert(characterAdapter is not null && characterAdapter.SupportsCharacterAttributes(liveItem),
-            "fzzml adapter does not expose the character-attributes editor for this build");
-        var characters = characterAdapter!.ReadCharacters(liveItem);
-        Assert(characters.Count > 0 && characters.All(character => character.Attributes.Count == 5),
-            "Character editor did not enumerate five writable dimensions per character");
-        var firstCharacter = characters[0];
-        var firstAttribute = firstCharacter.Attributes[0];
-        var sameValue = characterAdapter!.WriteCharacterAttribute(
-            liveItem, firstCharacter.CharacterId, firstAttribute.Key, firstAttribute.RawValue);
-        Assert(sameValue.Attributes.Single(attribute => attribute.Key == firstAttribute.Key).RawValue == firstAttribute.RawValue,
-            "Character editor same-value main-thread validation failed");
-        Console.WriteLine($"Live character editor passed: {characters.Count} characters, same-value write {firstCharacter.DisplayName}/{firstAttribute.DisplayName}={firstAttribute.RawValue}.");
-        var setArgument = args.FirstOrDefault(argument => argument.StartsWith("--fzzml-set=", StringComparison.OrdinalIgnoreCase));
-        if (setArgument is not null)
-        {
-            var requested = setArgument[(setArgument.IndexOf('=') + 1)..];
-            Assert(int.TryParse(requested, out var requestedValue) && requestedValue is >= 0 and <= 1000,
-                "Live fzzml smoke writes are intentionally limited to 0-1000 to avoid disrupting the player's save during automated validation");
-            var written = adapter.WriteField(liveItem, "赤阳花", requested);
-            Assert(written.DisplayValue == requested, $"Live adapter write mismatch: {written.DisplayValue}");
-            Console.WriteLine($"Live adapter write passed: 赤阳花={written.DisplayValue}, {written.Status}.");
-        }
-    }
-
-    if (args.Contains("--worldapart-live", StringComparer.OrdinalIgnoreCase))
-    {
-        using var liveProcess = Process.GetProcessesByName("WorldApart")
-            .FirstOrDefault(candidate =>
-            {
-                try { return candidate.Modules.Cast<ProcessModule>().Any(module =>
-                    string.Equals(module.ModuleName, "GameAssembly.dll", StringComparison.OrdinalIgnoreCase)); }
-                catch { return false; }
-            }) ?? throw new InvalidOperationException("WorldApart data process is not running");
-        var path = liveProcess.MainModule?.FileName ?? throw new InvalidOperationException("Unable to resolve WorldApart path");
-        var liveItem = new ProcessItem
-        {
-            ProcessId = liveProcess.Id,
-            ProcessName = liveProcess.ProcessName,
-            ExecutablePath = path,
-            StartTimeUtc = liveProcess.StartTime.ToUniversalTime()
-        };
-        var liveFingerprint = await new VersionFingerprintService().CreateAsync(path);
-        var liveModulesDirectory = Environment.GetEnvironmentVariable("GVE_MODULES_DIRECTORY");
-        using var liveRegistry = new GameAdapterRegistry(liveModulesDirectory);
-        var adapter = liveRegistry.Resolve(liveItem, liveFingerprint)
-                      ?? throw new InvalidOperationException(
-                          $"WorldApart module rejected the current build: {string.Join(" | ", liveRegistry.LoadErrors)}");
-        Assert(adapter is IInventoryGameAdapter && adapter is ICharacterAttributesGameAdapter,
-            "WorldApart module did not expose both editors");
-        var inventoryAdapter = (IInventoryGameAdapter)adapter;
-        var characterAdapter = (ICharacterAttributesGameAdapter)adapter;
-        var inventory = inventoryAdapter.ReadInventory(liveItem);
-        Assert(inventory.Count > 0, "WorldApart inventory was empty");
-        var inventorySample = inventory.First(item => item.Count is >= 0 and <= int.MaxValue);
-        var inventorySameValue = adapter.WriteField(liveItem, inventorySample.FieldKey, inventorySample.CountDisplay);
-        Assert(inventorySameValue.DisplayValue == inventorySample.CountDisplay,
-            "WorldApart inventory same-value write verification failed");
-        var characters = characterAdapter.ReadCharacters(liveItem);
-        var character = characters.Single();
-        var attribute = character.Attributes.First(candidate => candidate.CanWrite && candidate.RawValue >= 0);
-        var characterSameValue = characterAdapter.WriteCharacterAttribute(
-            liveItem, character.CharacterId, attribute.Key, attribute.RawValue);
-        Assert(characterSameValue.Attributes.Single(candidate => candidate.Key == attribute.Key).RawValue == attribute.RawValue,
-            "WorldApart character same-value write verification failed");
-        Assert(adapter is IGameVersionMetadataProvider,
-            "WorldApart module did not expose game-declared version metadata");
-        var metadataProvider = (IGameVersionMetadataProvider)adapter;
-        var declared = metadataProvider.ReadGameVersionMetadata(liveItem.ToModuleContext());
-        Assert(!string.IsNullOrWhiteSpace(declared.Version) && !string.IsNullOrWhiteSpace(declared.ProductName),
-            "WorldApart game-declared version metadata was empty");
-        Console.WriteLine($"WorldApart live module passed: {declared.ProductName} {declared.Version}, " +
-                          $"inventory {inventorySample.DisplayName}={inventorySample.CountDisplay}, " +
-                          $"attribute {attribute.DisplayName}={attribute.RawValueDisplay}.");
+        VerifyPackagedModule(moduleArgument[(moduleArgument.IndexOf('=') + 1)..]);
     }
 
     Console.WriteLine("Smoke tests passed: codec, scaled routine, scanner, writer, fingerprint.");
@@ -1187,7 +1087,7 @@ static byte[] CreateModuleArchive(string id, string version, string assemblyPath
         var manifest = archive.CreateEntry("module.json");
         using (var writer = new StreamWriter(manifest.Open(), Encoding.UTF8, leaveOpen: false))
             writer.Write($$"""
-            {"id":"{{id}}","version":"{{version}}","displayName":"测试专属模块","gameDisplayName":"测试游戏","description":"测试","assemblyFile":"{{Path.GetFileName(assemblyPath)}}","hostApiVersion":2,"processNames":["MatchedGame"],"compatibleBuilds":[{"executableSha256":"EXE","gameAssemblySha256":"ASM","metadataSha256":"META"}],"contributors":[{"githubId":1,"githubLogin":"tester","displayName":"测试贡献者","profileUrl":"https://github.com/tester","firstContributionDate":"2026-01-01","latestContributionDate":"2026-01-02"}],"editors":[{"id":"test.inventory","displayName":"背包物品","kind":"collection","order":100,"sessionOnly":false},{"id":"test.characters","displayName":"人物属性","kind":"master-detail","order":200,"sessionOnly":true}]}
+            {"id":"{{id}}","version":"{{version}}","displayName":"测试多编辑器游戏模块","gameDisplayName":"测试游戏","description":"测试","assemblyFile":"{{Path.GetFileName(assemblyPath)}}","hostApiVersion":2,"processNames":["MatchedGame"],"compatibleBuilds":[{"executableSha256":"EXE","gameAssemblySha256":"ASM","metadataSha256":"META"}],"contributors":[{"githubId":1,"githubLogin":"tester","displayName":"测试贡献者","profileUrl":"https://github.com/tester","firstContributionDate":"2026-01-01","latestContributionDate":"2026-01-02"}],"editors":[{"id":"test.inventory","displayName":"背包物品","kind":"collection","order":100,"sessionOnly":false},{"id":"test.characters","displayName":"人物属性","kind":"master-detail","order":200,"sessionOnly":true}]}
             """);
         var assembly = archive.CreateEntry(Path.GetFileName(assemblyPath));
         using var assemblyStream = assembly.Open();
@@ -1203,8 +1103,111 @@ static GameAdapterRegistry LoadAndVerifyInstalledModule(string modulesDirectory)
     var installedRegistry = new GameAdapterRegistry(modulesDirectory);
     var loaded = installedRegistry.FindById("game.test.multi-editor");
     Assert(loaded is IInventoryGameAdapter && loaded is ICharacterAttributesGameAdapter && loaded.Editors.Count == 2,
-        "Installed multi-editor module was not dynamically loaded through Host API v2");
+        "Installed multi-editor module was not dynamically loaded through the module Host API");
     return installedRegistry;
+}
+
+static void VerifyPackagedModule(string archivePath)
+{
+    var resolvedArchive = Path.GetFullPath(archivePath);
+    Assert(File.Exists(resolvedArchive), $"Module package does not exist: {resolvedArchive}");
+    var verificationRoot = Path.Combine(Path.GetTempPath(), $"gve-module-contract-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(verificationRoot);
+    try
+    {
+        string moduleId;
+        string version;
+        int hostApiVersion;
+        string[] editorIds;
+        int contributorCount;
+        using (var archive = ZipFile.OpenRead(resolvedArchive))
+        {
+            var manifestEntry = archive.GetEntry("module.json")
+                                ?? throw new InvalidOperationException("Module package is missing module.json.");
+            using var manifestStream = manifestEntry.Open();
+            using var document = JsonDocument.Parse(manifestStream);
+            var root = document.RootElement;
+            moduleId = root.GetProperty("id").GetString() ?? string.Empty;
+            version = root.GetProperty("version").GetString() ?? string.Empty;
+            hostApiVersion = root.GetProperty("hostApiVersion").GetInt32();
+            editorIds = root.GetProperty("editors").EnumerateArray()
+                .Select(editor => editor.GetProperty("id").GetString() ?? string.Empty).ToArray();
+            contributorCount = root.TryGetProperty("contributors", out var contributors)
+                ? contributors.GetArrayLength()
+                : 0;
+        }
+
+        Assert(!string.IsNullOrWhiteSpace(moduleId) && !string.IsNullOrWhiteSpace(version),
+            "Module package identity is incomplete.");
+        var packageDirectory = Path.Combine(verificationRoot, "packages", moduleId, version);
+        Directory.CreateDirectory(packageDirectory);
+        using (var archive = ZipFile.OpenRead(resolvedArchive))
+        {
+            var packageRoot = Path.GetFullPath(packageDirectory) + Path.DirectorySeparatorChar;
+            foreach (var entry in archive.Entries)
+            {
+                var destination = Path.GetFullPath(Path.Combine(packageDirectory, entry.FullName));
+                Assert(destination.StartsWith(packageRoot, StringComparison.OrdinalIgnoreCase),
+                    "Module package contains an unsafe path.");
+                if (string.IsNullOrEmpty(entry.Name))
+                {
+                    Directory.CreateDirectory(destination);
+                    continue;
+                }
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                entry.ExtractToFile(destination, true);
+            }
+        }
+
+        var installed = new InstalledModuleDocument
+        {
+            Modules = [new InstalledModuleRecord(moduleId, version, DateTime.UtcNow)]
+        };
+        File.WriteAllText(Path.Combine(verificationRoot, "installed.json"), JsonSerializer.Serialize(installed));
+        LoadAndVerifyPackagedModule(verificationRoot, moduleId, hostApiVersion, editorIds);
+        Assert(contributorCount > 0, "Official packaged module has no contributor metadata.");
+        Console.WriteLine($"Verified packaged module: {moduleId} v{version}, {editorIds.Length} pages.");
+    }
+    finally
+    {
+        for (var attempt = 0; attempt < 4 && Directory.Exists(verificationRoot); attempt++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            try { Directory.Delete(verificationRoot, true); }
+            catch (UnauthorizedAccessException) when (attempt < 3) { Thread.Sleep(50); }
+            catch (IOException) when (attempt < 3) { Thread.Sleep(50); }
+        }
+        Assert(!Directory.Exists(verificationRoot), "Module compatibility test left a locked temporary package.");
+    }
+}
+
+[MethodImpl(MethodImplOptions.NoInlining)]
+static void LoadAndVerifyPackagedModule(
+    string modulesDirectory,
+    string moduleId,
+    int hostApiVersion,
+    IReadOnlyCollection<string> editorIds)
+{
+    using var registry = new GameAdapterRegistry(modulesDirectory);
+    Assert(registry.LoadErrors.Count == 0,
+        $"Packaged module failed to load: {string.Join(" | ", registry.LoadErrors)}");
+    IGameAdapter? adapter = registry.FindById(moduleId)
+                            ?? throw new InvalidOperationException($"Packaged module did not export {moduleId}.");
+    Assert(adapter.Editors.Select(editor => editor.Id).ToHashSet(StringComparer.Ordinal)
+            .SetEquals(editorIds),
+        "Packaged module editor identities changed after loading.");
+    if (hostApiVersion >= 4)
+    {
+        IGameEditorPageProvider? pageProvider = adapter as IGameEditorPageProvider
+                                                   ?? throw new InvalidOperationException(
+                                                       "Host API 4 packaged module does not provide module-owned pages.");
+        Assert(pageProvider.EditorPages.Select(page => page.EditorId).ToHashSet(StringComparer.Ordinal)
+                .SetEquals(editorIds),
+            "Packaged module page registrations do not match its editors.");
+        pageProvider = null;
+    }
+    adapter = null;
 }
 
 public sealed class SmokeTestModuleAdapter :

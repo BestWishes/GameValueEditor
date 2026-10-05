@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "0.4.0"
+    [ValidatePattern('^\d+\.\d+\.\d+$')] [string]$Version = "0.4.1"
 )
 
 $ErrorActionPreference = "Stop"
@@ -61,9 +61,7 @@ Copy-Item -LiteralPath (Join-Path $publishDir "GameValueEditor.exe") -Destinatio
 Copy-Item -LiteralPath (Join-Path $updaterPublishDir "GameValueEditor.Updater.exe") -Destination $packageDir
 Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $packageDir
 Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination $packageDir
-Copy-Item -LiteralPath (Join-Path $repoRoot "CONTRIBUTING.md") -Destination $packageDir
 Copy-Item -LiteralPath (Join-Path $repoRoot "SECURITY.md") -Destination $packageDir
-Copy-Item -LiteralPath (Join-Path $repoRoot "docs") -Destination $packageDir -Recurse
 
 if (Test-Path -LiteralPath $archivePath) {
     Remove-Item -LiteralPath $archivePath -Force

@@ -139,7 +139,7 @@ public sealed class GameAdapterRegistry : IDisposable
                 loadedAdapters.Add(adapter);
             }
             if (manifest.HostApiVersion >= 2 && loadedAdapters.Count != 1)
-                throw new InvalidOperationException("Host API v2 游戏包必须且只能导出一个 IGameAdapter。");
+                throw new InvalidOperationException("Host API 2 及以上游戏包必须且只能导出一个 IGameAdapter。");
             foreach (var adapter in loadedAdapters)
             {
                 if (_adapters.Any(existing => string.Equals(existing.Id, adapter.Id, StringComparison.Ordinal)))
@@ -253,6 +253,27 @@ public sealed class GameAdapterRegistry : IDisposable
             var adapterIds = adapter.Editors.Select(editor => editor.Id).ToHashSet(StringComparer.Ordinal);
             if (manifestIds.Count != manifest.Editors.Count || !manifestIds.SetEquals(adapterIds))
                 throw new InvalidOperationException("module.json 的编辑模块列表与程序集不一致。");
+
+            if (!string.Equals(adapter.DisplayName, manifest.DisplayName, StringComparison.Ordinal))
+                throw new InvalidOperationException("module.json 的模块显示名称与程序集不一致。");
+
+            foreach (var manifestEditor in manifest.Editors)
+            {
+                var descriptor = adapter.Editors.Single(editor =>
+                    string.Equals(editor.Id, manifestEditor.Id, StringComparison.Ordinal));
+                var manifestKind = manifestEditor.Kind switch
+                {
+                    "collection" => GameEditorKind.Collection,
+                    "master-detail" => GameEditorKind.MasterDetail,
+                    "property-grid" => GameEditorKind.PropertyGrid,
+                    _ => throw new InvalidOperationException($"module.json 的编辑模块类型无效：{manifestEditor.Kind}。")
+                };
+                if (!string.Equals(descriptor.DisplayName, manifestEditor.DisplayName, StringComparison.Ordinal) ||
+                    descriptor.Kind != manifestKind ||
+                    descriptor.Order != manifestEditor.Order ||
+                    descriptor.SessionOnly != manifestEditor.SessionOnly)
+                    throw new InvalidOperationException($"module.json 的编辑模块元数据与程序集不一致：{manifestEditor.Id}。");
+            }
         }
         if (manifest.HostApiVersion >= 4) GameEditorPageResolver.ValidateApi4Provider(adapter);
     }
@@ -307,6 +328,7 @@ public sealed class InstalledEditorManifest
     public string DisplayName { get; set; } = string.Empty;
     public string Kind { get; set; } = string.Empty;
     public int Order { get; set; }
+    public bool SessionOnly { get; set; }
 }
 
 public static class AdapterHostExtensions
