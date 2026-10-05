@@ -155,7 +155,7 @@ cd ../GameValueEditor-Modules
 ./scripts/verify-release.ps1 -Version 0.4.2
 ```
 
-该脚本依次执行 Release 构建、烟雾测试、自包含打包、发布包启动验证和更新器回滚验证。GitHub Release 在本地验证通过后通过 GitHub API 手工创建并校验线上 SHA-256。
+该脚本依次执行 Release 构建、烟雾测试、自包含打包、发布包启动验证和更新器回滚验证。验证完成后使用 `scripts/publish-github-release.ps1` 推送标签、创建或恢复 GitHub Release、显示资产上传进度并校验线上 SHA-256；脚本支持显式代理、环境变量代理和 Windows 系统代理，具体见 [本地发布流程](docs/RELEASE.md)。
 
 ## 搜索套路与专属适配器
 
