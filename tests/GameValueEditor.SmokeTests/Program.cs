@@ -1418,8 +1418,8 @@ static void VerifyPackagedModule(string archivePath)
             var packagesDirectory = Path.Combine(verificationRoot, "packages");
             if (Directory.Exists(packagesDirectory)) Directory.Delete(packagesDirectory, true);
             Assert(!Directory.Exists(packagesDirectory),
-                "A Host API 6 WPF module kept its installed source package locked.");
-            Console.WriteLine("Host API 6 WPF shadow context is retained until process exit as designed.");
+                "A Host API 6+ WPF module kept its installed source package locked.");
+            Console.WriteLine("Host API 6+ WPF shadow context is retained until process exit as designed.");
         }
         else
         {
