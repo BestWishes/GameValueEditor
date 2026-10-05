@@ -445,6 +445,8 @@ public sealed class MainViewModel : ObservableObject
     public bool CanUninstallGameModule => !_isModuleControlBlocked &&
         !string.IsNullOrWhiteSpace(ResolveActiveModuleId()) &&
         _moduleCatalogService.FindInstalled(ResolveActiveModuleId()) is not null;
+    public bool CanViewModuleCompatibilityDiagnostics => !_isModuleControlBlocked &&
+        ((AttachedProcess is not null && _attachedFingerprint is not null) || SelectedVersion is not null);
     public bool CanViewModuleContributors => !_isModuleControlBlocked && GetModuleContributors().Count > 0;
     public string ApplicationUpdateStatusText
     {
@@ -1860,6 +1862,56 @@ public sealed class MainViewModel : ObservableObject
         return _moduleCheckResult?.RemoteModule?.Contributors.Where(IsSafeContributor).ToList() ?? [];
     }
 
+    internal ModuleCompatibilityReport CreateModuleCompatibilityReport()
+    {
+        if (!CanViewModuleCompatibilityDiagnostics)
+            throw new InvalidOperationException("请先连接一个游戏，或选择带有版本信息的游戏库条目。");
+
+        var process = AttachedProcess;
+        var moduleId = ResolveActiveModuleId();
+        InstalledModuleManifest? manifest = null;
+        if (!string.IsNullOrWhiteSpace(moduleId))
+            manifest = _moduleCatalogService.GetInstalledManifest(moduleId);
+
+        if (string.IsNullOrWhiteSpace(moduleId))
+        {
+            var processName = process?.ProcessName ?? SelectedGame?.ProcessName ?? string.Empty;
+            var matches = _moduleCatalogService.GetInstalledManifests()
+                .Where(candidate => candidate.ProcessNames.Any(name =>
+                    string.Equals(name, processName, StringComparison.OrdinalIgnoreCase)))
+                .Take(2)
+                .ToList();
+            if (matches.Count == 1)
+            {
+                manifest = matches[0];
+                moduleId = manifest.Id;
+            }
+        }
+
+        var installed = string.IsNullOrWhiteSpace(moduleId)
+            ? null
+            : _moduleCatalogService.FindInstalled(moduleId);
+        var adapter = !string.IsNullOrWhiteSpace(moduleId)
+            ? _adapterRegistry.FindById(moduleId)
+            : _activeAdapter;
+        var checkResult = _moduleCheckResult;
+        if (checkResult?.RemoteModule is not null && !string.IsNullOrWhiteSpace(moduleId) &&
+            !string.Equals(checkResult.RemoteModule.Id, moduleId, StringComparison.Ordinal))
+            checkResult = null;
+
+        return ModuleCompatibilityDiagnosticsService.Create(new(
+            ApplicationVersion.Current,
+            SelectedVersion,
+            process,
+            _attachedFingerprint,
+            moduleId,
+            installed,
+            manifest,
+            checkResult,
+            adapter,
+            _adapterRegistry.LoadErrors));
+    }
+
     private static bool IsSafeContributor(GameModuleContributor contributor) =>
         contributor.GithubId > 0 &&
         !string.IsNullOrWhiteSpace(contributor.DisplayName) &&
@@ -2109,6 +2161,7 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(CanInstallGameModule));
         OnPropertyChanged(nameof(ModuleInstallActionText));
         OnPropertyChanged(nameof(CanUninstallGameModule));
+        OnPropertyChanged(nameof(CanViewModuleCompatibilityDiagnostics));
         OnPropertyChanged(nameof(CanViewModuleContributors));
     }
 

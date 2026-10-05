@@ -173,6 +173,12 @@ public partial class MainWindow : Window
         new ModuleContributorsDialog(contributors) { Owner = this }.ShowDialog();
     });
 
+    private void ShowModuleCompatibilityDiagnostics_OnClick(object sender, RoutedEventArgs e) => RunGuarded(() =>
+    {
+        var report = _viewModel.CreateModuleCompatibilityReport();
+        new ModuleCompatibilityDialog(report) { Owner = this }.ShowDialog();
+    });
+
     private async void ApplicationUpdate_OnClick(object sender, RoutedEventArgs e)
     {
         await RunGuardedAsync(async () =>

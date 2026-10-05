@@ -436,6 +436,7 @@
                                         <ColumnDefinition Width="Auto"/>
                                         <ColumnDefinition Width="Auto"/>
                                         <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
                                     <StackPanel>
                                         <TextBlock Text="{Binding ActiveAdapterText}" FontWeight="SemiBold"/>
@@ -447,8 +448,10 @@
                                             Click="InstallGameModule_OnClick" Margin="0,0,20,0"/>
                                     <Button Grid.Column="3" Content="卸载" IsEnabled="{Binding CanUninstallGameModule}"
                                             Click="UninstallGameModule_OnClick"/>
-                                    <Button Grid.Column="4" Content="贡献者" IsEnabled="{Binding CanViewModuleContributors}"
-                                            Click="ShowModuleContributors_OnClick" Margin="18,0,0,0"/>
+                                    <Button x:Name="ModuleCompatibilityDiagnosticsButton" Grid.Column="4" Content="兼容性诊断" IsEnabled="{Binding CanViewModuleCompatibilityDiagnostics}"
+                                            Click="ShowModuleCompatibilityDiagnostics_OnClick" Margin="18,0,0,0"/>
+                                    <Button Grid.Column="5" Content="贡献者" IsEnabled="{Binding CanViewModuleContributors}"
+                                            Click="ShowModuleContributors_OnClick" Margin="8,0,0,0"/>
                                 </Grid>
                             </Border>
                             <Grid Grid.Row="1" Margin="0,12,0,0">

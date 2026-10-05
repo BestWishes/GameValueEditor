@@ -4,7 +4,7 @@ namespace GameValueEditor.ModuleSdk;
 
 public static class ModuleHostApi
 {
-    public const int CurrentVersion = 4;
+    public const int CurrentVersion = 5;
 }
 
 public static class ModuleFieldKey
@@ -89,6 +89,32 @@ public sealed record GameEditorFieldPolicy(bool SessionOnly, bool CanLock);
 public interface IGameEditorFieldPolicyProvider : IGameAdapter
 {
     GameEditorFieldPolicy? GetFieldPolicy(string editorId, string entityId, string fieldId);
+}
+
+public enum GameCompatibilityDiagnosticStatus
+{
+    Information,
+    Passed,
+    Warning,
+    Failed
+}
+
+public sealed record GameCompatibilityDiagnostic(
+    string DisplayName,
+    GameCompatibilityDiagnosticStatus Status,
+    string Message);
+
+/// <summary>
+/// Read-only compatibility diagnostics for the current process and build. This is
+/// optional for older module contracts and required when module.json selects API 5.
+/// Implementations must not write memory, invoke game save paths, or expose local
+/// filesystem paths, process IDs, memory addresses, or save data in their messages.
+/// </summary>
+public interface IGameCompatibilityDiagnosticsProvider : IGameAdapter
+{
+    IReadOnlyList<GameCompatibilityDiagnostic> GetCompatibilityDiagnostics(
+        GameProcessContext process,
+        GameBuildIdentity fingerprint);
 }
 
 public interface IGameAdapter

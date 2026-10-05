@@ -11,13 +11,13 @@
 - 进程发现、逻辑进程组、构建指纹、内存扫描和游戏加速。
 - 游戏库、快捷入口、锁定、主题、弹框、模块安装和应用更新。
 - `collection`、`master-detail`、`property-grid` 三类标准页面模板。
-- `GameValueEditor.ModuleSdk` Host API 与模块加载、隔离和安全校验。
+- `GameValueEditor.ModuleSdk` Host API，以及模块加载、隔离、安全校验和通用兼容性诊断界面。
 
 独立的 `GameValueEditor-Modules` 仓库负责：
 
 - 每个游戏的稳定模块 ID、进程身份和兼容构建。
 - 页面清单、稳定编辑器 ID、显示名称、顺序、空状态和字段生命周期。
-- 游戏运行时定位、线程切换、刷新、保存和真实回读。
+- 游戏运行时定位、线程切换、刷新、保存、真实回读，以及可选的游戏专属只读诊断项。
 - 游戏专属文档、实机测试、贡献者和发布资产。
 
 普通新增游戏不得要求主程序增加游戏 ID、页面名称、固定 Tab、编辑器后缀判断或游戏专属测试分支。只有两个以上游戏都需要的新交互形态，才考虑增加新的宿主标准页面角色。
@@ -43,7 +43,7 @@ LibraryDocument
 
 首次扫描完整遍历可读内存并把候选写入 `data/scan-temp` 分区；界面只物化有限预览，再次扫描仍过滤完整候选集。清空、断开、进程重建和正常退出都会清理对应临时目录。
 
-## Host API 4
+## Host API 5
 
 公共契约位于 `src/GameValueEditor.ModuleSdk`。CLR `AssemblyVersion` 保持兼容绑定，实际能力门槛由 `module.json.hostApiVersion` 控制。
 
@@ -52,10 +52,13 @@ LibraryDocument
 - `ICharacterAttributesGameAdapter`：人物属性页面能力。
 - `IEntityEditorsGameAdapter`：装备、资源、进度等实体数字字段能力。
 - `IGameEditorPageProvider`：API 4 必需，显式把每个编辑器绑定到标准页面角色。
+- `IGameCompatibilityDiagnosticsProvider`：API 5 必需，返回只读、可脱敏展示的游戏专属兼容检查结果。
 - `IGameEditorFieldPolicyProvider`：可选，声明混合页面中单个字段的持久化和锁定策略。
 - `IGameVersionMetadataProvider`：可选，只提供游戏自报版本信息，不能代替构建验证。
 
-宿主加载模块时核对程序集与 `module.json` 的模块显示名，以及编辑器 ID、名称、类型、顺序和生命周期。API 4 还要求每个编辑器恰好注册一个页面，并验证页面角色与适配器能力一致。
+宿主加载模块时核对程序集与 `module.json` 的模块显示名，以及编辑器 ID、名称、类型、顺序和生命周期。API 4 起要求每个编辑器恰好注册一个页面，并验证页面角色与适配器能力一致；API 5 起还要求实现兼容性诊断提供器。
+
+“兼容性诊断”由宿主统一生成基础报告，不依赖服务器目录或已安装模块才可打开。模块扩展诊断只能读取进程和构建状态，不得写内存、调用保存流程或返回本机路径、PID、内存地址、存档内容；宿主会再次脱敏，并把提供器异常隔离为失败项。
 
 ## 模块安装与隔离
 

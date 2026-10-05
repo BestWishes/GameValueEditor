@@ -22,7 +22,7 @@
 
 一个面向 Windows 离线单机游戏的本地数值扫描与管理工具。它不仅保存临时地址，还把玩家确认过的字段整理到按游戏、按版本隔离的本地游戏库中。
 
-> 最新版本：`v0.4.1`。项目只发布正式版本，不再设置预览版更新通道。
+> 最新版本：`v0.4.2`。项目只发布正式版本，不再设置预览版更新通道。
 
 ## 主要功能
 
@@ -45,6 +45,7 @@
 - 所有档案只保存在本机，写入时自动保留上一份配置备份。
 - 支持浅色、深色、护眼墨绿、暖砂纸张和雾蓝灰五套完整主题；标签页、列表、输入弹框、确认弹框、错误弹框和标题栏均跟随当前主题，并在进程列表显示程序图标。
 - “本游专属”支持从独立的 [GameValueEditor-Modules](https://github.com/BestWishes/GameValueEditor-Modules) 模块中心检查、校验、按需安装和卸载游戏专属模块；未入库但已连接的游戏也能“检查新有”，安装成功后会自动生成正常游戏库条目。模块从运行时影子副本加载，正式安装目录可安全卸载；若外部程序仍短暂占用文件，会记录并在下次启动继续清理。一个游戏包可以包含多个竖向排列的游戏内编辑模块。
+- “兼容性诊断”会汇总宿主/API 版本、当前构建指纹、模块安装与目录状态、加载错误、页面支持情况，以及模块提供的只读扩展检查。报告可一键复制，并自动隐藏本机路径、用户名、PID、内存地址和存档内容。
 - 模块顶部可查看整个游戏专属模块的贡献者；GitHub 名称可打开个人主页，并可按名称、首次贡献日期或最新贡献日期排序。贡献者不按具体编辑功能分级，也不显示贡献次数或排名。
 - “快捷入口”支持直接编辑备注名称、分组和当前值，并可锁定目标值持续保持。
 - 分组输入框支持直接输入、按文字筛选已有分组，或保留新文字创建分组。
@@ -130,7 +131,7 @@ dotnet run --project tests/GameValueEditor.SmokeTests/GameValueEditor.SmokeTests
 验证最终 ZIP 中的程序能够正常启动：
 
 ```powershell
-./scripts/test-package-startup.ps1 -ArchivePath ./dist/GameValueEditor-v0.4.1-win-x64.zip
+./scripts/test-package-startup.ps1 -ArchivePath ./dist/GameValueEditor-v0.4.2-win-x64.zip
 ```
 
 官方游戏模块已迁移到独立仓库。在相邻目录克隆模块中心后，可按游戏目录名构建任意模块：
@@ -151,7 +152,7 @@ cd ../GameValueEditor-Modules
 完整的正式版验证使用本地脚本执行，不依赖 GitHub Actions：
 
 ```powershell
-./scripts/verify-release.ps1 -Version 0.4.1
+./scripts/verify-release.ps1 -Version 0.4.2
 ```
 
 该脚本依次执行 Release 构建、烟雾测试、自包含打包、发布包启动验证和更新器回滚验证。GitHub Release 在本地验证通过后通过 GitHub API 手工创建并校验线上 SHA-256。

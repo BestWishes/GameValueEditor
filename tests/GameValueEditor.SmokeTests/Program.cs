@@ -158,12 +158,74 @@ try
     Assert(SemanticVersion.TryParse("1.2.10", out var higherPatch) &&
            SemanticVersion.TryParse("1.2.9", out var lowerPatch) && higherPatch.CompareTo(lowerPatch) > 0,
         "Semantic patch comparison failed");
-    Assert(ModuleHostApi.CurrentVersion == 4, "Host API version was not advanced for module-owned page contracts");
-    var api4Adapter = new SmokeTestModuleAdapter();
-    GameEditorPageResolver.ValidateApi4Provider(api4Adapter);
-    Assert(GameEditorPageResolver.Resolve(api4Adapter).Select(page => page.EditorId)
-               .SequenceEqual(api4Adapter.Editors.Select(editor => editor.Id)),
-        "Host API 4 module-owned page order or identity was not retained");
+    Assert(ModuleHostApi.CurrentVersion == 5, "Host API version was not advanced for compatibility diagnostics");
+    var api5Adapter = new SmokeTestModuleAdapter();
+    GameEditorPageResolver.ValidateApi4Provider(api5Adapter);
+    Assert(GameEditorPageResolver.Resolve(api5Adapter).Select(page => page.EditorId)
+               .SequenceEqual(api5Adapter.Editors.Select(editor => editor.Id)),
+        "Host API 5 module-owned page order or identity was not retained");
+    var diagnosticProcess = new ProcessItem
+    {
+        ProcessId = 424242,
+        ProcessName = "MatchedGame",
+        ExecutablePath = $@"C:\Users\{Environment.UserName}\Games\MatchedGame.exe",
+        StartTimeUtc = DateTime.UtcNow,
+        RuntimeKind = GameRuntimeKind.UnityIl2Cpp
+    };
+    var diagnosticFingerprint = new VersionFingerprint(
+        "1.0.0", "1.0.0", "1.0.0", new string('A', 64), 1, "x64", new string('B', 64),
+        new string('C', 64), new string('D', 64));
+    var diagnosticVersion = new GameVersionProfile
+    {
+        DisplayName = "1.0.0",
+        FileVersion = "1.0.0",
+        ProductVersion = "1.0.0",
+        ExecutableSha256 = diagnosticFingerprint.Sha256,
+        BuildFingerprint = diagnosticFingerprint.BuildSha256,
+        GameAssemblySha256 = diagnosticFingerprint.GameAssemblySha256,
+        MetadataSha256 = diagnosticFingerprint.MetadataSha256,
+        Architecture = "x64"
+    };
+    var diagnosticManifest = new InstalledModuleManifest
+    {
+        Id = api5Adapter.Id,
+        Version = "1.0.0",
+        DisplayName = api5Adapter.DisplayName,
+        HostApiVersion = 5,
+        Editors = api5Adapter.Editors.Select(editor => new InstalledEditorManifest
+        {
+            Id = editor.Id,
+            DisplayName = editor.DisplayName,
+            Kind = editor.Kind.ToString(),
+            Order = editor.Order,
+            SessionOnly = editor.SessionOnly
+        }).ToList()
+    };
+    var compatibilityReport = ModuleCompatibilityDiagnosticsService.Create(new ModuleCompatibilityDiagnosticContext(
+        "0.4.2", diagnosticVersion, diagnosticProcess, diagnosticFingerprint, api5Adapter.Id,
+        new InstalledModuleRecord(api5Adapter.Id, "1.0.0", DateTime.UtcNow), diagnosticManifest,
+        new GameModuleCheckResult(GameModuleAvailability.Current, null, null, "已是最新版本。", true),
+        api5Adapter, []));
+    Assert(compatibilityReport.Items.Any(item =>
+               item.Category == "模块扩展诊断" && item.DisplayName == "只读探测" &&
+               item.Status == GameCompatibilityDiagnosticStatus.Passed),
+        "Module-provided compatibility diagnostics were not included");
+    Assert(compatibilityReport.Items.Any(item =>
+               item.DisplayName == "敏感信息" && item.Message.Contains("已隐藏", StringComparison.Ordinal)),
+        "Sensitive module diagnostic output was not replaced");
+    Assert(!compatibilityReport.Text.Contains(Environment.UserName, StringComparison.OrdinalIgnoreCase) &&
+           !compatibilityReport.Text.Contains("424242", StringComparison.Ordinal) &&
+           !compatibilityReport.Text.Contains("0x1234", StringComparison.OrdinalIgnoreCase) &&
+           !compatibilityReport.Text.Contains(@"C:\Users\", StringComparison.OrdinalIgnoreCase),
+        "Compatibility report exposed a local path, username, PID, or memory address");
+    var throwingDiagnosticAdapter = new SmokeTestModuleAdapter { ThrowCompatibilityDiagnostics = true };
+    var isolatedFailureReport = ModuleCompatibilityDiagnosticsService.Create(new ModuleCompatibilityDiagnosticContext(
+        "0.4.2", diagnosticVersion, diagnosticProcess, diagnosticFingerprint, throwingDiagnosticAdapter.Id,
+        new InstalledModuleRecord(throwingDiagnosticAdapter.Id, "1.0.0", DateTime.UtcNow), diagnosticManifest,
+        null, throwingDiagnosticAdapter, []));
+    Assert(isolatedFailureReport.Items.Any(item =>
+               item.Category == "模块扩展诊断" && item.Status == GameCompatibilityDiagnosticStatus.Failed),
+        "A module diagnostic exception was not isolated as a failed report item");
 
     if (args.Contains("--update-live", StringComparer.OrdinalIgnoreCase))
     {
@@ -465,7 +527,7 @@ try
             "version": "1.1.0",
             "displayName": "测试专属模块",
             "gameDisplayName": "测试游戏",
-            "hostApiVersion": 2,
+            "hostApiVersion": 5,
             "processNames": ["MatchedGame"],
             "compatibleBuilds": [{"executableSha256": "EXE", "gameAssemblySha256": "ASM", "metadataSha256": "META"}],
             "editors": [{"id":"test.inventory"},{"id":"test.characters"}],
@@ -845,6 +907,10 @@ try
                 new GroupInputDialog([], "未分组"),
                 messageDialog,
                 new ModifyFieldDialog("测试字段", "未分组", "1", []),
+                new ModuleCompatibilityDialog(new ModuleCompatibilityReport(
+                    [new ModuleCompatibilityReportItem("宿主", "主程序", GameCompatibilityDiagnosticStatus.Passed,
+                        "肝肾大圣 v0.4.2")],
+                    "肝肾大圣 · 游戏专属模块兼容性诊断")),
                 new ModuleContributorsDialog([
                     new GameModuleContributor
                     {
@@ -905,12 +971,17 @@ try
                                               ?? throw new InvalidOperationException("Editor game connect button was not created");
                 var editorGameDisconnectButton = (Button?)mainWindow.FindName("EditorGameDisconnectButton")
                                                  ?? throw new InvalidOperationException("Editor game disconnect button was not created");
+                var moduleCompatibilityDiagnosticsButton =
+                    (Button?)mainWindow.FindName("ModuleCompatibilityDiagnosticsButton")
+                    ?? throw new InvalidOperationException("Module compatibility diagnostics button was not created");
                 Assert(BindingOperations.GetBinding(topProcessConnectButton, UIElement.IsEnabledProperty)?.Path.Path == nameof(MainViewModel.CanConnectProcess),
                     "Top connect button must follow the selected process");
                 Assert(BindingOperations.GetBinding(editorGameConnectButton, UIElement.IsEnabledProperty)?.Path.Path == nameof(MainViewModel.CanConnectSelectedGame),
                     "Editor connect button must follow the selected library game");
                 Assert(BindingOperations.GetBinding(editorGameDisconnectButton, UIElement.IsEnabledProperty)?.Path.Path == nameof(MainViewModel.CanDisconnectSelectedGame),
                     "Editor disconnect button must follow the selected library game");
+                Assert(BindingOperations.GetBinding(moduleCompatibilityDiagnosticsButton, UIElement.IsEnabledProperty)?.Path.Path == nameof(MainViewModel.CanViewModuleCompatibilityDiagnostics),
+                    "Module compatibility diagnostics button must follow its dedicated availability state");
                 var editorModulesTabControl = (TabControl?)mainWindow.FindName("EditorModulesTabControl")
                                               ?? throw new InvalidOperationException("Editor modules tab control was not created");
                 var mainTabs = (TabControl?)mainWindow.FindName("MainTabs")
@@ -1014,6 +1085,35 @@ try
                 using (var snapshot = File.Create(dialogSnapshotPath)) dialogEncoder.Save(snapshot);
                 renderedMessageDialog.Close();
 
+                var renderedCompatibilityDialog = new ModuleCompatibilityDialog(compatibilityReport)
+                {
+                    ShowActivated = false,
+                    ShowInTaskbar = false,
+                    Left = -10_000,
+                    Top = -10_000
+                };
+                renderedCompatibilityDialog.Show();
+                renderedCompatibilityDialog.UpdateLayout();
+                var compatibilityDialogRoot = (FrameworkElement)renderedCompatibilityDialog.Content;
+                const int compatibilityWidth = 940;
+                const int compatibilityHeight = 590;
+                compatibilityDialogRoot.Measure(new Size(compatibilityWidth, compatibilityHeight));
+                compatibilityDialogRoot.Arrange(new Rect(0, 0, compatibilityWidth, compatibilityHeight));
+                compatibilityDialogRoot.UpdateLayout();
+                var renderedDiagnosticsGrid = (DataGrid?)renderedCompatibilityDialog.FindName("DiagnosticsGrid")
+                                              ?? throw new InvalidOperationException("Compatibility diagnostics grid was not created");
+                Assert(renderedDiagnosticsGrid.Columns[^1].ActualWidth >= 300,
+                    $"Compatibility diagnostic result column is too narrow: {renderedDiagnosticsGrid.Columns[^1].ActualWidth}");
+                var compatibilityBitmap = new RenderTargetBitmap(
+                    compatibilityWidth, compatibilityHeight, 96, 96, PixelFormats.Pbgra32);
+                compatibilityBitmap.Render(compatibilityDialogRoot);
+                var compatibilityEncoder = new PngBitmapEncoder();
+                compatibilityEncoder.Frames.Add(BitmapFrame.Create(compatibilityBitmap));
+                var compatibilitySnapshotPath = Path.Combine(
+                    snapshotDirectory, "ui-module-compatibility-dialog-dark-smoke.png");
+                using (var snapshot = File.Create(compatibilitySnapshotPath)) compatibilityEncoder.Save(snapshot);
+                renderedCompatibilityDialog.Close();
+
                 var renderVersion = new GameVersionProfile
                 {
                     DisplayName = "1.2.3",
@@ -1037,6 +1137,8 @@ try
                 renderViewModel.Games.Add(renderGame);
                 renderViewModel.SelectedGame = renderGame;
                 renderViewModel.SelectedVersion = renderVersion;
+                Assert(renderViewModel.CanViewModuleCompatibilityDiagnostics && moduleCompatibilityDiagnosticsButton.IsEnabled,
+                    "Compatibility diagnostics did not become available for a saved game version");
                 mainTabs.SelectedIndex = 3;
                 mainWindow.UpdateLayout();
                 root.UpdateLayout();
@@ -1050,6 +1152,7 @@ try
                 foreach (var (theme, path) in themeSnapshots)
                     Console.WriteLine($"Rendered {theme} UI: {path}");
                 Console.WriteLine($"Rendered dark message dialog: {dialogSnapshotPath}");
+                Console.WriteLine($"Rendered module compatibility dialog: {compatibilitySnapshotPath}");
                 Console.WriteLine($"Rendered version UI: {versionSnapshotPath}");
             }
             application.Shutdown();
@@ -1087,7 +1190,7 @@ static byte[] CreateModuleArchive(string id, string version, string assemblyPath
         var manifest = archive.CreateEntry("module.json");
         using (var writer = new StreamWriter(manifest.Open(), Encoding.UTF8, leaveOpen: false))
             writer.Write($$"""
-            {"id":"{{id}}","version":"{{version}}","displayName":"测试多编辑器游戏模块","gameDisplayName":"测试游戏","description":"测试","assemblyFile":"{{Path.GetFileName(assemblyPath)}}","hostApiVersion":2,"processNames":["MatchedGame"],"compatibleBuilds":[{"executableSha256":"EXE","gameAssemblySha256":"ASM","metadataSha256":"META"}],"contributors":[{"githubId":1,"githubLogin":"tester","displayName":"测试贡献者","profileUrl":"https://github.com/tester","firstContributionDate":"2026-01-01","latestContributionDate":"2026-01-02"}],"editors":[{"id":"test.inventory","displayName":"背包物品","kind":"collection","order":100,"sessionOnly":false},{"id":"test.characters","displayName":"人物属性","kind":"master-detail","order":200,"sessionOnly":true}]}
+            {"id":"{{id}}","version":"{{version}}","displayName":"测试多编辑器游戏模块","gameDisplayName":"测试游戏","description":"测试","assemblyFile":"{{Path.GetFileName(assemblyPath)}}","hostApiVersion":5,"processNames":["MatchedGame"],"compatibleBuilds":[{"executableSha256":"EXE","gameAssemblySha256":"ASM","metadataSha256":"META"}],"contributors":[{"githubId":1,"githubLogin":"tester","displayName":"测试贡献者","profileUrl":"https://github.com/tester","firstContributionDate":"2026-01-01","latestContributionDate":"2026-01-02"}],"editors":[{"id":"test.inventory","displayName":"背包物品","kind":"collection","order":100,"sessionOnly":false},{"id":"test.characters","displayName":"人物属性","kind":"master-detail","order":200,"sessionOnly":true}]}
             """);
         var assembly = archive.CreateEntry(Path.GetFileName(assemblyPath));
         using var assemblyStream = assembly.Open();
@@ -1207,14 +1310,21 @@ static void LoadAndVerifyPackagedModule(
             "Packaged module page registrations do not match its editors.");
         pageProvider = null;
     }
+    if (hostApiVersion >= 5)
+    {
+        Assert(adapter is IGameCompatibilityDiagnosticsProvider,
+            "Host API 5 packaged module does not provide compatibility diagnostics.");
+    }
     adapter = null;
 }
 
 public sealed class SmokeTestModuleAdapter :
     IInventoryGameAdapter,
     ICharacterAttributesGameAdapter,
-    IGameEditorPageProvider
+    IGameEditorPageProvider,
+    IGameCompatibilityDiagnosticsProvider
 {
+    public bool ThrowCompatibilityDiagnostics { get; init; }
     public string Id => "game.test.multi-editor";
     public string DisplayName => "测试多编辑器游戏模块";
     public string Description => "仅用于宿主接口冒烟测试。";
@@ -1229,6 +1339,19 @@ public sealed class SmokeTestModuleAdapter :
         new("test.characters", GameEditorPageRole.CharacterAttributes)
     ];
     public bool Supports(GameProcessContext process, GameBuildIdentity fingerprint) => true;
+    public IReadOnlyList<GameCompatibilityDiagnostic> GetCompatibilityDiagnostics(
+        GameProcessContext process,
+        GameBuildIdentity fingerprint)
+    {
+        if (ThrowCompatibilityDiagnostics)
+            throw new InvalidOperationException("诊断提供器模拟失败。");
+        return
+        [
+            new("只读探测", GameCompatibilityDiagnosticStatus.Passed, "模块只读检查通过。"),
+            new("敏感信息", GameCompatibilityDiagnosticStatus.Warning,
+                $"{process.ExecutablePath} PID={process.ProcessId} 0x1234")
+        ];
+    }
     public AdapterFieldValue ReadField(GameProcessContext process, string fieldKey) => new(fieldKey, "1", "测试");
     public AdapterFieldValue WriteField(GameProcessContext process, string fieldKey, string displayValue) => new(fieldKey, displayValue, "测试");
     public IReadOnlyList<AdapterInventoryItem> ReadInventory(GameProcessContext process) => [new("test", "测试物品", 1)];

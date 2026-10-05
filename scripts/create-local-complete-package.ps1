@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidatePattern('^\d+\.\d+\.\d+$')] [string]$ApplicationVersion = "0.4.1",
+    [ValidatePattern('^\d+\.\d+\.\d+$')] [string]$ApplicationVersion = "0.4.2",
     [string]$ModuleRepository = "D:\MyOtherProjects\GameValueEditor-Modules",
     [string[]]$ModuleIds = @()
 )

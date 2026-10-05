@@ -276,6 +276,8 @@ public sealed class GameAdapterRegistry : IDisposable
             }
         }
         if (manifest.HostApiVersion >= 4) GameEditorPageResolver.ValidateApi4Provider(adapter);
+        if (manifest.HostApiVersion >= 5 && adapter is not IGameCompatibilityDiagnosticsProvider)
+            throw new InvalidOperationException("Host API 5 游戏包必须实现只读兼容性诊断接口。");
     }
 
     private static bool IsSafePathSegment(string value) =>
