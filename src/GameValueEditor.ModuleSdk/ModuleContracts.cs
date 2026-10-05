@@ -1,10 +1,11 @@
 using System.Globalization;
+using System.Windows;
 
 namespace GameValueEditor.ModuleSdk;
 
 public static class ModuleHostApi
 {
-    public const int CurrentVersion = 5;
+    public const int CurrentVersion = 6;
 }
 
 public static class ModuleFieldKey
@@ -47,7 +48,8 @@ public enum GameEditorKind
 {
     Collection,
     MasterDetail,
-    PropertyGrid
+    PropertyGrid,
+    Custom
 }
 
 public sealed record GameEditorDescriptor(
@@ -78,6 +80,51 @@ public sealed record GameEditorPageRegistration(
 public interface IGameEditorPageProvider : IGameAdapter
 {
     IReadOnlyList<GameEditorPageRegistration> EditorPages { get; }
+}
+
+public sealed record GameEditorTextPrompt(
+    string Title,
+    string Message,
+    string InitialValue = "");
+
+public sealed record GameEditorSavedFieldRequest(
+    string FieldKey,
+    string SuggestedDisplayName);
+
+/// <summary>
+/// Stable host-owned facilities that a module page may use without referencing
+/// the host executable, its view models, or its dialog implementations.
+/// </summary>
+public interface IGameEditorHostServices
+{
+    Task<string?> PromptValueAsync(GameEditorTextPrompt prompt);
+    Task SaveFieldAsync(GameEditorSavedFieldRequest request);
+    void ReportStatus(string message);
+    void ShowError(string title, string message);
+}
+
+public sealed record GameEditorPageContext(
+    GameProcessContext Process,
+    GameBuildIdentity Build,
+    IGameEditorHostServices Host,
+    CancellationToken Lifetime);
+
+/// <summary>
+/// A real WPF page owned by the game module. The host only places View inside
+/// its navigation shell and disposes the page when its process/module lifetime ends.
+/// </summary>
+public interface IGameEditorPage : IDisposable
+{
+    FrameworkElement View { get; }
+}
+
+/// <summary>
+/// Host API 6 page contract. Unlike the legacy role provider, this factory does
+/// not classify pages or select a host template; the module creates the complete UI.
+/// </summary>
+public interface IGameEditorPageFactoryProvider : IGameAdapter
+{
+    IGameEditorPage CreateEditorPage(string editorId, GameEditorPageContext context);
 }
 
 public sealed record GameEditorFieldPolicy(bool SessionOnly, bool CanLock);

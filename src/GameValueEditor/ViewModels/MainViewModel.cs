@@ -46,6 +46,7 @@ public sealed class MainViewModel : ObservableObject
     private readonly GameIconService _gameIconService;
     private readonly GameModuleCatalogService _moduleCatalogService;
     private readonly ApplicationUpdateService _applicationUpdateService;
+    private IGameEditorHostServices? _editorHostServices;
     private readonly Dictionary<Guid, GameConnectionSession> _sessions = [];
     private GameConnectionSession? _activeSession;
     private LibraryDocument _document = new();
@@ -128,6 +129,11 @@ public sealed class MainViewModel : ObservableObject
         _moduleCatalogService = services.ModuleCatalogService;
         _applicationUpdateService = services.ApplicationUpdateService;
     }
+
+    internal void SetEditorHostServices(IGameEditorHostServices services) =>
+        _editorHostServices = services ?? throw new ArgumentNullException(nameof(services));
+
+    internal void ReportModulePageStatus(string message) => StatusText = message;
 
     public ObservableCollection<GameProfile> Games => _document.Games;
     public ObservableCollection<ProcessItem> Processes { get; } = [];
@@ -1746,6 +1752,7 @@ public sealed class MainViewModel : ObservableObject
                 StatusText = ModuleStatusText;
             });
             await _moduleCatalogService.InstallAsync(module, progress);
+            SetActiveAdapter(null);
             _adapterRegistry.Reload();
             ReloadAdaptersForSessions();
             if (game is null)
@@ -2085,7 +2092,17 @@ public sealed class MainViewModel : ObservableObject
     {
         _activeAdapter = adapter;
         if (_activeSession is not null) _activeSession.Adapter = adapter;
-        RebuildEditorPages();
+        try
+        {
+            RebuildEditorPages();
+        }
+        catch
+        {
+            _activeAdapter = null;
+            if (_activeSession is not null) _activeSession.Adapter = null;
+            DisposeEditorPages();
+            throw;
+        }
         OnPropertyChanged(nameof(HasActiveAdapter));
         OnPropertyChanged(nameof(HasActiveInventoryAdapter));
         OnPropertyChanged(nameof(HasCharacterEditor));
@@ -2103,7 +2120,7 @@ public sealed class MainViewModel : ObservableObject
     private void RebuildEditorPages()
     {
         var selectedEditorId = SelectedAdapterEditorPage?.Descriptor.Id;
-        AdapterEditorPages.Clear();
+        DisposeEditorPages();
         _characterEditorPage = null;
         if (_activeAdapter is null)
         {
@@ -2112,6 +2129,50 @@ public sealed class MainViewModel : ObservableObject
         }
 
         var descriptors = _activeAdapter.Editors.ToDictionary(editor => editor.Id, StringComparer.Ordinal);
+        if (_activeAdapter is IGameEditorPageFactoryProvider factory)
+        {
+            var process = AttachedProcess ?? throw new InvalidOperationException("模块页面需要已连接的游戏进程。");
+            var fingerprint = _attachedFingerprint ?? throw new InvalidOperationException("模块页面需要已识别的游戏构建。");
+            var host = _editorHostServices ?? throw new InvalidOperationException("模块页面宿主服务尚未初始化。");
+            try
+            {
+                foreach (var descriptor in _activeAdapter.Editors.OrderBy(editor => editor.Order))
+                {
+                    var lifetime = new CancellationTokenSource();
+                    IGameEditorPage? modulePage = null;
+                    try
+                    {
+                        var context = new GameEditorPageContext(
+                            process.ToModuleContext(),
+                            fingerprint.ToModuleIdentity(),
+                            host,
+                            lifetime.Token);
+                        modulePage = factory.CreateEditorPage(descriptor.Id, context)
+                                     ?? throw new InvalidOperationException($"模块页面工厂没有创建 {descriptor.Id}。");
+                        AdapterEditorPages.Add(new AdapterModuleEditorPageState(descriptor, lifetime, modulePage));
+                        modulePage = null;
+                    }
+                    catch
+                    {
+                        lifetime.Cancel();
+                        try { modulePage?.Dispose(); }
+                        catch (Exception exception) { Debug.WriteLine(exception); }
+                        lifetime.Dispose();
+                        throw;
+                    }
+                }
+            }
+            catch
+            {
+                DisposeEditorPages();
+                throw;
+            }
+            SelectedAdapterEditorPage = AdapterEditorPages.FirstOrDefault(page =>
+                                            string.Equals(page.Descriptor.Id, selectedEditorId, StringComparison.Ordinal))
+                                        ?? AdapterEditorPages.FirstOrDefault();
+            return;
+        }
+
         foreach (var registration in GameEditorPageResolver.Resolve(_activeAdapter)
                      .OrderBy(page => descriptors.TryGetValue(page.EditorId, out var descriptor)
                          ? descriptor.Order
@@ -2141,6 +2202,18 @@ public sealed class MainViewModel : ObservableObject
         SelectedAdapterEditorPage = AdapterEditorPages.FirstOrDefault(page =>
                                         string.Equals(page.Descriptor.Id, selectedEditorId, StringComparison.Ordinal))
                                     ?? AdapterEditorPages.FirstOrDefault();
+    }
+
+    private void DisposeEditorPages()
+    {
+        SelectedAdapterEditorPage = null;
+        var disposablePages = AdapterEditorPages.OfType<IDisposable>().ToArray();
+        AdapterEditorPages.Clear();
+        foreach (var page in disposablePages)
+        {
+            try { page.Dispose(); }
+            catch (Exception exception) { Debug.WriteLine(exception); }
+        }
     }
 
     private void NotifyEditorPageProperties()
@@ -2947,6 +3020,7 @@ public sealed class MainViewModel : ObservableObject
         }
         _sessions.Clear();
         _activeAdapter = null;
+        DisposeEditorPages();
         _adapterRegistry.Dispose();
         _idleSpeedService.Dispose();
     }

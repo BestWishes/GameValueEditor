@@ -155,10 +155,15 @@ try
         "Application versions must not accept prerelease suffixes");
     Assert(SemanticVersion.TryParse("0.3.0", out var formalVersion) &&
            formalVersion == new SemanticVersion(0, 3, 0), "Formal version parse failed");
-    Assert(SemanticVersion.TryParse("1.2.10", out var higherPatch) &&
-           SemanticVersion.TryParse("1.2.9", out var lowerPatch) && higherPatch.CompareTo(lowerPatch) > 0,
-        "Semantic patch comparison failed");
-    Assert(ModuleHostApi.CurrentVersion == 5, "Host API version was not advanced for compatibility diagnostics");
+    Assert(!SemanticVersion.TryParse("1.2.10", out _) &&
+           !SemanticVersion.TryParse("01.2.3", out _) &&
+           !SemanticVersion.TryParse("1.2.3+build", out _),
+        "Decimal-counter versions accepted a non-canonical release version");
+    Assert(new SemanticVersion(0, 4, 8).Next() == new SemanticVersion(0, 4, 9) &&
+           new SemanticVersion(0, 4, 9).Next() == new SemanticVersion(0, 5, 0) &&
+           new SemanticVersion(0, 9, 9).Next() == new SemanticVersion(1, 0, 0),
+        "Decimal-counter release carry failed");
+    Assert(ModuleHostApi.CurrentVersion == 6, "Host API version was not advanced for module-owned WPF pages");
     var api5Adapter = new SmokeTestModuleAdapter();
     GameEditorPageResolver.ValidateApi4Provider(api5Adapter);
     Assert(GameEditorPageResolver.Resolve(api5Adapter).Select(page => page.EditorId)
@@ -202,7 +207,7 @@ try
         }).ToList()
     };
     var compatibilityReport = ModuleCompatibilityDiagnosticsService.Create(new ModuleCompatibilityDiagnosticContext(
-        "0.4.2", diagnosticVersion, diagnosticProcess, diagnosticFingerprint, api5Adapter.Id,
+        "0.4.3", diagnosticVersion, diagnosticProcess, diagnosticFingerprint, api5Adapter.Id,
         new InstalledModuleRecord(api5Adapter.Id, "1.0.0", DateTime.UtcNow), diagnosticManifest,
         new GameModuleCheckResult(GameModuleAvailability.Current, null, null, "已是最新版本。", true),
         api5Adapter, []));
@@ -220,7 +225,7 @@ try
         "Compatibility report exposed a local path, username, PID, or memory address");
     var throwingDiagnosticAdapter = new SmokeTestModuleAdapter { ThrowCompatibilityDiagnostics = true };
     var isolatedFailureReport = ModuleCompatibilityDiagnosticsService.Create(new ModuleCompatibilityDiagnosticContext(
-        "0.4.2", diagnosticVersion, diagnosticProcess, diagnosticFingerprint, throwingDiagnosticAdapter.Id,
+        "0.4.3", diagnosticVersion, diagnosticProcess, diagnosticFingerprint, throwingDiagnosticAdapter.Id,
         new InstalledModuleRecord(throwingDiagnosticAdapter.Id, "1.0.0", DateTime.UtcNow), diagnosticManifest,
         null, throwingDiagnosticAdapter, []));
     Assert(isolatedFailureReport.Items.Any(item =>
@@ -909,7 +914,7 @@ try
                 new ModifyFieldDialog("测试字段", "未分组", "1", []),
                 new ModuleCompatibilityDialog(new ModuleCompatibilityReport(
                     [new ModuleCompatibilityReportItem("宿主", "主程序", GameCompatibilityDiagnosticStatus.Passed,
-                        "肝肾大圣 v0.4.2")],
+                        "肝肾大圣 v0.4.3")],
                     "肝肾大圣 · 游戏专属模块兼容性诊断")),
                 new ModuleContributorsDialog([
                     new GameModuleContributor
@@ -994,6 +999,12 @@ try
                     new("test.characters", "人物属性", GameEditorKind.MasterDetail, 200, "测试人物页面"),
                     new("test.characters", GameEditorPageRole.CharacterAttributes),
                     true));
+                var modulePageLifetime = new CancellationTokenSource();
+                var moduleOwnedPage = new SmokeStandaloneEditorPage();
+                renderViewModel.AdapterEditorPages.Add(new AdapterModuleEditorPageState(
+                    new("test.custom", "模块自有页面", GameEditorKind.Custom, 300, "测试模块页面"),
+                    modulePageLifetime,
+                    moduleOwnedPage));
                 renderViewModel.SelectedAdapterEditorPage = renderViewModel.AdapterEditorPages[0];
                 mainTabs.SelectedIndex = 0;
                 editorModulesTabControl.Visibility = Visibility.Visible;
@@ -1006,6 +1017,8 @@ try
                                          ?? throw new InvalidOperationException("Dynamic inventory page tab was not created");
                 var characterAttributesEditorTab = (TabItem?)editorModulesTabControl.ItemContainerGenerator.ContainerFromIndex(1)
                                                    ?? throw new InvalidOperationException("Dynamic character page tab was not created");
+                Assert(mainWindow.TryFindResource(new DataTemplateKey(typeof(AdapterModuleEditorPageState))) is DataTemplate,
+                    "Module-owned WPF page data template was not registered by the host shell");
                 var editorModuleHeaderPanel = (TabPanel?)editorModulesTabControl.Template.FindName(
                                                   "PART_EditorModuleHeaderPanel", editorModulesTabControl)
                                               ?? throw new InvalidOperationException("Vertical editor module header panel was not created");
@@ -1149,6 +1162,8 @@ try
                 var versionSnapshotPath = Path.GetFullPath(Path.Combine("artifacts", "ui-version-dark-smoke.png"));
                 using (var snapshot = File.Create(versionSnapshotPath)) versionEncoder.Save(snapshot);
                 mainWindow.Close();
+                Assert(moduleOwnedPage.IsDisposed && modulePageLifetime.IsCancellationRequested,
+                    "Closing the host did not cancel and dispose the module-owned page");
                 foreach (var (theme, path) in themeSnapshots)
                     Console.WriteLine($"Rendered {theme} UI: {path}");
                 Console.WriteLine($"Rendered dark message dialog: {dialogSnapshotPath}");
@@ -1215,12 +1230,12 @@ static void VerifyPackagedModule(string archivePath)
     var resolvedArchive = Path.GetFullPath(archivePath);
     Assert(File.Exists(resolvedArchive), $"Module package does not exist: {resolvedArchive}");
     var verificationRoot = Path.Combine(Path.GetTempPath(), $"gve-module-contract-{Guid.NewGuid():N}");
+    var hostApiVersion = 0;
     Directory.CreateDirectory(verificationRoot);
     try
     {
         string moduleId;
         string version;
-        int hostApiVersion;
         string[] editorIds;
         int contributorCount;
         using (var archive = ZipFile.OpenRead(resolvedArchive))
@@ -1273,15 +1288,26 @@ static void VerifyPackagedModule(string archivePath)
     }
     finally
     {
-        for (var attempt = 0; attempt < 4 && Directory.Exists(verificationRoot); attempt++)
+        if (hostApiVersion >= 6)
         {
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            try { Directory.Delete(verificationRoot, true); }
-            catch (UnauthorizedAccessException) when (attempt < 3) { Thread.Sleep(50); }
-            catch (IOException) when (attempt < 3) { Thread.Sleep(50); }
+            var packagesDirectory = Path.Combine(verificationRoot, "packages");
+            if (Directory.Exists(packagesDirectory)) Directory.Delete(packagesDirectory, true);
+            Assert(!Directory.Exists(packagesDirectory),
+                "A Host API 6 WPF module kept its installed source package locked.");
+            Console.WriteLine("Host API 6 WPF shadow context is retained until process exit as designed.");
         }
-        Assert(!Directory.Exists(verificationRoot), "Module compatibility test left a locked temporary package.");
+        else
+        {
+            for (var attempt = 0; attempt < 4 && Directory.Exists(verificationRoot); attempt++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                try { Directory.Delete(verificationRoot, true); }
+                catch (UnauthorizedAccessException) when (attempt < 3) { Thread.Sleep(50); }
+                catch (IOException) when (attempt < 3) { Thread.Sleep(50); }
+            }
+            Assert(!Directory.Exists(verificationRoot), "Module compatibility test left a locked temporary package.");
+        }
     }
 }
 
@@ -1300,7 +1326,7 @@ static void LoadAndVerifyPackagedModule(
     Assert(adapter.Editors.Select(editor => editor.Id).ToHashSet(StringComparer.Ordinal)
             .SetEquals(editorIds),
         "Packaged module editor identities changed after loading.");
-    if (hostApiVersion >= 4)
+    if (hostApiVersion is >= 4 and <= 5)
     {
         IGameEditorPageProvider? pageProvider = adapter as IGameEditorPageProvider
                                                    ?? throw new InvalidOperationException(
@@ -1310,12 +1336,53 @@ static void LoadAndVerifyPackagedModule(
             "Packaged module page registrations do not match its editors.");
         pageProvider = null;
     }
+    if (hostApiVersion >= 6)
+    {
+        IGameEditorPageFactoryProvider factory = adapter as IGameEditorPageFactoryProvider
+                                                ?? throw new InvalidOperationException(
+                                                    "Host API 6 packaged module does not provide module-owned WPF pages.");
+        VerifyModuleOwnedPages(adapter, factory);
+        factory = null!;
+    }
     if (hostApiVersion >= 5)
     {
         Assert(adapter is IGameCompatibilityDiagnosticsProvider,
             "Host API 5 packaged module does not provide compatibility diagnostics.");
     }
     adapter = null;
+}
+
+static void VerifyModuleOwnedPages(IGameAdapter adapter, IGameEditorPageFactoryProvider factory)
+{
+    Exception? failure = null;
+    var thread = new Thread(() =>
+    {
+        try
+        {
+            using var lifetime = new CancellationTokenSource();
+            var context = new GameEditorPageContext(
+                new GameProcessContext(1, "contract-test", "contract-test.exe", DateTime.UnixEpoch),
+                new GameBuildIdentity("EXE", "BUILD", "ASM", "META"),
+                new SmokeEditorHostServices(),
+                lifetime.Token);
+            foreach (var descriptor in adapter.Editors)
+            {
+                using var page = factory.CreateEditorPage(descriptor.Id, context)
+                                 ?? throw new InvalidOperationException($"Module page {descriptor.Id} was null.");
+                var view = page.View ?? throw new InvalidOperationException($"Module page {descriptor.Id} returned no WPF view.");
+                Assert(page.GetType().Assembly == adapter.GetType().Assembly,
+                    $"Module page {descriptor.Id} was not implemented by the module assembly.");
+            }
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+        }
+    });
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.Start();
+    thread.Join();
+    if (failure is not null) throw new InvalidOperationException("Module-owned page verification failed.", failure);
 }
 
 public sealed class SmokeTestModuleAdapter :
@@ -1360,6 +1427,21 @@ public sealed class SmokeTestModuleAdapter :
         [new("test", "测试人物", 1, [new("strength", "力道", 1, 1, 1f)])];
     public AdapterCharacterItem WriteCharacterAttribute(GameProcessContext process, string characterId, string attributeKey, int targetValue) =>
         new(characterId, "测试人物", 1, [new(attributeKey, "力道", targetValue, targetValue, 1f)]);
+}
+
+internal sealed class SmokeEditorHostServices : IGameEditorHostServices
+{
+    public Task<string?> PromptValueAsync(GameEditorTextPrompt prompt) => Task.FromResult<string?>(null);
+    public Task SaveFieldAsync(GameEditorSavedFieldRequest request) => Task.CompletedTask;
+    public void ReportStatus(string message) { }
+    public void ShowError(string title, string message) => throw new InvalidOperationException($"{title}: {message}");
+}
+
+internal sealed class SmokeStandaloneEditorPage : IGameEditorPage
+{
+    public FrameworkElement View { get; } = new TextBlock { Text = "模块程序集自有页面" };
+    public bool IsDisposed { get; private set; }
+    public void Dispose() => IsDisposed = true;
 }
 
 internal static class SpeedStressTarget

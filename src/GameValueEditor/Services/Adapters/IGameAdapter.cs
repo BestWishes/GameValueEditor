@@ -79,8 +79,9 @@ public sealed class GameAdapterRegistry : IDisposable
     private WeakReference[] ReleaseLoadContexts()
     {
         _adapters.Clear();
-        var unloadedContexts = _loadContexts.Select(context => new WeakReference(context)).ToArray();
-        foreach (var context in _loadContexts) context.Unload();
+        var collectibleContexts = _loadContexts.Where(context => context.IsCollectible).ToArray();
+        var unloadedContexts = collectibleContexts.Select(context => new WeakReference(context)).ToArray();
+        foreach (var context in collectibleContexts) context.Unload();
         _loadContexts.Clear();
         return unloadedContexts;
     }
@@ -127,7 +128,7 @@ public sealed class GameAdapterRegistry : IDisposable
         ModuleLoadContext? context = null;
         try
         {
-            context = new ModuleLoadContext(assemblyPath);
+            context = new ModuleLoadContext(assemblyPath, isCollectible: manifest.HostApiVersion <= 5);
             var assembly = context.LoadFromAssemblyPath(assemblyPath);
             var types = assembly.GetTypes().Where(type =>
                 !type.IsAbstract && typeof(IGameAdapter).IsAssignableFrom(type));
@@ -155,7 +156,7 @@ public sealed class GameAdapterRegistry : IDisposable
         }
         finally
         {
-            context?.Unload();
+            if (context?.IsCollectible == true) context.Unload();
             if (context is not null) TryDeleteDirectory(shadowDirectory);
         }
     }
@@ -261,21 +262,30 @@ public sealed class GameAdapterRegistry : IDisposable
             {
                 var descriptor = adapter.Editors.Single(editor =>
                     string.Equals(editor.Id, manifestEditor.Id, StringComparison.Ordinal));
-                var manifestKind = manifestEditor.Kind switch
-                {
-                    "collection" => GameEditorKind.Collection,
-                    "master-detail" => GameEditorKind.MasterDetail,
-                    "property-grid" => GameEditorKind.PropertyGrid,
-                    _ => throw new InvalidOperationException($"module.json 的编辑模块类型无效：{manifestEditor.Kind}。")
-                };
                 if (!string.Equals(descriptor.DisplayName, manifestEditor.DisplayName, StringComparison.Ordinal) ||
-                    descriptor.Kind != manifestKind ||
                     descriptor.Order != manifestEditor.Order ||
                     descriptor.SessionOnly != manifestEditor.SessionOnly)
                     throw new InvalidOperationException($"module.json 的编辑模块元数据与程序集不一致：{manifestEditor.Id}。");
+                if (manifest.HostApiVersion <= 5)
+                {
+                    var manifestKind = manifestEditor.Kind switch
+                    {
+                        "collection" => GameEditorKind.Collection,
+                        "master-detail" => GameEditorKind.MasterDetail,
+                        "property-grid" => GameEditorKind.PropertyGrid,
+                        _ => throw new InvalidOperationException($"module.json 的编辑模块类型无效：{manifestEditor.Kind}。")
+                    };
+                    if (descriptor.Kind != manifestKind)
+                        throw new InvalidOperationException($"module.json 的编辑模块类型与程序集不一致：{manifestEditor.Id}。");
+                }
+                else if (descriptor.Kind != GameEditorKind.Custom)
+                {
+                    throw new InvalidOperationException($"Host API 6 编辑器必须使用 Custom 兼容标记：{manifestEditor.Id}。");
+                }
             }
         }
-        if (manifest.HostApiVersion >= 4) GameEditorPageResolver.ValidateApi4Provider(adapter);
+        if (manifest.HostApiVersion is >= 4 and <= 5) GameEditorPageResolver.ValidateApi4Provider(adapter);
+        if (manifest.HostApiVersion >= 6) GameEditorPageResolver.ValidateApi6Provider(adapter);
         if (manifest.HostApiVersion >= 5 && adapter is not IGameCompatibilityDiagnosticsProvider)
             throw new InvalidOperationException("Host API 5 游戏包必须实现只读兼容性诊断接口。");
     }
@@ -287,7 +297,7 @@ public sealed class GameAdapterRegistry : IDisposable
         !value.Contains(Path.DirectorySeparatorChar) &&
         !value.Contains(Path.AltDirectorySeparatorChar);
 
-    private sealed class ModuleLoadContext(string assemblyPath) : AssemblyLoadContext(isCollectible: true)
+    private sealed class ModuleLoadContext(string assemblyPath, bool isCollectible) : AssemblyLoadContext(isCollectible)
     {
         private readonly AssemblyDependencyResolver _resolver = new(assemblyPath);
 
@@ -328,7 +338,7 @@ public sealed class InstalledEditorManifest
 {
     public string Id { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
-    public string Kind { get; set; } = string.Empty;
+    public string? Kind { get; set; }
     public int Order { get; set; }
     public bool SessionOnly { get; set; }
 }

@@ -42,7 +42,7 @@
 
 脚手架只创建当前游戏目录，不修改宿主、中央解决方案或游戏列表。生成的适配器默认拒绝所有构建，开发者必须完成真实定位和验证后才能启用。
 
-新模块必须实现 `IGameAdapter`、`IGameEditorPageProvider` 和 `IGameCompatibilityDiagnosticsProvider`，并按能力实现库存、人物属性或实体编辑接口。页面名称、顺序和生命周期来自模块；主程序只渲染标准模板。模块不能携带任意 WPF 页面、宿主 DLL 或第二份 SDK DLL。
+新模块必须实现 `IGameAdapter`、`IGameEditorPageFactoryProvider` 和 `IGameCompatibilityDiagnosticsProvider`，并按需要实现库存、人物属性或实体编辑接口。模块为每个稳定编辑器 ID 创建完整 WPF 页面，自行决定 XAML、布局、ViewModel 和交互；主程序只提供页面容器、主题、生命周期、通用输入/错误弹框和保存字段服务。模块包不能携带宿主 DLL 或第二份 SDK DLL。
 
 兼容性诊断提供器只用于读取并说明构建识别、运行时入口和页面前置条件。它不能写入游戏内存、触发刷新/保存，也不能返回本机路径、用户名、PID、内存地址或存档内容；异常必须由模块收敛为明确结果，宿主仍会进行脱敏和异常隔离。
 

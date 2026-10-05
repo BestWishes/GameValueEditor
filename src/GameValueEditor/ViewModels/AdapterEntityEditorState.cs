@@ -35,9 +35,9 @@ public sealed class AdapterEntityEditorState : AdapterEditorPageState
     public ICollectionView? FieldsView => _fieldsView;
     public bool IsEmpty => Entities.Count == 0;
     public bool HasGroups => GroupOptions.Count > 2;
-    public string EmptyText => string.IsNullOrWhiteSpace(Registration.EmptyMessage)
+    public string EmptyText => string.IsNullOrWhiteSpace(Registration?.EmptyMessage)
         ? "当前没有可显示的项目。"
-        : Registration.EmptyMessage;
+        : Registration!.EmptyMessage;
 
     public string FilterText
     {

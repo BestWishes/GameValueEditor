@@ -60,9 +60,11 @@ $assetName = [IO.Path]::GetFileName($resolvedAsset)
 if ($assetName -like '*complete-offline*') {
     throw 'Complete offline bundles are local-only and cannot be uploaded to GitHub Releases.'
 }
-if ($Tag -notmatch '^v(?<version>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$') {
-    throw "Release tag must be a stable semantic version such as v0.4.2: $Tag"
+if ($Tag -notmatch '^v(?<version>(?:0|[1-9][0-9]*)\.[0-9]\.[0-9])$') {
+    throw "Release tag must be a decimal-counter version such as v0.4.3: $Tag"
 }
+. (Join-Path $PSScriptRoot 'versioning.ps1')
+Assert-NextReleaseVersion -RepositoryRoot $repoRoot -Version $matches.version -AllowExistingTag
 $expectedAssetName = "GameValueEditor-v$($matches.version)-win-x64.zip"
 if ($assetName -cne $expectedAssetName) {
     throw "Release asset must be named exactly $expectedAssetName."

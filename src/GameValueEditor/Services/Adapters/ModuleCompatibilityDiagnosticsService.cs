@@ -212,6 +212,14 @@ internal static partial class ModuleCompatibilityDiagnosticsService
         IGameAdapter adapter,
         ProcessItem process)
     {
+        if (adapter is IGameEditorPageFactoryProvider)
+        {
+            foreach (var editor in adapter.Editors.OrderBy(editor => editor.Order))
+                Add(items, "页面兼容", editor.DisplayName, GameCompatibilityDiagnosticStatus.Passed,
+                    "模块自有 WPF 页面将由 Host API 6 页面工厂创建。");
+            return;
+        }
+
         var registrations = GameEditorPageResolver.Resolve(adapter)
             .ToDictionary(page => page.EditorId, StringComparer.Ordinal);
         foreach (var editor in adapter.Editors.OrderBy(editor => editor.Order))

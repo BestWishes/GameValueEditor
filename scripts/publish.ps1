@@ -1,10 +1,18 @@
 [CmdletBinding()]
 param(
-    [ValidatePattern('^\d+\.\d+\.\d+$')] [string]$Version = "0.4.2"
+    [ValidatePattern('^(0|[1-9][0-9]*)\.[0-9]\.[0-9]$')] [string]$Version = "0.4.3"
 )
 
 $ErrorActionPreference = "Stop"
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+. (Join-Path $PSScriptRoot 'versioning.ps1')
+Assert-ReleaseVersionContract
+Assert-NextReleaseVersion -RepositoryRoot $repoRoot -Version $Version
+$appProjectVersion = ([xml](Get-Content -LiteralPath (Join-Path $repoRoot 'src\GameValueEditor\GameValueEditor.csproj') -Raw -Encoding UTF8)).Project.PropertyGroup.Version
+$updaterProjectVersion = ([xml](Get-Content -LiteralPath (Join-Path $repoRoot 'src\GameValueEditor.Updater\GameValueEditor.Updater.csproj') -Raw -Encoding UTF8)).Project.PropertyGroup.Version
+if ($appProjectVersion -ne $Version -or $updaterProjectVersion -ne $Version) {
+    throw "Application and updater project versions must both equal $Version."
+}
 $artifactsRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "artifacts"))
 $publishDir = [System.IO.Path]::GetFullPath((Join-Path $artifactsRoot "win-x64"))
 $updaterPublishDir = [System.IO.Path]::GetFullPath((Join-Path $artifactsRoot "updater-win-x64"))

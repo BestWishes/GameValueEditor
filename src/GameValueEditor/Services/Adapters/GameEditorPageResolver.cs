@@ -73,4 +73,10 @@ internal static class GameEditorPageResolver
                 throw new InvalidOperationException($"页面 {page.EditorId} 注册的角色与模块实现能力不一致。");
         }
     }
+
+    public static void ValidateApi6Provider(IGameAdapter adapter)
+    {
+        if (adapter is not IGameEditorPageFactoryProvider)
+            throw new InvalidOperationException("Host API 6 游戏包必须实现 IGameEditorPageFactoryProvider。");
+    }
 }

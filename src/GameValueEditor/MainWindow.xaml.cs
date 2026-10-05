@@ -26,6 +26,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         DataContext = _viewModel;
+        _viewModel.SetEditorHostServices(new WpfGameEditorHostServices(this, _viewModel));
         _connectionMonitorTimer.Tick += ConnectionMonitorTimer_OnTick;
         Loaded += MainWindow_OnLoaded;
         Closing += MainWindow_OnClosing;

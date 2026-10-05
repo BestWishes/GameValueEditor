@@ -6,6 +6,10 @@
         Style="{StaticResource ThemedWindowStyle}"
         MinHeight="700" MinWidth="1080" WindowStartupLocation="CenterScreen">
     <Window.Resources>
+        <DataTemplate DataType="{x:Type viewModels:AdapterModuleEditorPageState}">
+            <ContentPresenter Content="{Binding Content}"/>
+        </DataTemplate>
+
         <DataTemplate DataType="{x:Type viewModels:AdapterInventoryEditorPageState}">
             <Grid Margin="12">
                 <Grid.RowDefinitions>
