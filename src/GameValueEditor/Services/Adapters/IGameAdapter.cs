@@ -59,6 +59,23 @@ public sealed class GameAdapterRegistry : IDisposable
             string.Equals(adapter.Id, id, StringComparison.Ordinal) ||
             adapter.LegacyIds.Any(alias => string.Equals(alias, id, StringComparison.Ordinal)));
 
+    public bool Deactivate(string id) => _adapters.RemoveAll(adapter =>
+        string.Equals(adapter.Id, id, StringComparison.Ordinal) ||
+        adapter.LegacyIds.Any(alias => string.Equals(alias, id, StringComparison.Ordinal))) > 0;
+
+    public void LoadInstalledModule(string id)
+    {
+        if (FindById(id) is not null) return;
+        var installedPath = Path.Combine(_modulesDirectory, "installed.json");
+        if (!File.Exists(installedPath)) throw new InvalidOperationException("模块安装记录不存在。");
+        var document = JsonSerializer.Deserialize<InstalledModuleDocument>(File.ReadAllText(installedPath),
+                           new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                       ?? throw new InvalidOperationException("模块安装记录无效。");
+        var record = document.Modules.SingleOrDefault(item => string.Equals(item.Id, id, StringComparison.Ordinal))
+                     ?? throw new InvalidOperationException("模块安装记录不存在。");
+        LoadModule(record);
+    }
+
     public IReadOnlyList<string> LoadErrors => _loadErrors;
 
     public void Dispose()
@@ -111,6 +128,13 @@ public sealed class GameAdapterRegistry : IDisposable
         if (manifest.HostApiVersion is < 1 or > ModuleHostApi.CurrentVersion)
             throw new InvalidOperationException(
                 $"模块需要 Host API {manifest.HostApiVersion}，当前最高支持 {ModuleHostApi.CurrentVersion}。");
+        var hostVersion = ParseVersion(ApplicationVersion.Current, "当前主程序版本");
+        if (!string.IsNullOrWhiteSpace(manifest.MinimumHostVersion) &&
+            ParseVersion(manifest.MinimumHostVersion, "模块最低主程序版本").CompareTo(hostVersion) > 0)
+            throw new InvalidOperationException($"模块最低需要主程序 v{manifest.MinimumHostVersion}。");
+        if (!string.IsNullOrWhiteSpace(manifest.MaximumHostVersion) &&
+            ParseVersion(manifest.MaximumHostVersion, "模块最高主程序版本").CompareTo(hostVersion) < 0)
+            throw new InvalidOperationException($"模块最高支持主程序 v{manifest.MaximumHostVersion}。");
         var packageRoot = Path.GetFullPath(packageDirectory) + Path.DirectorySeparatorChar;
         var packageAssemblyPath = Path.GetFullPath(Path.Combine(packageRoot, manifest.AssemblyFile));
         if (!packageAssemblyPath.StartsWith(packageRoot, StringComparison.OrdinalIgnoreCase) ||
@@ -309,6 +333,11 @@ public sealed class GameAdapterRegistry : IDisposable
             return path is null ? null : LoadFromAssemblyPath(path);
         }
     }
+
+    private static SemanticVersion ParseVersion(string value, string label) =>
+        SemanticVersion.TryParse(value, out var version)
+            ? version
+            : throw new InvalidOperationException($"{label}无效：{value}");
 }
 
 public sealed class InstalledModuleDocument
@@ -328,6 +357,8 @@ public sealed class InstalledModuleManifest
     public string Description { get; set; } = string.Empty;
     public string AssemblyFile { get; set; } = string.Empty;
     public int HostApiVersion { get; set; } = 1;
+    public string MinimumHostVersion { get; set; } = string.Empty;
+    public string? MaximumHostVersion { get; set; }
     public List<string> ProcessNames { get; set; } = [];
     public List<GameModuleBuildMatch> CompatibleBuilds { get; set; } = [];
     public List<InstalledEditorManifest> Editors { get; set; } = [];

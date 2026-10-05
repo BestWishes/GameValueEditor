@@ -5,7 +5,30 @@ namespace GameValueEditor.ModuleSdk;
 
 public static class ModuleHostApi
 {
-    public const int CurrentVersion = 6;
+    public const int CurrentVersion = 7;
+}
+
+/// <summary>
+/// Host-owned visual resource names available to module-created WPF pages.
+/// Modules may choose any layout, but must consume these resources instead of
+/// defining their own palette or replacing application-level theme resources.
+/// </summary>
+public static class ModuleVisualResources
+{
+    public const string WindowBrush = "WindowBrush";
+    public const string PanelBrush = "PanelBrush";
+    public const string PanelRaisedBrush = "PanelRaisedBrush";
+    public const string BorderBrush = "BorderBrush";
+    public const string TextBrush = "TextBrush";
+    public const string MutedTextBrush = "MutedTextBrush";
+    public const string AccentBrush = "AccentBrush";
+    public const string AccentSoftBrush = "AccentSoftBrush";
+    public const string SelectionTextBrush = "SelectionTextBrush";
+    public const string DangerBrush = "DangerBrush";
+
+    public static Thickness PagePadding => new(12);
+    public static Thickness SectionSpacing => new(0, 10, 0, 10);
+    public static Thickness InlineControlSpacing => new(8, 0, 0, 0);
 }
 
 public static class ModuleFieldKey
@@ -119,7 +142,7 @@ public interface IGameEditorPage : IDisposable
 }
 
 /// <summary>
-/// Host API 6 page contract. Unlike the legacy role provider, this factory does
+/// Host API 6+ page contract. Unlike the legacy role provider, this factory does
 /// not classify pages or select a host template; the module creates the complete UI.
 /// </summary>
 public interface IGameEditorPageFactoryProvider : IGameAdapter

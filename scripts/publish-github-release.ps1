@@ -61,7 +61,7 @@ if ($assetName -like '*complete-offline*') {
     throw 'Complete offline bundles are local-only and cannot be uploaded to GitHub Releases.'
 }
 if ($Tag -notmatch '^v(?<version>(?:0|[1-9][0-9]*)\.[0-9]\.[0-9])$') {
-    throw "Release tag must be a decimal-counter version such as v0.4.3: $Tag"
+    throw "Release tag must be a decimal-counter version such as v0.4.4: $Tag"
 }
 . (Join-Path $PSScriptRoot 'versioning.ps1')
 Assert-NextReleaseVersion -RepositoryRoot $repoRoot -Version $matches.version -AllowExistingTag
@@ -71,6 +71,23 @@ if ($assetName -cne $expectedAssetName) {
 }
 $localSize = (Get-Item -LiteralPath $resolvedAsset).Length
 $localHash = (Get-FileHash -LiteralPath $resolvedAsset -Algorithm SHA256).Hash.ToLowerInvariant()
+$headCommit = (& git rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Unable to resolve HEAD.' }
+$packageProbeRoot = Join-Path ([IO.Path]::GetTempPath()) "gve-release-provenance-$([Guid]::NewGuid().ToString('N'))"
+try {
+    Expand-Archive -LiteralPath $resolvedAsset -DestinationPath $packageProbeRoot
+    foreach ($binaryName in @('GameValueEditor.exe', 'GameValueEditor.Updater.exe')) {
+        $binaryPath = Join-Path $packageProbeRoot $binaryName
+        if (-not (Test-Path -LiteralPath $binaryPath)) { throw "Release package is missing $binaryName." }
+        $productVersion = (Get-Item -LiteralPath $binaryPath).VersionInfo.ProductVersion
+        if ($productVersion -notmatch "\+$([regex]::Escape($headCommit))$") {
+            throw "$binaryName ProductVersion is not traceable to HEAD $headCommit`: $productVersion"
+        }
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $packageProbeRoot) { Remove-Item -LiteralPath $packageProbeRoot -Recurse -Force }
+}
 
 function ConvertTo-ProxyUri {
     param([Parameter(Mandatory)][string]$Value)

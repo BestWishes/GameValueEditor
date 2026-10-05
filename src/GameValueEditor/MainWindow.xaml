@@ -441,6 +441,7 @@
                                         <ColumnDefinition Width="Auto"/>
                                         <ColumnDefinition Width="Auto"/>
                                         <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
                                     <StackPanel>
                                         <TextBlock Text="{Binding ActiveAdapterText}" FontWeight="SemiBold"/>
@@ -449,12 +450,14 @@
                                     <Button Grid.Column="1" Content="检查新有" IsEnabled="{Binding CanCheckGameModules}"
                                             Click="CheckGameModules_OnClick"/>
                                     <Button Grid.Column="2" Content="{Binding ModuleInstallActionText}" IsEnabled="{Binding CanInstallGameModule}"
-                                            Click="InstallGameModule_OnClick" Margin="0,0,20,0"/>
-                                    <Button Grid.Column="3" Content="卸载" IsEnabled="{Binding CanUninstallGameModule}"
+                                            Click="InstallGameModule_OnClick"/>
+                                    <Button Grid.Column="3" Content="{Binding ModuleRollbackActionText}" IsEnabled="{Binding CanRollbackGameModule}"
+                                            Click="RollbackGameModule_OnClick" Margin="8,0,20,0"/>
+                                    <Button Grid.Column="4" Content="卸载" IsEnabled="{Binding CanUninstallGameModule}"
                                             Click="UninstallGameModule_OnClick"/>
-                                    <Button x:Name="ModuleCompatibilityDiagnosticsButton" Grid.Column="4" Content="兼容性诊断" IsEnabled="{Binding CanViewModuleCompatibilityDiagnostics}"
+                                    <Button x:Name="ModuleCompatibilityDiagnosticsButton" Grid.Column="5" Content="兼容性诊断" IsEnabled="{Binding CanViewModuleCompatibilityDiagnostics}"
                                             Click="ShowModuleCompatibilityDiagnostics_OnClick" Margin="18,0,0,0"/>
-                                    <Button Grid.Column="5" Content="贡献者" IsEnabled="{Binding CanViewModuleContributors}"
+                                    <Button Grid.Column="6" Content="贡献者" IsEnabled="{Binding CanViewModuleContributors}"
                                             Click="ShowModuleContributors_OnClick" Margin="8,0,0,0"/>
                                 </Grid>
                             </Border>
@@ -722,6 +725,8 @@
                     </TextBlock>
                     <Button Content="{Binding ApplicationUpdateActionText}" IsEnabled="{Binding CanUseApplicationUpdate}"
                             Click="ApplicationUpdate_OnClick" Padding="6,1" Margin="0" MinHeight="22"/>
+                    <Button Content="{Binding ApplicationRollbackActionText}" IsEnabled="{Binding CanUseApplicationRollback}"
+                            Click="ApplicationRollback_OnClick" Padding="6,1" Margin="8,0,0,0" MinHeight="22"/>
                     <TextBlock Text="{Binding ApplicationUpdateStatusText}" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
                     <Button Content="官网" IsEnabled="{Binding CanOpenOfficialWebsite}"
                             Click="OpenOfficialWebsite_OnClick" Padding="10,1" Margin="24,0,0,0" MinHeight="22"/>

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidatePattern('^(0|[1-9][0-9]*)\.[0-9]\.[0-9]$')] [string]$Version = "0.4.3"
+    [ValidatePattern('^(0|[1-9][0-9]*)\.[0-9]\.[0-9]$')] [string]$Version = "0.4.4"
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,6 +8,11 @@ $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 . (Join-Path $PSScriptRoot 'versioning.ps1')
 Assert-ReleaseVersionContract
 Assert-NextReleaseVersion -RepositoryRoot $repoRoot -Version $Version
+$workingTree = @(& git -C $repoRoot status --porcelain --untracked-files=all)
+if ($LASTEXITCODE -ne 0 -or $workingTree.Count -ne 0) {
+    throw 'Formal application packages must be rebuilt from a clean committed working tree.'
+}
+$headCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
 $appProjectVersion = ([xml](Get-Content -LiteralPath (Join-Path $repoRoot 'src\GameValueEditor\GameValueEditor.csproj') -Raw -Encoding UTF8)).Project.PropertyGroup.Version
 $updaterProjectVersion = ([xml](Get-Content -LiteralPath (Join-Path $repoRoot 'src\GameValueEditor.Updater\GameValueEditor.Updater.csproj') -Raw -Encoding UTF8)).Project.PropertyGroup.Version
 if ($appProjectVersion -ne $Version -or $updaterProjectVersion -ne $Version) {
@@ -64,6 +69,15 @@ dotnet publish (Join-Path $repoRoot "src\GameValueEditor.Updater\GameValueEditor
     -o $updaterPublishDir
 
 if ($LASTEXITCODE -ne 0) { throw "updater dotnet publish failed." }
+
+foreach ($binary in @(
+    (Join-Path $publishDir "GameValueEditor.exe"),
+    (Join-Path $updaterPublishDir "GameValueEditor.Updater.exe"))) {
+    $productVersion = (Get-Item -LiteralPath $binary).VersionInfo.ProductVersion
+    if ($productVersion -notmatch "\+$([regex]::Escape($headCommit))$") {
+        throw "Published binary ProductVersion is not traceable to HEAD $headCommit`: $productVersion"
+    }
+}
 
 Copy-Item -LiteralPath (Join-Path $publishDir "GameValueEditor.exe") -Destination $packageDir
 Copy-Item -LiteralPath (Join-Path $updaterPublishDir "GameValueEditor.Updater.exe") -Destination $packageDir

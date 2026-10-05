@@ -1,11 +1,11 @@
 # 本地发布流程
 
-GitHub Actions 不是发布前提。正式版本必须先在本机完成构建、烟雾测试、标准包启动和更新器沙箱验证，再提交源码、推送带注释标签并上传不可变资产。
+GitHub Actions 不是发布前提。正式版本先完成源码级构建与测试并经过复核，然后提交源码；最终发布包必须从干净的已提交工作树重新构建和验证，再推送指向同一提交的带注释标签并上传不可变资产。二进制 `ProductVersion` 中的源码提交号必须等于 `HEAD`。
 
 ## 1. 验证标准包
 
 ```powershell
-./scripts/verify-release.ps1 -Version 0.4.3
+./scripts/verify-release.ps1 -Version 0.4.4
 ```
 
 记录脚本输出的标准 ZIP 路径与 SHA-256。正式发布版本是独立的十进制计数器：每次只加 `0.0.1`，`0.4.9` 的下一版是 `0.5.0`，`0.9.9` 的下一版是 `1.0.0`。发布脚本从最新正式标签计算唯一下一版本并拒绝跳号；预览标签和 `complete-offline` 完整离线包均不能上传 GitHub Release，完整离线包只供本地或 QQ 分发。Host API 与 Schema 是独立整数协议号，不参与此进位。
@@ -15,7 +15,7 @@ GitHub Actions 不是发布前提。正式版本必须先在本机完成构建�
 确认工作树、差异和远端状态后提交，在已验证的提交上创建带注释标签：
 
 ```powershell
-git tag -a v0.4.3 -m "GameValueEditor v0.4.3"
+git tag -a v0.4.4 -m "GameValueEditor v0.4.4"
 ```
 
 发布脚本从 `origin`（或 `-RemoteName` 指定的远端）解析 GitHub 仓库，避免手工填写错误的所有者或仓库名。可用 `-PushRefs` 同时推送当前分支和标签；脚本先使用配置的 Git 远端，HTTPS 失败时自动通过 GitHub SSH 443 重试。
@@ -24,9 +24,9 @@ git tag -a v0.4.3 -m "GameValueEditor v0.4.3"
 
 ```powershell
 ./scripts/publish-github-release.ps1 `
-  -Tag v0.4.3 `
-  -ReleaseName "肝肾大圣 v0.4.3" `
-  -AssetPath ./dist/GameValueEditor-v0.4.3-win-x64.zip `
+  -Tag v0.4.4 `
+  -ReleaseName "肝肾大圣 v0.4.4" `
+  -AssetPath ./dist/GameValueEditor-v0.4.4-win-x64.zip `
   -PushRefs
 ```
 
@@ -48,13 +48,19 @@ git tag -a v0.4.3 -m "GameValueEditor v0.4.3"
 
 ```powershell
 ./scripts/publish-github-release.ps1 `
-  -Tag v0.4.3 `
-  -ReleaseName "肝肾大圣 v0.4.3" `
-  -AssetPath ./dist/GameValueEditor-v0.4.3-win-x64.zip `
+  -Tag v0.4.4 `
+  -ReleaseName "肝肾大圣 v0.4.4" `
+  -AssetPath ./dist/GameValueEditor-v0.4.4-win-x64.zip `
   -VerifyOnly
 ```
 
 输出必须包含 `Verified = True`，远端资产大小和 SHA-256 必须与本地文件完全一致。
+
+## 4. 更新索引并执行保留策略
+
+远端资产验证完成后，用 `scripts/update-release-index.ps1` 把新版本加入 `release-index.json`，最多保留 3 个快照；提交并推送索引后，复核公开 raw 文件与 Release 一致。最后运行 `scripts/prune-github-releases.ps1`，它只删除第 4 个及更旧的正式 Release/资产并保留标签。主程序的每次发布必须在模块目录所需 Schema 不超过该版本声明上限的前提下更新索引。
+
+主程序和各模块的版本号独立；兼容关系不靠版本号相等，而由主程序索引中的 Host API 范围，以及模块发布快照中的 `hostApiVersion`、`minimumHostVersion`、`maximumHostVersion` 共同确定。应用中的“回退”始终由用户显式确认；保留脚本和检查版本流程都不得触发自动回退。
 
 ## 中断恢复
 

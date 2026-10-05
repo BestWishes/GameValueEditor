@@ -17,6 +17,7 @@ public sealed class GameModuleCatalogService
     private readonly string _modulesDirectory;
     private readonly HttpClient _httpClient;
     private readonly DownloadTimeoutPolicy _downloadTimeoutPolicy;
+    private readonly string _currentHostVersion;
     private readonly JsonSerializerOptions _jsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -26,11 +27,13 @@ public sealed class GameModuleCatalogService
     public GameModuleCatalogService(
         string modulesDirectory,
         HttpClient? httpClient = null,
-        DownloadTimeoutPolicy? downloadTimeoutPolicy = null)
+        DownloadTimeoutPolicy? downloadTimeoutPolicy = null,
+        string? currentHostVersion = null)
     {
         _modulesDirectory = modulesDirectory;
         _httpClient = httpClient ?? new HttpClient();
         _downloadTimeoutPolicy = downloadTimeoutPolicy ?? DownloadTimeoutPolicy.Default;
+        _currentHostVersion = currentHostVersion ?? ApplicationVersion.Current;
         if (httpClient is null)
         {
             _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("GameValueEditor-Modules/1.0");
@@ -84,45 +87,66 @@ public sealed class GameModuleCatalogService
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         var catalog = await JsonSerializer.DeserializeAsync<GameModuleCatalog>(stream, _jsonOptions, cancellationToken)
                       ?? throw new InvalidOperationException("无法读取游戏专属模块清单。");
+        if (catalog.SchemaVersion is < 1 or > 5)
+            throw new InvalidOperationException(
+                $"服务器模块清单 Schema {catalog.SchemaVersion} 超出当前应用支持范围 1–5。");
         if (catalog.HostApiVersion > ModuleHostApi.CurrentVersion)
             throw new InvalidOperationException(
                 $"服务器模块清单需要接口版本 {catalog.HostApiVersion}，当前应用最高支持 {ModuleHostApi.CurrentVersion}。");
 
-        var candidates = catalog.Modules
+        var matchingModules = catalog.Modules.Where(module => MatchesProcess(module, processName)).ToList();
+        var hostCompatibleCandidates = matchingModules
+            .SelectMany(GetVersionCandidates)
             .Where(module => module.HostApiVersion is >= 1 and <= ModuleHostApi.CurrentVersion &&
-                             MatchesProcess(module, processName))
+                             IsHostCompatible(module))
             .OrderByDescending(module => ParseVersion(module.Version))
+            .ToList();
+        if (hostCompatibleCandidates.Count == 0)
+            return new GameModuleCheckResult(GameModuleAvailability.NotAvailable, null, null,
+                matchingModules.Count == 0
+                    ? "服务器暂无适用于当前游戏的专属模块。"
+                    : $"服务器有当前游戏的专属模块，但没有兼容主程序 v{_currentHostVersion} 与 Host API {ModuleHostApi.CurrentVersion} 的版本。");
+
+        var candidates = hostCompatibleCandidates.Where(module => MatchesBuild(module, buildFingerprint,
+                executableSha256, gameAssemblySha256, metadataSha256))
             .ToList();
         if (candidates.Count == 0)
             return new GameModuleCheckResult(GameModuleAvailability.NotAvailable, null, null,
-                "服务器暂无适用于当前游戏的专属模块。");
+                "服务器有当前游戏的专属模块，但保留的版本都不兼容当前游戏构建。");
 
-        var compatible = candidates.FirstOrDefault(module => MatchesBuild(module, buildFingerprint,
-                             executableSha256, gameAssemblySha256, metadataSha256))
-                         ?? candidates[0];
-        var exactBuildMatch = MatchesBuild(compatible, buildFingerprint, executableSha256,
-            gameAssemblySha256, metadataSha256);
+        var compatible = candidates[0];
+        candidates = candidates.Where(module => string.Equals(module.Id, compatible.Id, StringComparison.Ordinal))
+            .ToList();
+        const bool exactBuildMatch = true;
 
         var installed = FindInstalled(compatible.Id);
         if (installed is null)
             return new GameModuleCheckResult(GameModuleAvailability.Available, compatible, null,
-                exactBuildMatch
-                    ? $"发现可下载模块：{compatible.DisplayName} v{compatible.Version}"
-                    : $"发现当前游戏的专属模块 v{compatible.Version}；安装后会在本地安全验证当前构建。",
+                $"发现可下载模块：{compatible.DisplayName} v{compatible.Version}",
                 exactBuildMatch);
         var installedVersion = ParseVersion(installed.Version);
-        var remoteVersion = ParseVersion(compatible.Version);
-        return remoteVersion.CompareTo(installedVersion) > 0
-            ? new GameModuleCheckResult(GameModuleAvailability.UpdateAvailable, compatible, installed,
-                exactBuildMatch
-                    ? $"发现模块更新：v{installed.Version} → v{compatible.Version}"
-                    : $"发现模块更新 v{compatible.Version}；更新后会在本地安全验证当前构建。",
-                exactBuildMatch)
-            : new GameModuleCheckResult(GameModuleAvailability.Current, compatible, installed,
-                exactBuildMatch
-                    ? $"本地专属模块已是最新：v{installed.Version}"
-                    : $"本地模块已是最新 v{installed.Version}；当前构建尚未明确收录，将由本地安全校验决定是否启用。",
-                exactBuildMatch);
+        var updateTarget = candidates.FirstOrDefault(module => ParseVersion(module.Version).CompareTo(installedVersion) > 0);
+        var rollbackTarget = candidates.FirstOrDefault(module => ParseVersion(module.Version).CompareTo(installedVersion) < 0);
+        if (updateTarget is not null)
+        {
+            var updateExact = MatchesBuild(updateTarget, buildFingerprint, executableSha256,
+                gameAssemblySha256, metadataSha256);
+            return new GameModuleCheckResult(GameModuleAvailability.UpdateAvailable, updateTarget, installed,
+                updateExact
+                    ? $"发现模块更新：v{installed.Version} → v{updateTarget.Version}"
+                    : $"发现模块更新 v{updateTarget.Version}；更新后会在本地安全验证当前构建。",
+                updateExact, rollbackTarget);
+        }
+
+        var currentEntry = candidates.FirstOrDefault(module =>
+                               ParseVersion(module.Version).CompareTo(installedVersion) == 0)
+                           ?? compatible;
+        var rollbackSuffix = rollbackTarget is null ? string.Empty : $"；可手动回退到 v{rollbackTarget.Version}";
+        return new GameModuleCheckResult(GameModuleAvailability.Current, currentEntry, installed,
+            exactBuildMatch
+                ? $"本地专属模块已是最新：v{installed.Version}{rollbackSuffix}"
+                : $"本地模块已是最新 v{installed.Version}；当前构建尚未明确收录，将由本地安全校验决定是否启用{rollbackSuffix}。",
+            exactBuildMatch, rollbackTarget);
     }
 
     public async Task InstallAsync(
@@ -132,6 +156,11 @@ public sealed class GameModuleCatalogService
     {
         EnsureSafePathSegment(module.Id, "模块 ID");
         EnsureSafePathSegment(module.Version, "模块版本");
+        if (!IsHostCompatible(module))
+            throw new InvalidOperationException($"模块 v{module.Version} 与当前主程序 v{_currentHostVersion} 不兼容。");
+        if (module.SizeBytes <= 0 || string.IsNullOrWhiteSpace(module.Sha256) ||
+            module.Sha256.Length != 64 || !module.Sha256.All(Uri.IsHexDigit))
+            throw new InvalidOperationException("模块下载大小或 SHA-256 元数据无效。");
         if (!Uri.TryCreate(module.DownloadUrl, UriKind.Absolute, out var downloadUri) ||
             downloadUri.Scheme != Uri.UriSchemeHttps)
             throw new InvalidOperationException("模块下载地址必须使用 HTTPS。");
@@ -145,7 +174,7 @@ public sealed class GameModuleCatalogService
         var temporaryArchive = Path.Combine(downloadsDirectory, $"{Guid.NewGuid():N}.download");
         try
         {
-            await HttpDownloadService.DownloadToFileAsync(_httpClient, module.DownloadUrl, temporaryArchive, 0,
+            await HttpDownloadService.DownloadToFileAsync(_httpClient, module.DownloadUrl, temporaryArchive, module.SizeBytes,
                 progress, _downloadTimeoutPolicy, cancellationToken);
             var hash = await ComputeSha256Async(temporaryArchive, cancellationToken);
             if (!hash.Equals(module.Sha256, StringComparison.OrdinalIgnoreCase))
@@ -331,9 +360,15 @@ public sealed class GameModuleCatalogService
         if (!File.Exists(manifestPath)) throw new InvalidOperationException("专属模块包缺少 module.json。");
         var manifest = JsonSerializer.Deserialize<InstalledModuleManifest>(File.ReadAllText(manifestPath), _jsonOptions)
                        ?? throw new InvalidOperationException("专属模块包的 module.json 无效。");
+        var manifestMinimumHostVersion = string.IsNullOrWhiteSpace(manifest.MinimumHostVersion)
+            ? GetPublishedLegacyMinimumHostVersion(manifest.HostApiVersion)
+            : manifest.MinimumHostVersion;
         if (!string.Equals(manifest.Id, catalogEntry.Id, StringComparison.Ordinal) ||
             !string.Equals(manifest.Version, catalogEntry.Version, StringComparison.OrdinalIgnoreCase) ||
             manifest.HostApiVersion != catalogEntry.HostApiVersion ||
+            !string.Equals(manifestMinimumHostVersion, catalogEntry.MinimumHostVersion, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(manifest.MaximumHostVersion ?? string.Empty, catalogEntry.MaximumHostVersion ?? string.Empty,
+                StringComparison.OrdinalIgnoreCase) ||
             manifest.HostApiVersion is < 1 or > ModuleHostApi.CurrentVersion)
             throw new InvalidOperationException("专属模块包与服务器清单不一致。");
         if (!string.Equals(manifest.GameDisplayName, catalogEntry.GameDisplayName, StringComparison.Ordinal) ||
@@ -393,6 +428,56 @@ public sealed class GameModuleCatalogService
             ? version
             : throw new InvalidOperationException($"无效的模块版本：{value}");
 
+    private static string GetPublishedLegacyMinimumHostVersion(int hostApiVersion) => hostApiVersion switch
+    {
+        4 => "0.4.1",
+        6 => "0.4.3",
+        _ => string.Empty
+    };
+
+    private bool IsHostCompatible(GameModuleCatalogEntry module)
+    {
+        var current = ParseVersion(_currentHostVersion);
+        var minimum = string.IsNullOrWhiteSpace(module.MinimumHostVersion)
+            ? GetPublishedLegacyMinimumHostVersion(module.HostApiVersion)
+            : module.MinimumHostVersion;
+        if (string.IsNullOrWhiteSpace(minimum) || ParseVersion(minimum).CompareTo(current) > 0) return false;
+        return string.IsNullOrWhiteSpace(module.MaximumHostVersion) ||
+               ParseVersion(module.MaximumHostVersion).CompareTo(current) >= 0;
+    }
+
+    private static IEnumerable<GameModuleCatalogEntry> GetVersionCandidates(GameModuleCatalogEntry module)
+    {
+        if (module.Releases.Count == 0)
+        {
+            yield return module;
+            yield break;
+        }
+
+        foreach (var release in module.Releases)
+        {
+            yield return new GameModuleCatalogEntry
+            {
+                Id = module.Id,
+                Version = release.Version,
+                DisplayName = module.DisplayName,
+                GameDisplayName = module.GameDisplayName,
+                Description = module.Description,
+                HostApiVersion = release.HostApiVersion,
+                MinimumHostVersion = release.MinimumHostVersion,
+                MaximumHostVersion = release.MaximumHostVersion,
+                LegacyIds = [.. module.LegacyIds],
+                Editors = [.. release.Editors],
+                ProcessNames = [.. module.ProcessNames],
+                CompatibleBuilds = [.. release.CompatibleBuilds],
+                Contributors = [.. module.Contributors],
+                DownloadUrl = release.DownloadUrl,
+                SizeBytes = release.SizeBytes,
+                Sha256 = release.Sha256
+            };
+        }
+    }
+
     private static void EnsureSafePathSegment(string value, string label)
     {
         if (string.IsNullOrWhiteSpace(value) || value is "." or ".." ||
@@ -426,7 +511,8 @@ public sealed record GameModuleCheckResult(
     GameModuleCatalogEntry? RemoteModule,
     InstalledModuleRecord? InstalledModule,
     string StatusText,
-    bool IsExactBuildMatch = false);
+    bool IsExactBuildMatch = false,
+    GameModuleCatalogEntry? RollbackModule = null);
 
 public sealed class GameModuleCatalog
 {
@@ -443,12 +529,29 @@ public sealed class GameModuleCatalogEntry
     public string GameDisplayName { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
     public int HostApiVersion { get; set; } = 1;
+    public string MinimumHostVersion { get; set; } = string.Empty;
+    public string? MaximumHostVersion { get; set; }
     public List<string> LegacyIds { get; set; } = [];
     public List<GameModuleEditorEntry> Editors { get; set; } = [];
     public List<string> ProcessNames { get; set; } = [];
     public List<GameModuleBuildMatch> CompatibleBuilds { get; set; } = [];
     public List<GameModuleContributor> Contributors { get; set; } = [];
     public string DownloadUrl { get; set; } = string.Empty;
+    public long SizeBytes { get; set; }
+    public string Sha256 { get; set; } = string.Empty;
+    public List<GameModuleReleaseEntry> Releases { get; set; } = [];
+}
+
+public sealed class GameModuleReleaseEntry
+{
+    public string Version { get; set; } = string.Empty;
+    public int HostApiVersion { get; set; } = 1;
+    public string MinimumHostVersion { get; set; } = string.Empty;
+    public string? MaximumHostVersion { get; set; }
+    public List<GameModuleEditorEntry> Editors { get; set; } = [];
+    public List<GameModuleBuildMatch> CompatibleBuilds { get; set; } = [];
+    public string DownloadUrl { get; set; } = string.Empty;
+    public long SizeBytes { get; set; }
     public string Sha256 { get; set; } = string.Empty;
 }
 

@@ -104,6 +104,7 @@ public sealed class MainViewModel : ObservableObject
     private string _moduleStatusText = "尚未检查当前游戏的专属模块";
     private bool _isModuleControlBlocked;
     private GameModuleCheckResult? _moduleCheckResult;
+    private bool _moduleRestartRequired;
     private string _applicationUpdateStatusText = string.Empty;
     private string _applicationUpdateActionText = "检查更新";
     private bool _isApplicationUpdateBusy;
@@ -448,6 +449,11 @@ public sealed class MainViewModel : ObservableObject
     public string ModuleInstallActionText => _moduleCheckResult?.Availability == GameModuleAvailability.Available
         ? "可下载"
         : "可更新";
+    public bool CanRollbackGameModule => !_isModuleControlBlocked && _moduleCheckResult?.RollbackModule is not null;
+    public string ModuleRollbackActionText => _moduleCheckResult?.RollbackModule is { } rollback
+        ? $"回退到 v{rollback.Version}"
+        : "无可回退版本";
+    public bool ModuleRestartRequired => _moduleRestartRequired;
     public bool CanUninstallGameModule => !_isModuleControlBlocked &&
         !string.IsNullOrWhiteSpace(ResolveActiveModuleId()) &&
         _moduleCatalogService.FindInstalled(ResolveActiveModuleId()) is not null;
@@ -467,6 +473,11 @@ public sealed class MainViewModel : ObservableObject
     public bool CanUseApplicationUpdate => !_isApplicationUpdateBusy && !_applicationUpdateDownloaded &&
         (HasApplicationUpdateAvailable || !_isApplicationUpdateCheckCooldown);
     public bool HasApplicationUpdateAvailable => _applicationUpdateResult?.IsUpdateAvailable == true && !_applicationUpdateDownloaded;
+    public bool CanUseApplicationRollback => !_isApplicationUpdateBusy && !_applicationUpdateDownloaded &&
+        _applicationUpdateResult?.RollbackTarget is not null;
+    public string ApplicationRollbackActionText => _applicationUpdateResult?.RollbackTarget is { } rollback
+        ? $"回退到 v{rollback.Version}"
+        : "无可回退版本";
     public bool IsApplicationUpdateDownloaded => _applicationUpdateDownloaded;
     public bool CanOpenOfficialWebsite => !_isOfficialWebsiteControlBlocked;
 
@@ -1737,6 +1748,7 @@ public sealed class MainViewModel : ObservableObject
         var version = SelectedVersion;
         var process = AttachedProcess;
         var originalSession = _activeSession;
+        var installedBefore = _moduleCatalogService.FindInstalled(module.Id);
         if (_moduleCheckResult?.Availability is not (GameModuleAvailability.Available or GameModuleAvailability.UpdateAvailable))
             throw new InvalidOperationException("当前没有可下载或更新的专属模块。");
         if (_isModuleControlBlocked) return;
@@ -1752,9 +1764,17 @@ public sealed class MainViewModel : ObservableObject
                 StatusText = ModuleStatusText;
             });
             await _moduleCatalogService.InstallAsync(module, progress);
-            SetActiveAdapter(null);
-            _adapterRegistry.Reload();
-            ReloadAdaptersForSessions();
+            var replacementRequiresRestart = installedBefore is not null;
+            _moduleRestartRequired |= replacementRequiresRestart;
+            if (replacementRequiresRestart)
+            {
+                DeactivateModuleUntilRestart(module.Id);
+            }
+            else
+            {
+                _adapterRegistry.LoadInstalledModule(module.Id);
+                ReloadAdaptersForSessions();
+            }
             if (game is null)
             {
                 if (process is null) throw new InvalidOperationException("模块已下载，但当前游戏连接已断开，无法自动保存入库。");
@@ -1779,15 +1799,69 @@ public sealed class MainViewModel : ObservableObject
             GamesView.Refresh();
             _moduleCheckResult = new GameModuleCheckResult(GameModuleAvailability.Current, module,
                 _moduleCatalogService.FindInstalled(module.Id), $"已安装最新专属模块：{module.DisplayName} v{module.Version}");
-            ModuleStatusText = installedAdapter is null
-                ? $"已安装 {module.DisplayName} v{module.Version}，连接兼容游戏版本后启用。"
-                : _moduleCheckResult.StatusText;
+            ModuleStatusText = replacementRequiresRestart
+                ? $"已安装 {module.DisplayName} v{module.Version}；该模块已停用，请手动重启主程序后启用。"
+                : installedAdapter is null
+                    ? $"已安装 {module.DisplayName} v{module.Version}，连接兼容游戏版本后启用。"
+                    : _moduleCheckResult.StatusText;
             NotifyModuleControls();
         }
         finally
         {
             ReleaseModuleControlsAfter(cooldown);
         }
+    }
+
+    public async Task RollbackCurrentGameModuleAsync()
+    {
+        var rollback = _moduleCheckResult?.RollbackModule
+                       ?? throw new InvalidOperationException("当前没有兼容的较低模块版本可回退。");
+        if (_isModuleControlBlocked) return;
+        _isModuleControlBlocked = true;
+        NotifyModuleControls();
+        var cooldown = Task.Delay(TimeSpan.FromSeconds(3));
+        try
+        {
+            ModuleStatusText = $"正在下载并校验 {rollback.DisplayName} v{rollback.Version}…";
+            var progress = new Progress<DownloadProgressSnapshot>(snapshot =>
+            {
+                ModuleStatusText = $"正在下载 {rollback.DisplayName} v{rollback.Version} · {snapshot.DisplayText}";
+                StatusText = ModuleStatusText;
+            });
+            await _moduleCatalogService.InstallAsync(rollback, progress);
+            _moduleRestartRequired = true;
+            DeactivateModuleUntilRestart(rollback.Id);
+            _moduleCheckResult = new GameModuleCheckResult(GameModuleAvailability.Current, rollback,
+                _moduleCatalogService.FindInstalled(rollback.Id),
+                $"已手动回退到 {rollback.DisplayName} v{rollback.Version}；请重启主程序后启用。");
+            ModuleStatusText = _moduleCheckResult.StatusText;
+            StatusText = ModuleStatusText;
+            NotifyModuleControls();
+        }
+        finally
+        {
+            ReleaseModuleControlsAfter(cooldown);
+        }
+    }
+
+    private void DeactivateModuleUntilRestart(string moduleId)
+    {
+        var sessions = _sessions.Values.Append(_activeSession).Where(item => item is not null)
+            .Cast<GameConnectionSession>().Distinct().ToList();
+        foreach (var session in sessions.Where(session =>
+                     string.Equals(session.Adapter?.Id, moduleId, StringComparison.Ordinal)))
+        {
+            StopSessionLockMaintenance(session);
+            session.Adapter = null;
+            session.AdapterItems = [];
+            session.AdapterCharacters = [];
+            session.SelectedAdapterFieldKey = null;
+            session.SelectedCharacterId = null;
+            session.SelectedCharacterAttributeKey = null;
+        }
+        if (string.Equals(_activeAdapter?.Id, moduleId, StringComparison.Ordinal)) SetActiveAdapter(null);
+        _adapterRegistry.Deactivate(moduleId);
+        RestartLockMaintenance();
     }
 
     public async Task UninstallCurrentGameModuleAsync()
@@ -1938,15 +2012,17 @@ public sealed class MainViewModel : ObservableObject
         {
             ApplicationUpdateStatusText = "　检查中";
             _applicationUpdateResult = await _applicationUpdateService.CheckAsync();
-            if (_applicationUpdateResult.IsUpdateAvailable)
+            if (_applicationUpdateResult.UpdateTarget is { } updateTarget)
             {
-                ApplicationUpdateStatusText = $"　v{_applicationUpdateResult.Version}";
+                ApplicationUpdateStatusText = $"　v{updateTarget.Version}";
                 ApplicationUpdateActionText = "更新";
-                StatusText = $"发现肝肾大圣新版本 v{_applicationUpdateResult.Version}";
+                StatusText = $"发现肝肾大圣新版本 v{updateTarget.Version}";
             }
             else
             {
-                ApplicationUpdateStatusText = "　已最新";
+                ApplicationUpdateStatusText = _applicationUpdateResult.RollbackTarget is { } rollback
+                    ? $"　已最新 · 可回退 v{rollback.Version}"
+                    : "　已最新";
                 ApplicationUpdateActionText = "检查更新";
                 StatusText = "肝肾大圣当前已是最新版本";
             }
@@ -1968,34 +2044,60 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task<bool> DownloadApplicationUpdateAsync()
     {
-        var update = _applicationUpdateResult;
-        if (update?.IsUpdateAvailable != true) throw new InvalidOperationException("请先检查更新。");
+        var target = _applicationUpdateResult?.UpdateTarget
+                     ?? throw new InvalidOperationException("请先检查更新。");
+        return await DownloadApplicationReleaseAsync(target, ApplicationUpdateOperation.Update);
+    }
+
+    public IReadOnlyList<ApplicationRollbackBlock> GetApplicationRollbackBlocks()
+    {
+        var target = _applicationUpdateResult?.RollbackTarget
+                     ?? throw new InvalidOperationException("当前没有可回退的主程序版本。");
+        return _applicationUpdateService.FindRollbackBlocks(target, _moduleCatalogService.GetInstalledManifests());
+    }
+
+    public async Task<bool> DownloadApplicationRollbackAsync()
+    {
+        var target = _applicationUpdateResult?.RollbackTarget
+                     ?? throw new InvalidOperationException("当前没有可回退的主程序版本。");
+        var blocks = GetApplicationRollbackBlocks();
+        if (blocks.Count > 0)
+            throw new InvalidOperationException("当前安装的专属模块与目标主程序不兼容，请先手动回退列出的模块。\n" +
+                                                string.Join("\n", blocks.Select(block =>
+                                                    $"- {block.DisplayName} v{block.ModuleVersion}：{block.Reason}")));
+        return await DownloadApplicationReleaseAsync(target, ApplicationUpdateOperation.Rollback);
+    }
+
+    private async Task<bool> DownloadApplicationReleaseAsync(
+        ApplicationReleaseTarget target,
+        ApplicationUpdateOperation operation)
+    {
         if (_isApplicationUpdateBusy || _applicationUpdateDownloaded) return false;
         _isApplicationUpdateBusy = true;
         NotifyApplicationUpdateState();
         try
         {
-            ApplicationUpdateStatusText = $"　v{update.Version} 下载中";
+            ApplicationUpdateStatusText = $"　v{target.Version} 下载中";
             var progress = new Progress<DownloadProgressSnapshot>(snapshot =>
             {
                 var progressText = snapshot.Percentage is { } percentage
                     ? $"下载 {percentage}% "
                     : "下载中 ";
-                ApplicationUpdateStatusText = $"　v{update.Version} {progressText.Trim()}";
-                StatusText = $"正在下载肝肾大圣 v{update.Version} · {snapshot.DisplayText}";
+                ApplicationUpdateStatusText = $"　v{target.Version} {progressText.Trim()}";
+                StatusText = $"正在下载肝肾大圣 v{target.Version} · {snapshot.DisplayText}";
             });
-            await _applicationUpdateService.DownloadAsync(update, progress);
+            await _applicationUpdateService.DownloadAsync(target, operation, progress);
             _applicationUpdateDownloaded = true;
-            ApplicationUpdateStatusText = $"　v{update.Version} 已下载";
-            ApplicationUpdateActionText = "待重启更新";
-            StatusText = $"已下载并校验 v{update.Version}，可立即重启或下次启动时更新";
+            ApplicationUpdateStatusText = $"　v{target.Version} 已下载";
+            ApplicationUpdateActionText = operation == ApplicationUpdateOperation.Update ? "待重启更新" : "待重启回退";
+            StatusText = $"已下载并校验 v{target.Version}，可立即重启或下次启动时{(operation == ApplicationUpdateOperation.Update ? "更新" : "回退")}";
             return true;
         }
         catch
         {
-            ApplicationUpdateStatusText = $"　v{update.Version} 下载失败";
-            ApplicationUpdateActionText = "更新";
-            StatusText = $"下载肝肾大圣 v{update.Version} 失败，请稍后重试";
+            ApplicationUpdateStatusText = $"　v{target.Version} 下载失败";
+            ApplicationUpdateActionText = operation == ApplicationUpdateOperation.Update ? "更新" : "检查更新";
+            StatusText = $"下载肝肾大圣 v{target.Version} 失败，请稍后重试";
             throw;
         }
         finally
@@ -2233,6 +2335,9 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(CanCheckGameModules));
         OnPropertyChanged(nameof(CanInstallGameModule));
         OnPropertyChanged(nameof(ModuleInstallActionText));
+        OnPropertyChanged(nameof(CanRollbackGameModule));
+        OnPropertyChanged(nameof(ModuleRollbackActionText));
+        OnPropertyChanged(nameof(ModuleRestartRequired));
         OnPropertyChanged(nameof(CanUninstallGameModule));
         OnPropertyChanged(nameof(CanViewModuleCompatibilityDiagnostics));
         OnPropertyChanged(nameof(CanViewModuleContributors));
@@ -2252,6 +2357,8 @@ public sealed class MainViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(CanUseApplicationUpdate));
         OnPropertyChanged(nameof(HasApplicationUpdateAvailable));
+        OnPropertyChanged(nameof(CanUseApplicationRollback));
+        OnPropertyChanged(nameof(ApplicationRollbackActionText));
         OnPropertyChanged(nameof(IsApplicationUpdateDownloaded));
     }
 

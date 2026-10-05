@@ -163,7 +163,10 @@ try
            new SemanticVersion(0, 4, 9).Next() == new SemanticVersion(0, 5, 0) &&
            new SemanticVersion(0, 9, 9).Next() == new SemanticVersion(1, 0, 0),
         "Decimal-counter release carry failed");
-    Assert(ModuleHostApi.CurrentVersion == 6, "Host API version was not advanced for module-owned WPF pages");
+    Assert(ModuleHostApi.CurrentVersion == 7, "Host API version was not advanced for the module visual contract");
+    Assert(ModuleVisualResources.PagePadding == new Thickness(12) &&
+           ModuleVisualResources.AccentBrush == "AccentBrush",
+        "Host API 7 visual resource contract is incomplete");
     var api5Adapter = new SmokeTestModuleAdapter();
     GameEditorPageResolver.ValidateApi4Provider(api5Adapter);
     Assert(GameEditorPageResolver.Resolve(api5Adapter).Select(page => page.EditorId)
@@ -237,10 +240,12 @@ try
         var liveUpdateRoot = Path.Combine(Path.GetTempPath(), $"GameValueEditor-LiveUpdate-{Guid.NewGuid():N}");
         var liveUpdateService = new ApplicationUpdateService(liveUpdateRoot, currentVersion: "0.4.0");
         var liveUpdate = await liveUpdateService.CheckAsync();
-        Assert(liveUpdate.AssetName.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
-               liveUpdate.AssetName.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase),
-            $"Live update check selected a non-application release asset: {liveUpdate.AssetName}");
-        Console.WriteLine($"Live application release passed: v{liveUpdate.Version}, {liveUpdate.AssetName}");
+        var liveTarget = liveUpdate.UpdateTarget
+                         ?? throw new InvalidOperationException("Live update index did not provide an update target");
+        Assert(liveTarget.AssetName.StartsWith("GameValueEditor-v", StringComparison.OrdinalIgnoreCase) &&
+               liveTarget.AssetName.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase),
+            $"Live update check selected a non-application release asset: {liveTarget.AssetName}");
+        Console.WriteLine($"Live application release passed: v{liveTarget.Version}, {liveTarget.AssetName}");
     }
 
     var connectedGame = new GameProfile { Name = "连接中", IsConnected = true, LastUsedUtc = DateTime.UtcNow.AddDays(-10) };
@@ -525,19 +530,43 @@ try
     {
         var moduleCatalogJson = """
         {
-          "schemaVersion": 1,
-          "hostApiVersion": 2,
+          "schemaVersion": 5,
+          "hostApiVersion": 7,
           "modules": [{
             "id": "game.test.multi-editor",
             "version": "1.1.0",
             "displayName": "测试专属模块",
             "gameDisplayName": "测试游戏",
             "hostApiVersion": 5,
+            "minimumHostVersion": "0.4.4",
             "processNames": ["MatchedGame"],
             "compatibleBuilds": [{"executableSha256": "EXE", "gameAssemblySha256": "ASM", "metadataSha256": "META"}],
             "editors": [{"id":"test.inventory"},{"id":"test.characters"}],
             "downloadUrl": "https://example.invalid/module.zip",
-            "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "sizeBytes": 1,
+            "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "releases": [
+              {
+                "version": "1.1.0",
+                "hostApiVersion": 5,
+                "minimumHostVersion": "0.4.4",
+                "compatibleBuilds": [{"executableSha256": "EXE", "gameAssemblySha256": "ASM", "metadataSha256": "META"}],
+                "editors": [{"id":"test.inventory"},{"id":"test.characters"}],
+                "downloadUrl": "https://example.invalid/module.zip",
+                "sizeBytes": 1,
+                "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+              },
+              {
+                "version": "1.0.0",
+                "hostApiVersion": 5,
+                "minimumHostVersion": "0.4.2",
+                "compatibleBuilds": [{"executableSha256": "EXE", "gameAssemblySha256": "ASM", "metadataSha256": "META"}],
+                "editors": [{"id":"test.inventory"},{"id":"test.characters"}],
+                "downloadUrl": "https://example.invalid/module-old.zip",
+                "sizeBytes": 1,
+                "sha256": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+              }
+            ]
           }]
         }
         """;
@@ -567,10 +596,9 @@ try
             "An unlisted connected game could not check for a compatible module");
         var changedBuild = new VersionFingerprint("test", "", "", "OTHER-EXE", 1, "x64", "", "OTHER-ASM", "OTHER-META");
         var changedBuildAvailable = await catalogService.CheckAsync("MatchedGame", changedBuild);
-        Assert(changedBuildAvailable.Availability == GameModuleAvailability.Available &&
-               !changedBuildAvailable.IsExactBuildMatch &&
-               changedBuildAvailable.StatusText.Contains("本地安全验证", StringComparison.Ordinal),
-            "Module discovery was incorrectly hidden by an unlisted game build");
+        Assert(changedBuildAvailable.Availability == GameModuleAvailability.NotAvailable &&
+               changedBuildAvailable.StatusText.Contains("不兼容当前游戏构建", StringComparison.Ordinal),
+            "An unlisted game build was incorrectly offered a module package");
 
         var steamApps = Path.Combine(serviceTestRoot, "Steam", "steamapps");
         var steamGameDirectory = Path.Combine(steamApps, "common", "A1");
@@ -595,20 +623,27 @@ try
         Assert(File.Exists(moduleAssemblyPath), "Smoke module assembly is unavailable");
         var moduleArchive = CreateModuleArchive("game.test.multi-editor", "1.1.0", moduleAssemblyPath);
         var moduleHash = Convert.ToHexString(SHA256.HashData(moduleArchive));
-        using var moduleClient = new HttpClient(new StaticResponseHandler(_ =>
+        using var moduleClient = new HttpClient(new StaticResponseHandler(request =>
             new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new ByteArrayContent(moduleArchive)
+                Content = request.RequestUri?.AbsoluteUri == GameModuleCatalogService.DefaultCatalogUrl
+                    ? new StringContent(moduleCatalogJson, Encoding.UTF8, "application/json")
+                    : new ByteArrayContent(moduleArchive)
             }));
         var installService = new GameModuleCatalogService(Path.Combine(serviceTestRoot, "modules-install"), moduleClient);
         var remoteModule = available.RemoteModule!;
         remoteModule.Sha256 = moduleHash;
+        remoteModule.SizeBytes = moduleArchive.LongLength;
         var moduleProgress = new InlineProgress<DownloadProgressSnapshot>();
         await installService.InstallAsync(remoteModule, moduleProgress);
         Assert(moduleProgress.Values.Count > 0 && moduleProgress.Values[^1].Percentage == 100,
             "Module download did not report completion progress");
         Assert(installService.FindInstalled(remoteModule.Id)?.Version == "1.1.0",
             "Verified module installation was not persisted");
+        var installedCheck = await installService.CheckAsync(matchingGame, matchingVersion);
+        Assert(installedCheck.Availability == GameModuleAvailability.Current &&
+               installedCheck.RollbackModule?.Version == "1.0.0",
+            "Module catalog did not select the highest compatible lower manual rollback target");
         var installedManifest = installService.GetInstalledManifest(remoteModule.Id);
         Assert(installedManifest?.GameDisplayName == "测试游戏" && installedManifest.Contributors.Count == 1,
             "Installed module identity or contributor metadata was not retained");
@@ -653,6 +688,46 @@ try
         {
         }
 
+        var releaseIndexJson = """
+        {
+          "schemaVersion": 1,
+          "releases": [
+            {
+              "version": "0.3.0",
+              "assetName": "GameValueEditor-v0.3.0-win-x64.zip",
+              "downloadUrl": "https://example.invalid/stable-030.zip",
+              "sizeBytes": 456,
+              "sha256": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+              "sourceCommit": "1111111111111111111111111111111111111111",
+              "minimumModuleHostApi": 2,
+              "maximumModuleHostApi": 4,
+              "maximumCatalogSchemaVersion": 3
+            },
+            {
+              "version": "0.2.0",
+              "assetName": "GameValueEditor-v0.2.0-win-x64.zip",
+              "downloadUrl": "https://example.invalid/stable-020.zip",
+              "sizeBytes": 789,
+              "sha256": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+              "sourceCommit": "2222222222222222222222222222222222222222",
+              "minimumModuleHostApi": 2,
+              "maximumModuleHostApi": 3,
+              "maximumCatalogSchemaVersion": 3
+            },
+            {
+              "version": "0.1.0",
+              "assetName": "GameValueEditor-v0.1.0-win-x64.zip",
+              "downloadUrl": "https://example.invalid/stable-010.zip",
+              "sizeBytes": 321,
+              "sha256": "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+              "sourceCommit": "3333333333333333333333333333333333333333",
+              "minimumModuleHostApi": 1,
+              "maximumModuleHostApi": 2,
+              "maximumCatalogSchemaVersion": 2
+            }
+          ]
+        }
+        """;
         var releasesJson = """
         [
           {
@@ -688,7 +763,7 @@ try
               "size": 999
             },{
               "name": "GameValueEditor-v0.3.0-win-x64.zip",
-              "browser_download_url": "https://example.invalid/stable.zip",
+               "browser_download_url": "https://example.invalid/stable-030.zip",
               "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
               "size": 456
             }]
@@ -699,24 +774,40 @@ try
             "prerelease": false,
             "assets": [{
               "name": "GameValueEditor-v0.2.0-win-x64.zip",
-              "browser_download_url": "https://example.invalid/stable.zip",
+               "browser_download_url": "https://example.invalid/stable-020.zip",
               "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
               "size": 789
+            }]
+          },
+          {
+            "tag_name": "v0.1.0",
+            "draft": false,
+            "prerelease": false,
+            "assets": [{
+              "name": "GameValueEditor-v0.1.0-win-x64.zip",
+              "browser_download_url": "https://example.invalid/stable-010.zip",
+              "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+              "size": 321
             }]
           }
         ]
         """;
-        using var releasesClient = new HttpClient(new StaticResponseHandler(_ =>
+        using var releasesClient = new HttpClient(new StaticResponseHandler(request =>
             new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent(releasesJson, Encoding.UTF8, "application/json")
+                Content = new StringContent(
+                    request.RequestUri?.AbsoluteUri == ApplicationUpdateService.ReleaseIndexUrl
+                        ? releaseIndexJson
+                        : releasesJson,
+                    Encoding.UTF8, "application/json")
             }));
         var stableUpdateService = new ApplicationUpdateService(
             Path.Combine(serviceTestRoot, "stable-updates"), releasesClient, "0.2.0");
         var stableUpdate = await stableUpdateService.CheckAsync();
-        Assert(stableUpdate.IsUpdateAvailable && stableUpdate.Version == "0.3.0",
+        Assert(stableUpdate.IsUpdateAvailable && stableUpdate.UpdateTarget?.Version == "0.3.0" &&
+               stableUpdate.RollbackTarget?.Version == "0.1.0",
             "Stable updater did not select the newest formal application release");
-        Assert(stableUpdate.AssetName == "GameValueEditor-v0.3.0-win-x64.zip",
+        Assert(stableUpdate.UpdateTarget!.AssetName == "GameValueEditor-v0.3.0-win-x64.zip",
             "Application updater selected the complete offline bundle instead of the standard host package");
         var availableUpdateViewModel = new MainViewModel(stableUpdateService);
         await availableUpdateViewModel.CheckApplicationUpdateAsync();
@@ -726,8 +817,8 @@ try
         var currentUpdateService = new ApplicationUpdateService(
             Path.Combine(serviceTestRoot, "current-updates"), releasesClient, "0.3.0");
         var currentUpdate = await currentUpdateService.CheckAsync();
-        Assert(!currentUpdate.IsUpdateAvailable && currentUpdate.Version == "0.3.0",
-            "Current formal version unexpectedly selected a prerelease or module release");
+        Assert(!currentUpdate.IsUpdateAvailable && currentUpdate.RollbackTarget?.Version == "0.2.0",
+            "Current formal version did not expose the highest lower manual rollback target");
 
         using var failingUpdateClient = new HttpClient(new StaticResponseHandler(_ =>
             new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)));
@@ -752,15 +843,43 @@ try
             {
                 Content = new ByteArrayContent(updateArchive)
             }));
-        var updateService = new ApplicationUpdateService(Path.Combine(serviceTestRoot, "updates"), updateClient);
+        var updateService = new ApplicationUpdateService(
+            Path.Combine(serviceTestRoot, "updates"), updateClient, "0.4.4");
         var updateProgress = new InlineProgress<DownloadProgressSnapshot>();
-        var pending = await updateService.DownloadAsync(new ApplicationUpdateCheckResult(
-            true, "99.0.0", "GameValueEditor-v99.0.0-win-x64.zip",
-            "https://example.invalid/update.zip", updateHash, updateArchive.Length), updateProgress);
+        var pending = await updateService.DownloadAsync(new ApplicationReleaseTarget(
+                "0.4.5", "GameValueEditor-v0.4.5-win-x64.zip",
+                "https://example.invalid/update.zip", updateArchive.Length, updateHash,
+                "4444444444444444444444444444444444444444", 2, 7, 5),
+            ApplicationUpdateOperation.Update, updateProgress);
         Assert(File.Exists(pending.ArchivePath) && File.Exists(updateService.PendingManifestPath),
             "Verified application update was not marked for next startup");
+        Assert(pending.Operation == ApplicationUpdateOperation.Update,
+            "Application update operation type was not persisted");
         Assert(updateProgress.Values.Count > 0 && updateProgress.Values[^1].Percentage == 100,
             "Application download did not report completion progress");
+        var rollbackTarget = new ApplicationReleaseTarget(
+            "0.4.3", "GameValueEditor-v0.4.3-win-x64.zip",
+            "https://example.invalid/rollback.zip", updateArchive.Length, updateHash,
+            "5555555555555555555555555555555555555555", 2, 6, 4);
+        var rollbackBlocks = updateService.FindRollbackBlocks(rollbackTarget,
+        [
+            new InstalledModuleManifest
+            {
+                Id = "game.test.api7",
+                Version = "1.0.0",
+                DisplayName = "API 7 测试模块",
+                HostApiVersion = 7,
+                MinimumHostVersion = "0.4.4"
+            }
+        ]);
+        Assert(rollbackBlocks.Count == 1 && rollbackBlocks[0].ModuleId == "game.test.api7",
+            "Host rollback did not block an incompatible installed module");
+        var rollbackProgress = new InlineProgress<DownloadProgressSnapshot>();
+        var rollbackPending = await updateService.DownloadAsync(rollbackTarget,
+            ApplicationUpdateOperation.Rollback, rollbackProgress);
+        Assert(rollbackPending.Operation == ApplicationUpdateOperation.Rollback &&
+               rollbackPending.Version == "0.4.3",
+            "Explicit application rollback was not persisted as a rollback operation");
 
         var stalledDestination = Path.Combine(serviceTestRoot, "stalled.download");
         using var stalledClient = new HttpClient(new StaticResponseHandler(_ =>
@@ -1205,7 +1324,7 @@ static byte[] CreateModuleArchive(string id, string version, string assemblyPath
         var manifest = archive.CreateEntry("module.json");
         using (var writer = new StreamWriter(manifest.Open(), Encoding.UTF8, leaveOpen: false))
             writer.Write($$"""
-            {"id":"{{id}}","version":"{{version}}","displayName":"测试多编辑器游戏模块","gameDisplayName":"测试游戏","description":"测试","assemblyFile":"{{Path.GetFileName(assemblyPath)}}","hostApiVersion":5,"processNames":["MatchedGame"],"compatibleBuilds":[{"executableSha256":"EXE","gameAssemblySha256":"ASM","metadataSha256":"META"}],"contributors":[{"githubId":1,"githubLogin":"tester","displayName":"测试贡献者","profileUrl":"https://github.com/tester","firstContributionDate":"2026-01-01","latestContributionDate":"2026-01-02"}],"editors":[{"id":"test.inventory","displayName":"背包物品","kind":"collection","order":100,"sessionOnly":false},{"id":"test.characters","displayName":"人物属性","kind":"master-detail","order":200,"sessionOnly":true}]}
+            {"id":"{{id}}","version":"{{version}}","displayName":"测试多编辑器游戏模块","gameDisplayName":"测试游戏","description":"测试","assemblyFile":"{{Path.GetFileName(assemblyPath)}}","hostApiVersion":5,"minimumHostVersion":"0.4.4","processNames":["MatchedGame"],"compatibleBuilds":[{"executableSha256":"EXE","gameAssemblySha256":"ASM","metadataSha256":"META"}],"contributors":[{"githubId":1,"githubLogin":"tester","displayName":"测试贡献者","profileUrl":"https://github.com/tester","firstContributionDate":"2026-01-01","latestContributionDate":"2026-01-02"}],"editors":[{"id":"test.inventory","displayName":"背包物品","kind":"collection","order":100,"sessionOnly":false},{"id":"test.characters","displayName":"人物属性","kind":"master-detail","order":200,"sessionOnly":true}]}
             """);
         var assembly = archive.CreateEntry(Path.GetFileName(assemblyPath));
         using var assemblyStream = assembly.Open();
@@ -1236,6 +1355,7 @@ static void VerifyPackagedModule(string archivePath)
     {
         string moduleId;
         string version;
+        string minimumHostVersion;
         string[] editorIds;
         int contributorCount;
         using (var archive = ZipFile.OpenRead(resolvedArchive))
@@ -1248,6 +1368,9 @@ static void VerifyPackagedModule(string archivePath)
             moduleId = root.GetProperty("id").GetString() ?? string.Empty;
             version = root.GetProperty("version").GetString() ?? string.Empty;
             hostApiVersion = root.GetProperty("hostApiVersion").GetInt32();
+            minimumHostVersion = root.TryGetProperty("minimumHostVersion", out var minimumHost)
+                ? minimumHost.GetString() ?? string.Empty
+                : string.Empty;
             editorIds = root.GetProperty("editors").EnumerateArray()
                 .Select(editor => editor.GetProperty("id").GetString() ?? string.Empty).ToArray();
             contributorCount = root.TryGetProperty("contributors", out var contributors)
@@ -1257,6 +1380,8 @@ static void VerifyPackagedModule(string archivePath)
 
         Assert(!string.IsNullOrWhiteSpace(moduleId) && !string.IsNullOrWhiteSpace(version),
             "Module package identity is incomplete.");
+        if (hostApiVersion >= 7)
+            Assert(minimumHostVersion == "0.4.4", "Host API 7 module did not declare minimum host v0.4.4.");
         var packageDirectory = Path.Combine(verificationRoot, "packages", moduleId, version);
         Directory.CreateDirectory(packageDirectory);
         using (var archive = ZipFile.OpenRead(resolvedArchive))
@@ -1372,6 +1497,18 @@ static void VerifyModuleOwnedPages(IGameAdapter adapter, IGameEditorPageFactoryP
                 var view = page.View ?? throw new InvalidOperationException($"Module page {descriptor.Id} returned no WPF view.");
                 Assert(page.GetType().Assembly == adapter.GetType().Assembly,
                     $"Module page {descriptor.Id} was not implemented by the module assembly.");
+                if (descriptor.Id == "game.last-epoch.materials")
+                {
+                    Assert(page.GetType().Name == "LastEpochMaterialsEditorPage",
+                        "Last Epoch resources still use the generic entity editor page.");
+                    var controls = EnumerateLogicalDescendants(view).ToList();
+                    Assert(controls.OfType<ListBox>().Count() == 0 && controls.OfType<DataGrid>().Count() == 1,
+                        "Last Epoch resources must use one direct table and no left resource list.");
+                    var headers = controls.OfType<DataGrid>().Single().Columns
+                        .Select(column => column.Header?.ToString()).ToArray();
+                    Assert(headers.SequenceEqual(["资源名称", "数量", "状态", "操作"]),
+                        "Last Epoch resource table columns changed unexpectedly.");
+                }
             }
         }
         catch (Exception exception)
@@ -1383,6 +1520,15 @@ static void VerifyModuleOwnedPages(IGameAdapter adapter, IGameEditorPageFactoryP
     thread.Start();
     thread.Join();
     if (failure is not null) throw new InvalidOperationException("Module-owned page verification failed.", failure);
+}
+
+static IEnumerable<DependencyObject> EnumerateLogicalDescendants(DependencyObject root)
+{
+    foreach (var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>())
+    {
+        yield return child;
+        foreach (var descendant in EnumerateLogicalDescendants(child)) yield return descendant;
+    }
 }
 
 public sealed class SmokeTestModuleAdapter :

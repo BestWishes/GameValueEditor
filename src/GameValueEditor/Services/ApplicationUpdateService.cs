@@ -10,6 +10,8 @@ namespace GameValueEditor.Services;
 
 public sealed class ApplicationUpdateService
 {
+    public const string ReleaseIndexUrl =
+        "https://raw.githubusercontent.com/BestWishes/GameValueEditor/main/release-index.json";
     private const string ReleasesApi = "https://api.github.com/repos/BestWishes/GameValueEditor/releases?per_page=50";
     private readonly HttpClient _httpClient;
     private readonly string _updatesDirectory;
@@ -63,63 +65,91 @@ public sealed class ApplicationUpdateService
 
     public async Task<ApplicationUpdateCheckResult> CheckAsync(CancellationToken cancellationToken = default)
     {
-        using var response = await _httpClient.GetAsync(ReleasesApi, cancellationToken);
-        response.EnsureSuccessStatusCode();
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        var releases = await JsonSerializer.DeserializeAsync<List<GitHubRelease>>(stream,
-                           cancellationToken: cancellationToken)
-                       ?? throw new InvalidOperationException("无法读取 GitHub 版本信息。");
+        using var indexResponse = await _httpClient.GetAsync(ReleaseIndexUrl, cancellationToken);
+        indexResponse.EnsureSuccessStatusCode();
+        await using var indexStream = await indexResponse.Content.ReadAsStreamAsync(cancellationToken);
+        var index = await JsonSerializer.DeserializeAsync<ApplicationReleaseIndex>(indexStream, JsonOptions, cancellationToken)
+                    ?? throw new InvalidOperationException("无法读取主程序发布索引。");
+        if (index.SchemaVersion != 1 || index.Releases.Count is < 1 or > 3)
+            throw new InvalidOperationException("主程序发布索引的版本或保留数量无效。");
         if (!SemanticVersion.TryParse(_currentVersion, out var current))
             throw new InvalidOperationException($"当前应用版本号无效：{_currentVersion}");
 
-        GitHubRelease? latestRelease = null;
-        GitHubAsset? asset = null;
-        SemanticVersion latest = default;
-        var latestText = string.Empty;
-        foreach (var release in releases)
+        var targets = index.Releases.Select(ValidateReleaseTarget)
+            .OrderByDescending(target => ParseVersion(target.Version))
+            .ToList();
+        if (targets.Select(target => target.Version).Distinct(StringComparer.Ordinal).Count() != targets.Count)
+            throw new InvalidOperationException("主程序发布索引包含重复版本。");
+
+        using var releasesResponse = await _httpClient.GetAsync(ReleasesApi, cancellationToken);
+        releasesResponse.EnsureSuccessStatusCode();
+        await using var releasesStream = await releasesResponse.Content.ReadAsStreamAsync(cancellationToken);
+        var releases = await JsonSerializer.DeserializeAsync<List<GitHubRelease>>(releasesStream, JsonOptions, cancellationToken)
+                       ?? throw new InvalidOperationException("无法读取 GitHub 版本信息。");
+        foreach (var target in targets)
         {
-            if (release.Draft || release.Prerelease) continue;
-            var releaseText = release.TagName.TrimStart('v', 'V');
-            if (!SemanticVersion.TryParse(releaseText, out var releaseVersion)) continue;
-            var releaseAsset = release.Assets.FirstOrDefault(candidate => IsApplicationPackage(candidate, releaseText));
-            if (releaseAsset is null || latestRelease is not null && releaseVersion.CompareTo(latest) <= 0) continue;
-            latestRelease = release;
-            asset = releaseAsset;
-            latest = releaseVersion;
-            latestText = releaseText;
+            var release = releases.SingleOrDefault(candidate => !candidate.Draft && !candidate.Prerelease &&
+                string.Equals(candidate.TagName, $"v{target.Version}", StringComparison.OrdinalIgnoreCase));
+            var asset = release?.Assets.SingleOrDefault(candidate =>
+                string.Equals(candidate.Name, target.AssetName, StringComparison.OrdinalIgnoreCase));
+            if (asset is null || asset.Size != target.SizeBytes ||
+                !string.Equals(asset.DownloadUrl, target.DownloadUrl, StringComparison.Ordinal))
+                throw new InvalidOperationException($"主程序 v{target.Version} 的发布资产与索引不一致。");
+            var digest = asset.Digest?.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) == true
+                ? asset.Digest[7..]
+                : string.Empty;
+            if (digest.Length > 0 && !digest.Equals(target.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"主程序 v{target.Version} 的 GitHub 摘要与索引不一致。");
         }
 
-        if (latestRelease is null || asset is null)
-            throw new InvalidOperationException("GitHub 暂无可用的 Windows x64 应用发布包。");
-        var digest = asset.Digest?.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) == true
-            ? asset.Digest[7..]
-            : string.Empty;
-        return new ApplicationUpdateCheckResult(
-            latest.CompareTo(current) > 0,
-            latestText,
-            asset.Name,
-            asset.DownloadUrl,
-            digest,
-            asset.Size);
+        var updateTarget = targets.FirstOrDefault(target => ParseVersion(target.Version).CompareTo(current) > 0);
+        var rollbackTarget = targets.FirstOrDefault(target => ParseVersion(target.Version).CompareTo(current) < 0);
+        return new ApplicationUpdateCheckResult(_currentVersion, updateTarget, rollbackTarget);
     }
 
-    private static bool IsApplicationPackage(GitHubAsset asset, string version) =>
-        string.Equals(asset.Name, $"GameValueEditor-v{version}-win-x64.zip", StringComparison.OrdinalIgnoreCase);
+    public IReadOnlyList<ApplicationRollbackBlock> FindRollbackBlocks(
+        ApplicationReleaseTarget target,
+        IEnumerable<Adapters.InstalledModuleManifest> installedModules)
+    {
+        var targetVersion = ParseVersion(target.Version);
+        var blocks = new List<ApplicationRollbackBlock>();
+        foreach (var module in installedModules)
+        {
+            var reasons = new List<string>();
+            if (module.HostApiVersion < target.MinimumModuleHostApi || module.HostApiVersion > target.MaximumModuleHostApi)
+                reasons.Add($"需要 Host API {module.HostApiVersion}，目标主程序只支持 {target.MinimumModuleHostApi}–{target.MaximumModuleHostApi}");
+            if (!string.IsNullOrWhiteSpace(module.MinimumHostVersion) &&
+                ParseVersion(module.MinimumHostVersion).CompareTo(targetVersion) > 0)
+                reasons.Add($"最低主程序版本为 {module.MinimumHostVersion}");
+            if (!string.IsNullOrWhiteSpace(module.MaximumHostVersion) &&
+                ParseVersion(module.MaximumHostVersion).CompareTo(targetVersion) < 0)
+                reasons.Add($"最高主程序版本为 {module.MaximumHostVersion}");
+            if (reasons.Count > 0)
+                blocks.Add(new ApplicationRollbackBlock(module.Id, module.DisplayName, module.Version,
+                    string.Join("；", reasons)));
+        }
+        return blocks;
+    }
 
     public async Task<PendingApplicationUpdate> DownloadAsync(
-        ApplicationUpdateCheckResult update,
+        ApplicationReleaseTarget target,
+        ApplicationUpdateOperation operation,
         IProgress<DownloadProgressSnapshot>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        if (!update.IsUpdateAvailable) throw new InvalidOperationException("当前已经是最新正式版。");
-        if (string.IsNullOrWhiteSpace(update.Sha256))
-            throw new InvalidOperationException("最新发布包没有 SHA-256 校验值，已取消下载。");
+        var current = ParseVersion(_currentVersion);
+        var requested = ParseVersion(target.Version);
+        if (operation == ApplicationUpdateOperation.Update && requested.CompareTo(current) <= 0)
+            throw new InvalidOperationException("更新目标必须严格高于当前主程序版本。");
+        if (operation == ApplicationUpdateOperation.Rollback && requested.CompareTo(current) >= 0)
+            throw new InvalidOperationException("回退目标必须严格低于当前主程序版本。");
+        ValidateReleaseTarget(target);
 
-        var versionSegment = Sanitize(update.Version);
+        var versionSegment = Sanitize(target.Version);
         if (versionSegment is "." or ".." || string.IsNullOrWhiteSpace(versionSegment))
             throw new InvalidOperationException("更新版本号无法用于本地路径。");
-        var assetName = Path.GetFileName(update.AssetName);
-        if (string.IsNullOrWhiteSpace(assetName) || !string.Equals(assetName, update.AssetName, StringComparison.Ordinal))
+        var assetName = Path.GetFileName(target.AssetName);
+        if (string.IsNullOrWhiteSpace(assetName) || !string.Equals(assetName, target.AssetName, StringComparison.Ordinal))
             throw new InvalidOperationException("更新包文件名包含不安全路径。");
         var versionDirectory = Path.Combine(_updatesDirectory, versionSegment);
         Directory.CreateDirectory(versionDirectory);
@@ -127,15 +157,15 @@ public sealed class ApplicationUpdateService
         var temporaryPath = finalPath + ".download";
         try
         {
-            await HttpDownloadService.DownloadToFileAsync(_httpClient, update.DownloadUrl, temporaryPath, update.Size,
+            await HttpDownloadService.DownloadToFileAsync(_httpClient, target.DownloadUrl, temporaryPath, target.SizeBytes,
                 progress, _downloadTimeoutPolicy, cancellationToken);
 
             var actualHash = await ComputeSha256Async(temporaryPath, cancellationToken);
-            if (!actualHash.Equals(update.Sha256, StringComparison.OrdinalIgnoreCase))
+            if (!actualHash.Equals(target.Sha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("更新包 SHA-256 校验失败，已拒绝安装。");
             File.Move(temporaryPath, finalPath, true);
 
-            var pending = new PendingApplicationUpdate(update.Version, finalPath, actualHash, DateTime.UtcNow);
+            var pending = new PendingApplicationUpdate(target.Version, finalPath, actualHash, DateTime.UtcNow, operation);
             var pendingTemporary = PendingManifestPath + ".tmp";
             await File.WriteAllTextAsync(pendingTemporary, JsonSerializer.Serialize(pending, JsonOptions), cancellationToken);
             File.Move(pendingTemporary, PendingManifestPath, true);
@@ -315,7 +345,34 @@ public sealed class ApplicationUpdateService
     private static string Sanitize(string value) =>
         string.Concat(value.Select(character => Path.GetInvalidFileNameChars().Contains(character) ? '_' : character));
 
-    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+    private static ApplicationReleaseTarget ValidateReleaseTarget(ApplicationReleaseTarget target)
+    {
+        _ = ParseVersion(target.Version);
+        if (!string.Equals(target.AssetName, $"GameValueEditor-v{target.Version}-win-x64.zip", StringComparison.Ordinal))
+            throw new InvalidOperationException($"主程序 v{target.Version} 的资产名无效。");
+        if (!Uri.TryCreate(target.DownloadUrl, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
+            throw new InvalidOperationException($"主程序 v{target.Version} 的下载地址必须使用 HTTPS。");
+        if (target.SizeBytes <= 0 || string.IsNullOrWhiteSpace(target.Sha256) ||
+            target.Sha256.Length != 64 || !target.Sha256.All(Uri.IsHexDigit) ||
+            string.IsNullOrWhiteSpace(target.SourceCommit) || target.SourceCommit.Length != 40 ||
+            !target.SourceCommit.All(Uri.IsHexDigit))
+            throw new InvalidOperationException($"主程序 v{target.Version} 的资产校验元数据无效。");
+        if (target.MinimumModuleHostApi < 1 || target.MaximumModuleHostApi < target.MinimumModuleHostApi ||
+            target.MaximumCatalogSchemaVersion < 1)
+            throw new InvalidOperationException($"主程序 v{target.Version} 的兼容范围无效。");
+        return target;
+    }
+
+    private static SemanticVersion ParseVersion(string value) =>
+        SemanticVersion.TryParse(value, out var version)
+            ? version
+            : throw new InvalidOperationException($"无效的主程序版本：{value}");
+
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        WriteIndented = true
+    };
 
     private sealed class GitHubRelease
     {
@@ -334,13 +391,38 @@ public sealed class ApplicationUpdateService
     }
 }
 
-public sealed record ApplicationUpdateCheckResult(
-    bool IsUpdateAvailable,
+public sealed class ApplicationReleaseIndex
+{
+    public int SchemaVersion { get; set; } = 1;
+    public List<ApplicationReleaseTarget> Releases { get; set; } = [];
+}
+
+public sealed record ApplicationReleaseTarget(
     string Version,
     string AssetName,
     string DownloadUrl,
+    long SizeBytes,
     string Sha256,
-    long Size);
+    string SourceCommit,
+    int MinimumModuleHostApi,
+    int MaximumModuleHostApi,
+    int MaximumCatalogSchemaVersion);
 
-public sealed record PendingApplicationUpdate(string Version, string ArchivePath, string Sha256, DateTime DownloadedUtc);
+public sealed record ApplicationUpdateCheckResult(
+    string CurrentVersion,
+    ApplicationReleaseTarget? UpdateTarget,
+    ApplicationReleaseTarget? RollbackTarget)
+{
+    public bool IsUpdateAvailable => UpdateTarget is not null;
+}
+
+public enum ApplicationUpdateOperation { Update, Rollback }
+
+public sealed record PendingApplicationUpdate(
+    string Version,
+    string ArchivePath,
+    string Sha256,
+    DateTime DownloadedUtc,
+    ApplicationUpdateOperation Operation = ApplicationUpdateOperation.Update);
+public sealed record ApplicationRollbackBlock(string ModuleId, string DisplayName, string ModuleVersion, string Reason);
 public sealed record ApplicationUpdateFailure(DateTimeOffset FailedAt, string Message, string LogPath);

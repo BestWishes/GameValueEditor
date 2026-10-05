@@ -158,8 +158,25 @@ public partial class MainWindow : Window
     private async void CheckGameModules_OnClick(object sender, RoutedEventArgs e) =>
         await RunGuardedAsync(_viewModel.CheckGameModuleUpdatesAsync);
 
-    private async void InstallGameModule_OnClick(object sender, RoutedEventArgs e) =>
-        await RunGuardedAsync(_viewModel.InstallAvailableGameModuleAsync);
+    private async void InstallGameModule_OnClick(object sender, RoutedEventArgs e)
+    {
+        await RunGuardedAsync(async () =>
+        {
+            await _viewModel.InstallAvailableGameModuleAsync();
+            PromptForModuleRestart();
+        });
+    }
+
+    private async void RollbackGameModule_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (!MessageDialog.Confirm(this, "手动回退专属模块",
+                $"确定{_viewModel.ModuleRollbackActionText}吗？\n\n回退完成后，该模块会停用，直到你重启肝肾大圣。其他模块不会被改变。")) return;
+        await RunGuardedAsync(async () =>
+        {
+            await _viewModel.RollbackCurrentGameModuleAsync();
+            PromptForModuleRestart();
+        });
+    }
 
     private async void UninstallGameModule_OnClick(object sender, RoutedEventArgs e)
     {
@@ -198,6 +215,40 @@ public partial class MainWindow : Window
             if (!restartNow) return;
             if (_viewModel.LaunchPendingApplicationUpdate()) Application.Current.Shutdown();
         });
+    }
+
+    private async void ApplicationRollback_OnClick(object sender, RoutedEventArgs e)
+    {
+        await RunGuardedAsync(async () =>
+        {
+            var blocks = _viewModel.GetApplicationRollbackBlocks();
+            if (blocks.Count > 0)
+            {
+                MessageDialog.ShowInfo(this, "暂时不能回退主程序",
+                    "下列专属模块与目标主程序不兼容，请先分别手动回退：\n\n" +
+                    string.Join("\n", blocks.Select(block =>
+                        $"• {block.DisplayName} v{block.ModuleVersion}：{block.Reason}")));
+                return;
+            }
+            if (!MessageDialog.Confirm(this, "手动回退主程序",
+                    $"确定{_viewModel.ApplicationRollbackActionText}吗？\n\n只有这次确认会创建回退任务；程序不会自动选择或自动回退版本。")) return;
+            if (!await _viewModel.DownloadApplicationRollbackAsync()) return;
+            var restartNow = MessageDialog.Confirm(this, "回退已准备完成",
+                "较低版本已下载并校验完成。\n\n是否现在关闭肝肾大圣并执行回退？\n选择“取消”将继续使用，下次启动时执行这次已确认的回退。");
+            if (!restartNow) return;
+            if (_viewModel.LaunchPendingApplicationUpdate()) Application.Current.Shutdown();
+        });
+    }
+
+    private void PromptForModuleRestart()
+    {
+        if (!_viewModel.ModuleRestartRequired) return;
+        if (!MessageDialog.Confirm(this, "需要重启主程序",
+                "专属模块已经替换并在当前进程停用。\n\n是否现在手动重启肝肾大圣以启用目标版本？")) return;
+        var executable = Environment.ProcessPath
+                         ?? throw new InvalidOperationException("无法定位当前主程序文件。");
+        _ = Process.Start(new ProcessStartInfo(executable) { UseShellExecute = true });
+        Application.Current.Shutdown();
     }
 
     private void OpenOfficialWebsite_OnClick(object sender, RoutedEventArgs e) =>
