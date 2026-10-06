@@ -28,6 +28,8 @@ public sealed class MemoryScanService
         try
         {
             using var memory = new ProcessMemoryAccessor(processId);
+            store.ProcessId = memory.ProcessId;
+            store.ProcessStartTimeUtc = memory.StartTimeUtc;
             var regions = memory.EnumerateReadableRegions(writableOnly);
             var total = regions.Aggregate<MemoryRegion, ulong>(0, (current, region) => current + region.RegionSize);
             var maximumValueSize = targets.Max(target => target.ValueType.Size());
@@ -102,13 +104,16 @@ public sealed class MemoryScanService
         }
     }, cancellationToken);
 
-    public Task<ScanRunResult> NextScanAsync(
+    public async Task<ScanRunResult> NextScanAsync(
         int processId,
         ScanCandidateStore source,
         ScanComparison comparison,
         Func<ScanCandidatePartition, byte[]?> exactTargetFactory,
         IProgress<ScanProgress>? progress,
-        CancellationToken cancellationToken) => Task.Run(() =>
+        CancellationToken cancellationToken)
+    {
+        using var sourceLease = source.AcquireReadLease();
+        return await Task.Run(() =>
     {
         var targets = source.Partitions.Select(partition => new ScanTargetDefinition(
             partition.ValueType,
@@ -120,6 +125,9 @@ public sealed class MemoryScanService
         try
         {
             using var memory = new ProcessMemoryAccessor(processId);
+            memory.EnsureInstance(source.ProcessId, source.ProcessStartTimeUtc);
+            destination.ProcessId = memory.ProcessId;
+            destination.ProcessStartTimeUtc = memory.StartTimeUtc;
             long processed = 0;
             long resultCount = 0;
             for (var partitionIndex = 0; partitionIndex < source.Partitions.Count; partitionIndex++)
@@ -200,7 +208,8 @@ public sealed class MemoryScanService
             destination.Dispose();
             throw;
         }
-    }, cancellationToken);
+        }, cancellationToken).ConfigureAwait(false);
+    }
 
     private ScanCandidateStore CreateStore(IReadOnlyList<ScanTargetDefinition> targets)
     {
@@ -285,19 +294,22 @@ public sealed class MemoryScanService
             ScanComparison.Exact => exactTarget is not null && current.SequenceEqual(exactTarget),
             ScanComparison.Changed => !current.SequenceEqual(previous),
             ScanComparison.Unchanged => current.SequenceEqual(previous),
-            ScanComparison.Increased => ToDouble(current, valueType) > ToDouble(previous, valueType),
-            ScanComparison.Decreased => ToDouble(current, valueType) < ToDouble(previous, valueType),
+            ScanComparison.Increased => Compare(current, previous, valueType) > 0,
+            ScanComparison.Decreased => Compare(current, previous, valueType) < 0,
             _ => false
         };
 
-    private static double ToDouble(ReadOnlySpan<byte> bytes, MemoryValueType valueType) => valueType switch
+    private static int Compare(ReadOnlySpan<byte> current, ReadOnlySpan<byte> previous, MemoryValueType valueType) => valueType switch
     {
-        MemoryValueType.Int32 => BitConverter.ToInt32(bytes),
-        MemoryValueType.Int64 => BitConverter.ToInt64(bytes),
-        MemoryValueType.Float => BitConverter.ToSingle(bytes),
-        MemoryValueType.Double => BitConverter.ToDouble(bytes),
-        _ => double.NaN
+        MemoryValueType.Int32 => BitConverter.ToInt32(current).CompareTo(BitConverter.ToInt32(previous)),
+        MemoryValueType.Int64 => BitConverter.ToInt64(current).CompareTo(BitConverter.ToInt64(previous)),
+        MemoryValueType.Float => CompareFloating(BitConverter.ToSingle(current), BitConverter.ToSingle(previous)),
+        MemoryValueType.Double => CompareFloating(BitConverter.ToDouble(current), BitConverter.ToDouble(previous)),
+        _ => 0
     };
+
+    private static int CompareFloating(double current, double previous) =>
+        double.IsNaN(current) || double.IsNaN(previous) ? 0 : current.CompareTo(previous);
 }
 
 public sealed record ScanProgress(ulong CompletedBytes, ulong TotalBytes, long ResultCount)

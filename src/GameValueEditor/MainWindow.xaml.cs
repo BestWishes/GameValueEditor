@@ -572,6 +572,7 @@ public partial class MainWindow : Window
     private async Task RunGuardedAsync(Func<Task> action)
     {
         try { await action(); }
+        catch (OperationCanceledException) { }
         catch (Exception exception) { ShowError(exception); }
     }
 

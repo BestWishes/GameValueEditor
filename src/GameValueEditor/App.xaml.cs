@@ -22,6 +22,14 @@ public partial class App : Application
                 return;
             }
         }
+        catch (ApplicationRecoveryRequiredException exception)
+        {
+            WriteCrashLog(exception);
+            MessageBox.Show(exception.Message + "\n\n不要删除恢复记录绕过检查。关闭占用文件的程序后，用记录中的更新器执行手动恢复。",
+                "肝肾大圣 · 安装需要恢复", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Shutdown();
+            return;
+        }
         catch (Exception exception)
         {
             // A damaged pending update must not prevent the installed version from starting.

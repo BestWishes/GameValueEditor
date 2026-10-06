@@ -24,9 +24,23 @@ public sealed class ProcessMemoryAccessor : IDisposable
         {
             throw new Win32Exception(Marshal.GetLastWin32Error(), "无法连接目标进程。可以尝试以管理员身份运行本应用。");
         }
+        if (!NativeMethods.GetProcessTimes(_handle, out var creation, out _, out _, out _))
+        {
+            var error = Marshal.GetLastWin32Error();
+            _handle.Dispose();
+            throw new Win32Exception(error, "无法核对目标进程的启动身份。");
+        }
+        StartTimeUtc = DateTime.FromFileTimeUtc(creation);
     }
 
     public int ProcessId { get; }
+    public DateTime StartTimeUtc { get; }
+
+    public void EnsureInstance(int processId, DateTime startTimeUtc)
+    {
+        if (ProcessId != processId || StartTimeUtc != startTimeUtc)
+            throw new InvalidOperationException("目标进程实例已变化，请重新连接并扫描。");
+    }
 
     public IReadOnlyList<MemoryRegion> EnumerateReadableRegions(bool writableOnly)
     {
@@ -202,6 +216,11 @@ internal static class NativeMethods
 
     [DllImport("kernel32.dll", SetLastError = true)]
     internal static extern SafeProcessHandle OpenProcess(ProcessAccess access, bool inheritHandle, int processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetProcessTimes(SafeProcessHandle process, out long creation, out long exit,
+        out long kernel, out long user);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     internal static extern nuint VirtualQueryEx(

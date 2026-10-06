@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using GameValueEditor.Models;
 using GameValueEditor.ModuleSdk;
+using GameValueEditor.Updates;
 
 namespace GameValueEditor.Services.Adapters;
 
@@ -190,6 +191,8 @@ public sealed class GameModuleCatalogService
             if (!hash.Equals(module.Sha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("专属模块 SHA-256 校验失败，已拒绝安装。");
 
+            using var mutation = await ModuleMutationLock.AcquireAsync(_modulesDirectory, cancellationToken);
+
             var packagesRoot = Path.GetFullPath(Path.Combine(_modulesDirectory, "packages")) + Path.DirectorySeparatorChar;
             var packageRoot = Path.GetFullPath(Path.Combine(packagesRoot, module.Id));
             var finalDirectory = Path.GetFullPath(Path.Combine(packageRoot, module.Version));
@@ -229,6 +232,7 @@ public sealed class GameModuleCatalogService
 
     public InstalledModuleRecord? Unregister(string moduleId)
     {
+        using var mutation = ModuleMutationLock.Acquire(_modulesDirectory);
         var document = LoadInstalled();
         var record = document.Modules.FirstOrDefault(item => string.Equals(item.Id, moduleId, StringComparison.Ordinal));
         if (record is null) return null;
@@ -239,6 +243,7 @@ public sealed class GameModuleCatalogService
 
     public void RestoreRegistration(InstalledModuleRecord record)
     {
+        using var mutation = ModuleMutationLock.Acquire(_modulesDirectory);
         var document = LoadInstalled();
         document.Modules.RemoveAll(item => string.Equals(item.Id, record.Id, StringComparison.Ordinal));
         document.Modules.Add(record);
@@ -247,6 +252,7 @@ public sealed class GameModuleCatalogService
 
     public async Task<bool> DeletePackageAsync(string moduleId, CancellationToken cancellationToken = default)
     {
+        using var mutation = await ModuleMutationLock.AcquireAsync(_modulesDirectory, cancellationToken);
         EnsureSafePathSegment(moduleId, "模块 ID");
         AddPendingDeletion(moduleId);
         for (var attempt = 0; attempt < 6; attempt++)
@@ -274,6 +280,7 @@ public sealed class GameModuleCatalogService
 
     private void CleanupPendingDeletions()
     {
+        using var mutation = ModuleMutationLock.Acquire(_modulesDirectory);
         var document = LoadPendingDeletions();
         var remaining = new List<string>();
         foreach (var moduleId in document.ModuleIds.Distinct(StringComparer.Ordinal))

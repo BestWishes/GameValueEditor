@@ -100,6 +100,8 @@ public sealed class MainViewModel : ObservableObject
     private bool _isLibraryControlBlocked;
     private long _scanResultCount;
     private CancellationTokenSource? _scanCancellation;
+    private long _gameOperationGeneration;
+    private bool _isShuttingDown;
     private bool _suppressGameActivation;
     private string _moduleStatusText = "尚未检查当前游戏的专属模块";
     private bool _isModuleControlBlocked;
@@ -195,6 +197,7 @@ public sealed class MainViewModel : ObservableObject
         set
         {
             if (ReferenceEquals(_selectedGame, value)) return;
+            InvalidateGameOperations();
             if (!_suppressGameActivation) CaptureActiveSession();
             if (!SetProperty(ref _selectedGame, value)) return;
             if (value is null)
@@ -237,6 +240,7 @@ public sealed class MainViewModel : ObservableObject
         set
         {
             if (!SetProperty(ref _selectedVersion, value)) return;
+            InvalidateGameOperations();
             SelectedSavedField = null;
             if (value is not null)
             {
@@ -265,6 +269,7 @@ public sealed class MainViewModel : ObservableObject
         private set
         {
             if (!SetProperty(ref _attachedProcess, value)) return;
+            InvalidateGameOperations();
             ResetModuleCheckState();
             OnPropertyChanged(nameof(HasAttachedProcess));
             OnPropertyChanged(nameof(CanAccelerate));
@@ -722,8 +727,10 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task MatchAttachedVersionAsync()
     {
+        var operation = CaptureGameOperation();
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
-        var fingerprint = await _fingerprintService.CreateAsync(process.ExecutablePath);
+        var fingerprint = await AwaitGameOperationAsync(operation, _fingerprintService.CreateAsync(process.ExecutablePath));
+        RequireCurrentGameOperation(operation);
         _attachedFingerprint = fingerprint;
         if (_activeSession is not null) _activeSession.Fingerprint = fingerprint;
         SetActiveAdapter(_adapterRegistry.Resolve(process, fingerprint));
@@ -744,7 +751,9 @@ public sealed class MainViewModel : ObservableObject
         try { SelectedGame = game; }
         finally { _suppressGameActivation = false; }
         _attachedGameId = game.Id;
+        operation = CaptureGameOperation();
         var libraryChanged = await UpgradeLegacyVersionFingerprintsAsync(game);
+        RequireCurrentGameOperation(operation);
         UpdateCurrentVersionMarkers(game, fingerprint.BuildSha256);
         var version = FindMatchingVersion(game, fingerprint);
         var migratedFieldCount = 0;
@@ -782,7 +791,9 @@ public sealed class MainViewModel : ObservableObject
         game.LastUsedUtc = DateTime.UtcNow;
         game.NotifySummaryChanged();
         GamesView.Refresh();
+        operation = CaptureGameOperation();
         if (libraryChanged) await SaveLibraryAsync();
+        RequireCurrentGameOperation(operation);
         StatusText = migratedFieldCount > 0
             ? $"已识别 {game.Name} 的新构建，并迁移 {migratedFieldCount} 个专属字段"
             : _activeAdapter is null
@@ -803,7 +814,9 @@ public sealed class MainViewModel : ObservableObject
     private async Task<GameProfile> AddCurrentProcessToLibraryCoreAsync(string userName, ProcessItem process,
         VersionFingerprint? existingFingerprint = null)
     {
-        var fingerprint = existingFingerprint ?? await _fingerprintService.CreateAsync(process.ExecutablePath);
+        var operation = CaptureGameOperation();
+        var fingerprint = existingFingerprint ?? await AwaitGameOperationAsync(operation, _fingerprintService.CreateAsync(process.ExecutablePath));
+        RequireCurrentGameOperation(operation);
         _attachedFingerprint = fingerprint;
         SetActiveAdapter(_adapterRegistry.Resolve(process, fingerprint));
         if (_activeSession is not null)
@@ -812,9 +825,9 @@ public sealed class MainViewModel : ObservableObject
             _activeSession.Adapter = _activeAdapter;
         }
 
-        var game = _attachedGameId is Guid attachedGameId
+        var game = operation.AttachedGameId is Guid attachedGameId
             ? Games.FirstOrDefault(item => item.Id == attachedGameId)
-            : ResolveGameForProcess(process, SelectedGame)
+            : ResolveGameForProcess(process, operation.Game)
               ?? Games.FirstOrDefault(item => item.Versions.Any(version => VersionMatches(version, fingerprint)));
         if (game is null)
         {
@@ -869,9 +882,13 @@ public sealed class MainViewModel : ObservableObject
         game.NotifySummaryChanged();
         version.NotifyChoiceChanged();
         GamesView.Refresh();
+        var savedOperation = CaptureGameOperation();
         await SaveLibraryAsync();
-        RestartLockMaintenance();
-        StatusText = $"已保存入库：{game.Name} · {version.DisplayName}";
+        if (IsCurrentGameOperation(savedOperation))
+        {
+            RestartLockMaintenance();
+            StatusText = $"已保存入库：{game.Name} · {version.DisplayName}";
+        }
         return game;
     }
 
@@ -969,17 +986,23 @@ public sealed class MainViewModel : ObservableObject
     {
         if (IsBusy) return;
         var process = AttachedProcess ?? throw new InvalidOperationException("请先连接游戏进程。");
+        var operation = CaptureGameOperation();
+        var source = _scanCandidates;
+        var comparison = SelectedComparison;
+        var scanValue = ScanValue;
         if (!isNewScan && _scanCandidates is not { Count: > 0 })
             throw new InvalidOperationException("请先执行首次扫描。");
 
         StopLiveCandidateRefresh();
         _scanCancellation?.Cancel();
         _scanCancellation = new CancellationTokenSource();
+        var cancellation = _scanCancellation;
         IsBusy = true;
         ProgressPercentage = 0;
         StatusText = isNewScan ? "正在扫描可读内存区域…" : "正在过滤候选地址…";
         var progress = new Progress<ScanProgress>(item =>
         {
+            if (!IsCurrentGameOperation(operation) || !IsBusy || !ReferenceEquals(_scanCancellation, cancellation)) return;
             ProgressPercentage = item.Percentage;
             StatusText = $"扫描中 · {item.Percentage:F1}% · 已找到 {item.ResultCount:N0} 个";
         });
@@ -997,29 +1020,40 @@ public sealed class MainViewModel : ObservableObject
                     WritableOnly,
                     AlignedOnly,
                     progress,
-                    _scanCancellation.Token);
+                    cancellation.Token);
             }
             else
             {
                 Func<ScanCandidatePartition, byte[]?> exactTargetFactory = partition =>
                 {
-                    if (SelectedComparison != ScanComparison.Exact) return null;
-                    return MemoryValueCodec.TryParseEncoded(ScanValue, partition.ValueType, partition.ScaleMultiplier, out var bytes)
+                    if (comparison != ScanComparison.Exact) return null;
+                    return MemoryValueCodec.TryParseEncoded(scanValue, partition.ValueType, partition.ScaleMultiplier, out var bytes)
                         ? bytes
                         : null;
                 };
-                if (SelectedComparison == ScanComparison.Exact &&
-                    _scanCandidates!.Partitions.Any(partition => exactTargetFactory(partition) is null))
+                if (comparison == ScanComparison.Exact &&
+                    source!.Partitions.Any(partition => exactTargetFactory(partition) is null))
                     throw new InvalidOperationException("输入值无法转换为当前扫描会话中的某些类型或套路。");
                 result = await _scanService.NextScanAsync(
                     process.ProcessId,
-                    _scanCandidates!,
-                    SelectedComparison,
+                    source!,
+                    comparison,
                     exactTargetFactory,
                     progress,
-                    _scanCancellation.Token);
+                    cancellation.Token);
             }
 
+            if (!IsCurrentGameOperation(operation) || cancellation.IsCancellationRequested)
+            {
+                result.Candidates.Dispose();
+                if (IsCurrentGameOperation(operation)) StatusText = "扫描已取消";
+                return;
+            }
+            if (result.Candidates.ProcessId != process.ProcessId || result.Candidates.ProcessStartTimeUtc != process.StartTimeUtc)
+            {
+                result.Candidates.Dispose();
+                throw new InvalidOperationException("扫描期间目标进程实例已变化，请重新连接。");
+            }
             if (isNewScan)
             {
                 DisposeScanStore(_scanCandidates);
@@ -1038,13 +1072,19 @@ public sealed class MainViewModel : ObservableObject
         }
         catch (OperationCanceledException)
         {
-            StatusText = "扫描已取消";
+            if (IsCurrentGameOperation(operation)) StatusText = "扫描已取消";
         }
+        catch (Exception) when (!IsCurrentGameOperation(operation)) { }
         finally
         {
-            IsBusy = false;
-            ProgressPercentage = 0;
-            StartLiveCandidateRefresh();
+            if (ReferenceEquals(_scanCancellation, cancellation))
+            {
+                _scanCancellation = null;
+                IsBusy = false;
+                ProgressPercentage = 0;
+                if (!_isShuttingDown) StartLiveCandidateRefresh();
+            }
+            cancellation.Dispose();
         }
     }
 
@@ -1092,6 +1132,7 @@ public sealed class MainViewModel : ObservableObject
 
     public void ResetScan()
     {
+        InvalidateGameOperations();
         StopLiveCandidateRefresh();
         _scanCancellation?.Cancel();
         DisposeScanStore(_scanCandidates);
@@ -1136,10 +1177,12 @@ public sealed class MainViewModel : ObservableObject
         var game = SelectedGame ?? throw new InvalidOperationException("请先把当前进程保存入库。");
         var version = SelectedVersion ?? throw new InvalidOperationException("请先选择游戏版本。");
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
+        EnsureScanOwnership([candidate], process);
         EnsureSelectedVersionMatchesAttached();
         if (string.IsNullOrWhiteSpace(name)) throw new InvalidOperationException("字段备注名称必须由玩家填写。");
 
         using var memory = new ProcessMemoryAccessor(process.ProcessId);
+        memory.EnsureInstance(process.ProcessId, process.StartTimeUtc);
         var module = memory.FindContainingModule(candidate.Address);
         var field = new SavedField
         {
@@ -1185,12 +1228,13 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task RefreshSavedValuesAsync()
     {
+        var operation = CaptureGameOperation();
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
         var version = SelectedVersion ?? throw new InvalidOperationException("请先选择游戏版本。");
         EnsureSelectedVersionMatchesAttached();
         using var memory = new ProcessMemoryAccessor(process.ProcessId);
 
-        foreach (var field in version.Fields)
+        foreach (var field in version.Fields.ToList())
         {
             if (field.LocatorKind == "GameAdapter")
             {
@@ -1198,12 +1242,14 @@ public sealed class MainViewModel : ObservableObject
                 try
                 {
                     var current = await Task.Run(() => adapter.ReadField(process, field.AdapterFieldKey));
+                    RequireCurrentGameOperation(operation);
                     field.CurrentValue = current.DisplayValue;
                     field.Status = current.Status;
                     field.LastVerifiedUtc = DateTime.UtcNow;
                 }
                 catch (Exception exception)
                 {
+                    RequireCurrentGameOperation(operation);
                     field.CurrentValue = "—";
                     field.Status = exception.Message;
                 }
@@ -1241,6 +1287,7 @@ public sealed class MainViewModel : ObservableObject
     {
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
         if (candidates.Count == 0) throw new InvalidOperationException("请至少选择一个扫描结果。");
+        EnsureScanOwnership(candidates, process);
         var writes = candidates.Select(candidate =>
         {
             if (!MemoryValueCodec.TryParseEncoded(value, candidate.ValueType, candidate.ScaleMultiplier, out var bytes))
@@ -1252,6 +1299,7 @@ public sealed class MainViewModel : ObservableObject
         try
         {
             using var memory = new ProcessMemoryAccessor(process.ProcessId);
+            memory.EnsureInstance(process.ProcessId, process.StartTimeUtc);
             var failures = new List<string>();
             foreach (var write in writes)
             {
@@ -1280,19 +1328,22 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task WriteSelectedFieldAsync(string value)
     {
+        var operation = CaptureGameOperation();
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
         var field = SelectedSavedField ?? throw new InvalidOperationException("请先选择字段。");
         EnsureSelectedVersionMatchesAttached();
         if (field.LocatorKind == "GameAdapter")
         {
             var adapter = ResolveFieldAdapter(field);
-            var updated = await Task.Run(() => adapter.WriteField(process, field.AdapterFieldKey, value));
+            var updated = await AwaitGameOperationAsync(operation, Task.Run(() => adapter.WriteField(process, field.AdapterFieldKey, value)));
+            RequireCurrentGameOperation(operation);
             field.CurrentValue = updated.DisplayValue;
             field.Status = updated.Status;
             field.LastVerifiedUtc = DateTime.UtcNow;
             field.ProcessStartTimeUtcTicks = process.StartTimeUtc.Ticks;
             if (field.IsValueLocked) field.LockedValue = updated.DisplayValue;
             await SaveLibraryAsync();
+            RequireCurrentGameOperation(operation);
             StatusText = $"已实时修改并保存 {field.Name}";
             return;
         }
@@ -1301,6 +1352,7 @@ public sealed class MainViewModel : ObservableObject
             throw new InvalidOperationException("输入值无法按该字段保存的搜索套路进行编码。");
 
         using var memory = new ProcessMemoryAccessor(process.ProcessId);
+        memory.EnsureInstance(process.ProcessId, process.StartTimeUtc);
         if (!TryResolveAddress(memory, process, field, out var address))
             throw new InvalidOperationException("该字段是动态地址，游戏重启后需要重新扫描并更新位置。");
         if (!memory.TryWrite(address, bytes, out var error))
@@ -1312,11 +1364,13 @@ public sealed class MainViewModel : ObservableObject
         field.ProcessStartTimeUtcTicks = process.StartTimeUtc.Ticks;
         if (field.IsValueLocked) field.LockedValue = field.CurrentValue;
         await SaveLibraryAsync();
+        RequireCurrentGameOperation(operation);
         StatusText = $"已修改 {field.Name}";
     }
 
     public async Task<SavedField> AddAdapterFieldAsync(string fieldKey, string displayName, string group)
     {
+        var operation = CaptureGameOperation();
         var adapter = _activeAdapter ?? throw new InvalidOperationException("当前游戏构建没有可用的专属适配器。");
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
         var game = SelectedGame ?? throw new InvalidOperationException("请先把当前进程保存入库。");
@@ -1325,7 +1379,8 @@ public sealed class MainViewModel : ObservableObject
         if (string.IsNullOrWhiteSpace(fieldKey)) throw new InvalidOperationException("请填写模块定义的稳定字段键；物品模块通常使用精确物品名。");
         if (string.IsNullOrWhiteSpace(displayName)) throw new InvalidOperationException("字段备注名称必须由玩家填写。");
 
-        var current = await Task.Run(() => adapter.ReadField(process, fieldKey.Trim()));
+        var current = await AwaitGameOperationAsync(operation, Task.Run(() => adapter.ReadField(process, fieldKey.Trim())));
+        RequireCurrentGameOperation(operation);
         var field = new SavedField
         {
             Name = displayName.Trim(),
@@ -1345,18 +1400,21 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(SavedFields));
         SelectedSavedField = field;
         await SaveLibraryAsync();
+        RequireCurrentGameOperation(operation);
         StatusText = $"已通过专属适配器保存字段 {field.Name}";
         return field;
     }
 
     public async Task RefreshAdapterInventoryAsync()
     {
+        var operation = CaptureGameOperation();
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
         if (_activeAdapter is not IInventoryGameAdapter adapter)
             throw new InvalidOperationException("当前游戏构建没有可用的背包专属修改器。");
 
         StatusText = "正在读取游戏背包…";
-        var items = await Task.Run(() => adapter.ReadInventory(process));
+        var items = await AwaitGameOperationAsync(operation, Task.Run(() => adapter.ReadInventory(process)));
+        RequireCurrentGameOperation(operation);
         _adapterInventoryItems.Clear();
         foreach (var item in items) _adapterInventoryItems.Add(item);
         AdapterItemsView.Refresh();
@@ -1372,11 +1430,14 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task WriteAdapterItemsAsync(IReadOnlyList<AdapterInventoryItem> items, string value)
     {
+        var operation = CaptureGameOperation();
         if (items.Count == 0) throw new InvalidOperationException("请至少选择一个背包物品。");
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
         var adapter = _activeAdapter ?? throw new InvalidOperationException("当前游戏构建没有可用的专属适配器。");
-        var updated = await Task.Run(() => items.Select(item => adapter.WriteField(process, item.FieldKey, value)).ToList());
+        var updated = await AwaitGameOperationAsync(operation, Task.Run(() => items.Select(item => adapter.WriteField(process, item.FieldKey, value)).ToList()));
+        RequireCurrentGameOperation(operation);
         await RefreshAdapterInventoryAsync();
+        RequireCurrentGameOperation(operation);
         SelectedAdapterItem = _adapterInventoryItems.FirstOrDefault(candidate =>
             string.Equals(candidate.FieldKey, items[0].FieldKey, StringComparison.Ordinal));
         StatusText = items.Count == 1
@@ -1386,6 +1447,7 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task RefreshAdapterCharactersAsync()
     {
+        var operation = CaptureGameOperation();
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
         if (_activeAdapter is not ICharacterAttributesGameAdapter adapter || !adapter.SupportsCharacterAttributes(process))
             throw new InvalidOperationException("当前游戏构建没有可用的人物属性编辑模块。");
@@ -1393,7 +1455,8 @@ public sealed class MainViewModel : ObservableObject
         var selectedId = SelectedAdapterCharacter?.CharacterId;
         var selectedAttribute = SelectedCharacterAttribute?.Key;
         StatusText = "正在读取游戏人物与属性…";
-        var characters = await Task.Run(() => adapter.ReadCharacters(process));
+        var characters = await AwaitGameOperationAsync(operation, Task.Run(() => adapter.ReadCharacters(process)));
+        RequireCurrentGameOperation(operation);
         _adapterCharacters.Clear();
         foreach (var character in characters) _adapterCharacters.Add(character);
         SelectedAdapterCharacter = _adapterCharacters.FirstOrDefault(item =>
@@ -1408,6 +1471,7 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task WriteSelectedCharacterAttributeAsync(string value)
     {
+        var operation = CaptureGameOperation();
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
         if (_activeAdapter is not ICharacterAttributesGameAdapter adapter || !adapter.SupportsCharacterAttributes(process))
             throw new InvalidOperationException("当前游戏构建没有可用的人物属性编辑模块。");
@@ -1417,8 +1481,10 @@ public sealed class MainViewModel : ObservableObject
             throw new InvalidOperationException("人物属性必须是整数；具体允许范围由游戏专属模块校验。");
 
         StatusText = $"正在修改 {character.DisplayName} 的{attribute.DisplayName}…";
-        await Task.Run(() => adapter.WriteCharacterAttribute(process, character.CharacterId, attribute.Key, target));
+        await AwaitGameOperationAsync(operation, Task.Run(() => adapter.WriteCharacterAttribute(process, character.CharacterId, attribute.Key, target)));
+        RequireCurrentGameOperation(operation);
         await RefreshAdapterCharactersAsync();
+        RequireCurrentGameOperation(operation);
         SelectedAdapterCharacter = _adapterCharacters.FirstOrDefault(item =>
             string.Equals(item.CharacterId, character.CharacterId, StringComparison.Ordinal));
         SelectedCharacterAttribute = SelectedAdapterCharacter?.Attributes.FirstOrDefault(item =>
@@ -1441,6 +1507,7 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task RefreshEntityEditorAsync(AdapterEntityEditorState editor)
     {
+        var operation = CaptureGameOperation();
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
         if (_activeAdapter is not IEntityEditorsGameAdapter adapter ||
             !adapter.SupportsEntityEditor(process, editor.Descriptor.Id))
@@ -1449,7 +1516,8 @@ public sealed class MainViewModel : ObservableObject
         var selectedEntityId = editor.SelectedEntity?.EntityId;
         var selectedFieldKey = editor.SelectedField?.Key;
         StatusText = $"正在读取{editor.Descriptor.DisplayName}…";
-        var entities = await Task.Run(() => adapter.ReadEditorEntities(process, editor.Descriptor.Id));
+        var entities = await AwaitGameOperationAsync(operation, Task.Run(() => adapter.ReadEditorEntities(process, editor.Descriptor.Id)));
+        RequireCurrentGameOperation(operation);
         editor.ReplaceEntities(entities, selectedEntityId, selectedFieldKey);
         StatusText = entities.Count == 0
             ? $"当前没有可显示的{editor.Descriptor.DisplayName}数据"
@@ -1458,6 +1526,7 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task WriteEntityEditorFieldAsync(AdapterEntityEditorState editor, string value)
     {
+        var operation = CaptureGameOperation();
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
         if (_activeAdapter is not IEntityEditorsGameAdapter adapter ||
             !adapter.SupportsEntityEditor(process, editor.Descriptor.Id))
@@ -1471,9 +1540,11 @@ public sealed class MainViewModel : ObservableObject
                 $"{field.DisplayName}必须是 {field.Minimum:N0} 到 {field.Maximum:N0} 之间的整数。");
 
         StatusText = $"正在修改 {entity.DisplayName} 的{field.DisplayName}…";
-        await Task.Run(() => adapter.WriteEditorField(
-            process, editor.Descriptor.Id, entity.EntityId, field.Key, target));
+        await AwaitGameOperationAsync(operation, Task.Run(() => adapter.WriteEditorField(
+            process, editor.Descriptor.Id, entity.EntityId, field.Key, target)));
+        RequireCurrentGameOperation(operation);
         await RefreshEntityEditorAsync(editor);
+        RequireCurrentGameOperation(operation);
         editor.SelectedEntity = editor.Entities.FirstOrDefault(item =>
             string.Equals(item.EntityId, entity.EntityId, StringComparison.Ordinal));
         editor.SelectedField = editor.SelectedEntity?.Fields.FirstOrDefault(item =>
@@ -1496,6 +1567,8 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task AccelerateGameAsync()
     {
+        var operation = CaptureGameOperation();
+        var speedService = _speedService;
         var process = AttachedProcess ?? throw new InvalidOperationException("请先连接游戏进程。");
         var multiplier = ParseSpeedMultiplier(SpeedMultiplier);
         var cooldown = BeginSpeedControlInteraction();
@@ -1504,14 +1577,22 @@ public sealed class MainViewModel : ObservableObject
             SpeedMultiplier = FormatSpeedMultiplier(multiplier);
             if (multiplier == 1d)
             {
-                await Task.Run(_speedService.Normalize);
+                await AwaitGameOperationAsync(operation, Task.Run(speedService.Normalize), validateResult: false);
+                if (operation.Session is not null) operation.Session.IsSpeedActive = false;
+                RequireCurrentGameOperation(operation);
                 IsSpeedActive = false;
                 if (_activeSession is not null) _activeSession.IsSpeedActive = false;
                 OnPropertyChanged(nameof(SpeedStatusText));
                 StatusText = "游戏已切换为正常倍速";
                 return;
             }
-            var result = await Task.Run(() => _speedService.Accelerate(process.ProcessId, multiplier));
+            var result = await AwaitGameOperationAsync(operation, Task.Run(() => speedService.Accelerate(process.ProcessId, multiplier)), validateResult: false);
+            if (operation.Session is not null)
+            {
+                operation.Session.IsSpeedActive = true;
+                operation.Session.SpeedMultiplierInput = FormatSpeedMultiplier(multiplier);
+            }
+            RequireCurrentGameOperation(operation);
             IsSpeedActive = true;
             if (_activeSession is not null)
             {
@@ -1531,11 +1612,13 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task RestoreGameSpeedAsync()
     {
+        var operation = CaptureGameOperation();
+        var speedService = _speedService;
         _ = AttachedProcess ?? throw new InvalidOperationException("请先连接游戏进程。");
         var cooldown = BeginSpeedControlInteraction();
         try
         {
-            if (!_speedService.HasHooks || _speedService.Multiplier == 1d)
+            if (!speedService.HasHooks || speedService.Multiplier == 1d)
             {
                 IsSpeedActive = false;
                 if (_activeSession is not null) _activeSession.IsSpeedActive = false;
@@ -1543,7 +1626,9 @@ public sealed class MainViewModel : ObservableObject
                 StatusText = "当前已经是正常倍速";
                 return;
             }
-            await Task.Run(_speedService.Normalize);
+            await AwaitGameOperationAsync(operation, Task.Run(speedService.Normalize), validateResult: false);
+            if (operation.Session is not null) operation.Session.IsSpeedActive = false;
+            RequireCurrentGameOperation(operation);
             IsSpeedActive = false;
             if (_activeSession is not null) _activeSession.IsSpeedActive = false;
             SpeedMultiplier = "1";
@@ -2483,6 +2568,55 @@ public sealed class MainViewModel : ObservableObject
 
     private async Task SaveLibraryAsync() => await _profileStore.SaveAsync(_document);
 
+    private sealed record GameOperationContext(long Generation, GameProfile? Game, GameVersionProfile? Version,
+        ProcessItem? Process, Guid? AttachedGameId, GameConnectionSession? Session);
+
+    private GameOperationContext CaptureGameOperation() => new(_gameOperationGeneration, SelectedGame,
+        SelectedVersion, AttachedProcess, _attachedGameId, _activeSession);
+
+    private bool IsCurrentGameOperation(GameOperationContext context) => !_isShuttingDown &&
+        context.Generation == _gameOperationGeneration && ReferenceEquals(context.Game, SelectedGame) &&
+        ReferenceEquals(context.Version, SelectedVersion) && ReferenceEquals(context.Process, AttachedProcess) &&
+        ReferenceEquals(context.Session, _activeSession) && context.AttachedGameId == _attachedGameId;
+
+    private void RequireCurrentGameOperation(GameOperationContext context)
+    {
+        if (!IsCurrentGameOperation(context))
+            throw new OperationCanceledException("游戏、版本或连接已变化，原操作已取消。");
+    }
+
+    private async Task<T> AwaitGameOperationAsync<T>(GameOperationContext context, Task<T> task, bool validateResult = true)
+    {
+        T result;
+        try { result = await task; }
+        catch (Exception exception) when (!IsCurrentGameOperation(context))
+        { throw new OperationCanceledException("原游戏操作已失效，忽略迟到错误。", exception); }
+        if (validateResult) RequireCurrentGameOperation(context);
+        return result;
+    }
+
+    private async Task AwaitGameOperationAsync(GameOperationContext context, Task task, bool validateResult = true)
+    {
+        try { await task; }
+        catch (Exception exception) when (!IsCurrentGameOperation(context))
+        { throw new OperationCanceledException("原游戏操作已失效，忽略迟到错误。", exception); }
+        if (validateResult) RequireCurrentGameOperation(context);
+    }
+
+    private void InvalidateGameOperations()
+    {
+        _gameOperationGeneration++;
+        _scanCancellation?.Cancel();
+    }
+
+    private void EnsureScanOwnership(IReadOnlyList<ScanCandidate> candidates, ProcessItem process)
+    {
+        var store = _scanCandidates;
+        if (store is null || store.ProcessId != process.ProcessId || store.ProcessStartTimeUtc != process.StartTimeUtc ||
+            candidates.Any(candidate => candidate.ScanGenerationId != store.GenerationId))
+            throw new InvalidOperationException("扫描结果不属于当前进程和扫描代，请重新扫描或选择当前结果。");
+    }
+
     private void CaptureActiveSession()
     {
         var session = _activeSession;
@@ -3012,6 +3146,7 @@ public sealed class MainViewModel : ObservableObject
             try
             {
                 using var memory = new ProcessMemoryAccessor(process.ProcessId);
+                memory.EnsureInstance(process.ProcessId, process.StartTimeUtc);
                 while (!cancellation.IsCancellationRequested)
                 {
                     foreach (var candidate in candidates)
@@ -3108,6 +3243,7 @@ public sealed class MainViewModel : ObservableObject
                         if (!MemoryValueCodec.TryParseEncoded(field.LockedValue, field.ValueType, field.ScaleMultiplier, out var expected))
                             throw new InvalidOperationException("锁定目标值无效。");
                         using var memory = new ProcessMemoryAccessor(process.ProcessId);
+                        memory.EnsureInstance(process.ProcessId, process.StartTimeUtc);
                         if (!TryResolveAddress(memory, process, field, out var address))
                             throw new InvalidOperationException("动态地址需要重新定位。");
                         if (!memory.TryRead(address, expected.Length, out var currentBytes))
@@ -3192,6 +3328,8 @@ public sealed class MainViewModel : ObservableObject
 
     public void Shutdown()
     {
+        _isShuttingDown = true;
+        InvalidateGameOperations();
         _scanCancellation?.Cancel();
         StopLiveCandidateRefresh();
         CaptureActiveSession();

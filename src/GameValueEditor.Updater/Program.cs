@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json;
+using GameValueEditor.Updates;
 
 var options = ParseArguments(args);
 if (options.TryGetValue("recover", out var recoveryPath))
@@ -9,6 +10,7 @@ if (options.TryGetValue("recover", out var recoveryPath))
     if (!options.TryGetValue("app-dir", out var recoveryApplication)) return 2;
     try
     {
+        await using var mutation = await ModuleMutationLock.AcquireAsync(Path.Combine(recoveryApplication, "data", "modules"));
         await UpdateRecovery.RestoreAsync(recoveryPath, recoveryApplication);
         return 0;
     }
@@ -30,8 +32,12 @@ var errorPath = Path.Combine(updatesDirectory, "update-error.log");
 var errorNoticePath = Path.Combine(updatesDirectory, "last-update-error.json");
 try
 {
+    using (var initialMutation = await ModuleMutationLock.AcquireAsync(Path.Combine(appDirectory, "data", "modules")))
+        UpdateRecovery.CleanupCommitted(appDirectory);
     if (File.Exists(Path.Combine(updatesDirectory, UpdateRecovery.MarkerName)))
         throw new InvalidOperationException("上次更新尚需恢复旧文件，请先使用保留的恢复记录完成恢复。");
+    if (UpdateRecovery.FindIncomplete(appDirectory) is { } incomplete)
+        throw new InvalidOperationException($"存在未完成的安装事务，请先手动恢复：{incomplete}");
     var pending = JsonSerializer.Deserialize<PendingUpdate>(await File.ReadAllTextAsync(pendingPath))
                   ?? throw new InvalidOperationException("待安装更新记录无效。");
     if (!File.Exists(pending.ArchivePath)) throw new FileNotFoundException("已下载的更新包不存在。", pending.ArchivePath);
@@ -53,6 +59,15 @@ try
         // The application already exited.
     }
 
+    await using var moduleMutation = await ModuleMutationLock.AcquireAsync(Path.Combine(appDirectory, "data", "modules"));
+    // Recheck after obtaining the shared mutation lock; another runner may have finished
+    // while we waited for the host to exit.
+    UpdateRecovery.CleanupCommitted(appDirectory);
+    if (File.Exists(Path.Combine(updatesDirectory, UpdateRecovery.MarkerName)) || UpdateRecovery.FindIncomplete(appDirectory) is not null)
+        throw new InvalidOperationException("存在未完成的安装事务，请先手动恢复。");
+    var compatibility = ApplicationUpdateCompatibilityValidator.ResolveVerifiedArchive(pending.ArchivePath, pending.Version, pending.Compatibility);
+    ApplicationUpdateCompatibilityValidator.Validate(appDirectory, pending.Version, compatibility);
+
     var extractionDirectory = Path.Combine(updatesDirectory, $"extract-{Guid.NewGuid():N}");
     Directory.CreateDirectory(extractionDirectory);
     try
@@ -61,17 +76,17 @@ try
         var newExecutable = Path.Combine(extractionDirectory, "GameValueEditor.exe");
         if (!File.Exists(newExecutable)) throw new InvalidOperationException("更新包中缺少 GameValueEditor.exe。");
         await WaitForExclusiveAccessAsync(Path.Combine(appDirectory, "GameValueEditor.exe"));
-        await InstallUpdateAsync(extractionDirectory, appDirectory);
+        await InstallUpdateAsync(extractionDirectory, appDirectory, pendingPath);
     }
     finally
     {
         TryDeleteDirectory(extractionDirectory);
     }
 
-    File.Delete(pendingPath);
-    File.Delete(pending.ArchivePath);
-    if (File.Exists(errorPath)) File.Delete(errorPath);
-    if (File.Exists(errorNoticePath)) File.Delete(errorNoticePath);
+    TryDeleteFile(pendingPath);
+    TryDeleteFile(pending.ArchivePath);
+    TryDeleteFile(errorPath);
+    TryDeleteFile(errorNoticePath);
     if (restart)
     {
         var executable = Path.Combine(appDirectory, "GameValueEditor.exe");
@@ -106,7 +121,8 @@ catch (Exception exception)
     {
     }
     if (restart && exception is not UpdateRecoveryRequiredException &&
-        !File.Exists(Path.Combine(updatesDirectory, UpdateRecovery.MarkerName)))
+        !File.Exists(Path.Combine(updatesDirectory, UpdateRecovery.MarkerName)) &&
+        UpdateRecovery.FindIncomplete(appDirectory) is null)
     {
         var executable = Path.Combine(appDirectory, "GameValueEditor.exe");
         if (File.Exists(executable)) _ = Process.Start(new ProcessStartInfo(executable) { UseShellExecute = true });
@@ -114,7 +130,7 @@ catch (Exception exception)
     return 1;
 }
 
-static async Task InstallUpdateAsync(string extractionDirectory, string appDirectory)
+static async Task InstallUpdateAsync(string extractionDirectory, string appDirectory, string pendingPath)
 {
     var applicationRoot = Path.GetFullPath(appDirectory);
     if (!Path.EndsInDirectorySeparator(applicationRoot))
@@ -127,15 +143,21 @@ static async Task InstallUpdateAsync(string extractionDirectory, string appDirec
     var journalPath = Path.Combine(transactionDirectory, "recovery.json");
     var journal = new RecoveryJournal(Path.GetFullPath(appDirectory), []);
     var hasSavedJournal = false;
+    var committed = false;
     Directory.CreateDirectory(stagedRoot);
     try
     {
+        // A durable empty journal and marker precede even the first replacement.
+        await UpdateRecovery.SaveAsync(journalPath, journal);
+        hasSavedJournal = true;
+        await UpdateRecovery.RecordRequiredAsync(appDirectory, journalPath);
+        File.Move(pendingPath, Path.Combine(transactionDirectory, "pending-update.json"));
         foreach (var source in Directory.EnumerateFiles(extractionDirectory, "*", SearchOption.AllDirectories))
         {
             var relative = Path.GetRelativePath(extractionDirectory, source);
             if (relative.Equals("data", StringComparison.OrdinalIgnoreCase) ||
                 relative.StartsWith($"data{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)) continue;
-            var destination = Path.GetFullPath(Path.Combine(appDirectory, relative));
+            var destination = UpdateRecovery.ResolveSafe(appDirectory, relative);
             if (!destination.StartsWith(applicationRoot, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException($"更新包路径超出应用目录：{relative}");
             var staged = Path.Combine(stagedRoot, relative);
@@ -145,39 +167,49 @@ static async Task InstallUpdateAsync(string extractionDirectory, string appDirec
             files.Add(new UpdateFile(relative, destination, staged, backup, File.Exists(destination)));
         }
 
+        foreach (var file in files)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(file.Destination)!);
+            if (file.HadOriginal)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(file.Backup)!);
+                await RetryFileOperationAsync(() =>
+                {
+                    using var input = File.OpenRead(file.Destination);
+                    using var backup = new FileStream(file.Backup, FileMode.Create, FileAccess.Write, FileShare.None,
+                        64 * 1024, FileOptions.WriteThrough);
+                    input.CopyTo(backup);
+                    backup.Flush(true);
+                }, file.Destination, "备份");
+            }
+            journal.Files.Add(new RecoveryFile(file.RelativePath, file.HadOriginal));
+            await UpdateRecovery.SaveAsync(journalPath, journal);
+            await RetryFileOperationAsync(
+                () => File.Move(file.Staged, file.Destination, true), file.Destination, "替换");
+        }
+        await UpdateRecovery.SaveAsync(journalPath, journal with { State = "Committed" });
+        committed = true;
+        UpdateRecovery.ClearMarker(appDirectory, journalPath);
+    }
+    catch (Exception installException)
+    {
+        if (committed)
+        {
+            retainTransaction = true;
+            throw new IOException("应用文件已成功替换，但事务收尾未完成；已提交的事务不能回滚。", installException);
+        }
         try
         {
-            foreach (var file in files)
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(file.Destination)!);
-                if (file.HadOriginal)
-                {
-                    Directory.CreateDirectory(Path.GetDirectoryName(file.Backup)!);
-                    await RetryFileOperationAsync(
-                        () => File.Copy(file.Destination, file.Backup, true), file.Destination, "备份");
-                }
-                journal.Files.Add(new RecoveryFile(file.RelativePath, file.HadOriginal));
-                await UpdateRecovery.SaveAsync(journalPath, journal);
-                hasSavedJournal = true;
-                await RetryFileOperationAsync(
-                    () => File.Move(file.Staged, file.Destination, true), file.Destination, "替换");
-            }
+            if (hasSavedJournal) await UpdateRecovery.RestoreAsync(journalPath, appDirectory);
         }
-        catch (Exception installException)
+        catch (Exception recoveryException)
         {
-            try
-            {
-                if (hasSavedJournal) await UpdateRecovery.RestoreAsync(journalPath, appDirectory);
-            }
-            catch (Exception recoveryException)
-            {
-                retainTransaction = true;
-                try { await UpdateRecovery.RecordRequiredAsync(appDirectory, journalPath); }
-                catch (Exception noticeException) { recoveryException = new AggregateException(recoveryException, noticeException); }
-                throw new UpdateRecoveryRequiredException(journalPath, installException, recoveryException);
-            }
-            throw;
+            retainTransaction = true;
+            try { await UpdateRecovery.RecordRequiredAsync(appDirectory, journalPath); }
+            catch (Exception noticeException) { recoveryException = new AggregateException(recoveryException, noticeException); }
+            throw new UpdateRecoveryRequiredException(journalPath, installException, recoveryException);
         }
+        throw;
     }
     finally
     {
@@ -228,6 +260,12 @@ static void TryDeleteDirectory(string path)
     }
 }
 
+static void TryDeleteFile(string path)
+{
+    try { File.Delete(path); }
+    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
+}
+
 static Dictionary<string, string> ParseArguments(IReadOnlyList<string> arguments)
 {
     var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -244,6 +282,7 @@ static Dictionary<string, string> ParseArguments(IReadOnlyList<string> arguments
     return result;
 }
 
-internal sealed record PendingUpdate(string Version, string ArchivePath, string Sha256, DateTime DownloadedUtc);
+internal sealed record PendingUpdate(string Version, string ArchivePath, string Sha256, DateTime DownloadedUtc,
+    ApplicationUpdateCompatibility? Compatibility = null);
 internal sealed record UpdateFile(string RelativePath, string Destination, string Staged, string Backup, bool HadOriginal);
 internal sealed record UpdateFailureNotice(DateTimeOffset FailedAt, string Message, string LogPath);

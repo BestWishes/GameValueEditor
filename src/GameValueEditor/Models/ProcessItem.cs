@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Numerics;
+using System.Text.RegularExpressions;
 using System.Windows.Media;
 using GameValueEditor.Infrastructure;
 
@@ -73,6 +75,7 @@ public sealed class ScanCandidate : ObservableObject
     private byte[] _currentBytes = [];
 
     public ulong Address { get; init; }
+    public Guid ScanGenerationId { get; init; }
     public byte[] FirstBytes { get; init; } = [];
     public byte[] PreviousBytes
     {
@@ -122,10 +125,10 @@ public static class MemoryValueCodec
             case MemoryValueType.Int64 when long.TryParse(text, out var int64):
                 bytes = BitConverter.GetBytes(int64);
                 return true;
-            case MemoryValueType.Float when float.TryParse(text, out var single):
+            case MemoryValueType.Float when float.TryParse(text, out var single) && float.IsFinite(single):
                 bytes = BitConverter.GetBytes(single);
                 return true;
-            case MemoryValueType.Double when double.TryParse(text, out var dbl):
+            case MemoryValueType.Double when double.TryParse(text, out var dbl) && double.IsFinite(dbl):
                 bytes = BitConverter.GetBytes(dbl);
                 return true;
             default:
@@ -148,41 +151,80 @@ public static class MemoryValueCodec
 
     public static string FormatDecoded(byte[] bytes, MemoryValueType type, double multiplier)
     {
-        if (multiplier == 0 || double.IsNaN(multiplier) || double.IsInfinity(multiplier)) return "?";
+        if (multiplier <= 0 || !double.IsFinite(multiplier) || bytes.Length < type.Size()) return "?";
         if (Math.Abs(multiplier - 1d) < double.Epsilon) return Format(bytes, type);
+        if (type is MemoryValueType.Int32 or MemoryValueType.Int64)
+        {
+            try
+            {
+                var scale = (decimal)multiplier;
+                if (scale == 0) return "?";
+                var integer = type == MemoryValueType.Int64 ? (decimal)BitConverter.ToInt64(bytes) : BitConverter.ToInt32(bytes);
+                return (integer / scale).ToString("G29", CultureInfo.InvariantCulture);
+            }
+            catch (OverflowException) { return "?"; }
+        }
         var decoded = ToDouble(bytes, type) / multiplier;
-        return type is MemoryValueType.Int32 or MemoryValueType.Int64
-            ? decoded.ToString("G17", CultureInfo.InvariantCulture)
-            : decoded.ToString("G9", CultureInfo.InvariantCulture);
+        return decoded.ToString(type == MemoryValueType.Double ? "G17" : "G9", CultureInfo.InvariantCulture);
     }
 
     public static bool TryParseEncoded(string text, MemoryValueType type, double multiplier, out byte[] bytes)
     {
         bytes = [];
-        if (multiplier <= 0 || double.IsNaN(multiplier) || double.IsInfinity(multiplier) ||
-            !double.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var displayValue))
+        if (multiplier <= 0 || !double.IsFinite(multiplier)) return false;
+        if (type is MemoryValueType.Int32 or MemoryValueType.Int64)
         {
-            return false;
+            // Parse the input as an exact rational, never allowing decimal/double rounding
+            // to turn a fractional value into an integer at the Int64 boundary.
+            if (!TryParseRational(text, out var numerator, out var denominator)) return false;
+            try
+            {
+                var scale = (decimal)multiplier;
+                if (scale == 0) return false;
+                var parts = decimal.GetBits(scale);
+                var scaleNumerator = (new BigInteger((uint)parts[2]) << 64) |
+                                     (new BigInteger((uint)parts[1]) << 32) | (uint)parts[0];
+                var scaleDenominator = BigInteger.Pow(10, (parts[3] >> 16) & 0xFF);
+                var integer = BigInteger.DivRem(numerator * scaleNumerator,
+                    denominator * scaleDenominator, out var remainder);
+                if (!remainder.IsZero) return false;
+                if (type == MemoryValueType.Int32 && integer >= int.MinValue && integer <= int.MaxValue)
+                    bytes = BitConverter.GetBytes((int)integer);
+                else if (type == MemoryValueType.Int64 && integer >= long.MinValue && integer <= long.MaxValue)
+                    bytes = BitConverter.GetBytes((long)integer);
+                else return false;
+                return true;
+            }
+            catch (OverflowException) { return false; }
         }
-
+        if (!double.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var displayValue) ||
+            !double.IsFinite(displayValue)) return false;
         var encoded = displayValue * multiplier;
-        switch (type)
-        {
-            case MemoryValueType.Int32 when encoded >= int.MinValue && encoded <= int.MaxValue && encoded == Math.Truncate(encoded):
-                bytes = BitConverter.GetBytes((int)encoded);
-                return true;
-            case MemoryValueType.Int64 when encoded >= long.MinValue && encoded <= long.MaxValue && encoded == Math.Truncate(encoded):
-                bytes = BitConverter.GetBytes((long)encoded);
-                return true;
-            case MemoryValueType.Float when encoded is >= -float.MaxValue and <= float.MaxValue:
-                bytes = BitConverter.GetBytes((float)encoded);
-                return true;
-            case MemoryValueType.Double:
-                bytes = BitConverter.GetBytes(encoded);
-                return true;
-            default:
-                return false;
-        }
+        if (!double.IsFinite(encoded)) return false;
+        if (type == MemoryValueType.Float && encoded is >= -float.MaxValue and <= float.MaxValue)
+            bytes = BitConverter.GetBytes((float)encoded);
+        else if (type == MemoryValueType.Double) bytes = BitConverter.GetBytes(encoded);
+        else return false;
+        return true;
+    }
+
+    private static bool TryParseRational(string text, out BigInteger numerator, out BigInteger denominator)
+    {
+        numerator = default;
+        denominator = BigInteger.One;
+        text = text.Trim();
+        if (text.Length > 256) return false;
+        var match = Regex.Match(text, @"^([+-]?)([0-9]*)(?:\.([0-9]*))?(?:[eE]([+-]?[0-9]+))?$");
+        if (!match.Success || match.Groups[2].Length + match.Groups[3].Length == 0) return false;
+        var exponent = 0;
+        if (match.Groups[4].Success && (!int.TryParse(match.Groups[4].Value, NumberStyles.AllowLeadingSign,
+                CultureInfo.InvariantCulture, out exponent) || exponent is < -1000 or > 1000)) return false;
+        numerator = BigInteger.Parse(match.Groups[2].Value + match.Groups[3].Value, CultureInfo.InvariantCulture);
+        if (match.Groups[1].Value == "-") numerator = -numerator;
+        exponent -= match.Groups[3].Length;
+        if (exponent < 0) denominator = BigInteger.Pow(10, -exponent);
+        else numerator *= BigInteger.Pow(10, exponent);
+        return true;
     }
 
     public static double ToDouble(byte[] bytes, MemoryValueType type) => type switch

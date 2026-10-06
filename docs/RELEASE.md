@@ -5,7 +5,7 @@ GitHub Actions 不是发布前提。正式版本先完成源码级构建与测�
 ## 1. 验证标准包
 
 ```powershell
-./scripts/verify-release.ps1 -Version 0.4.6
+./scripts/verify-release.ps1 -Version 0.4.7
 ```
 
 记录脚本输出的标准 ZIP 路径与 SHA-256。正式发布版本是独立的十进制计数器：每次只加 `0.0.1`，`0.4.9` 的下一版是 `0.5.0`，`0.9.9` 的下一版是 `1.0.0`。发布脚本从最新正式标签计算唯一下一版本并拒绝跳号；预览标签和 `complete-offline` 完整离线包均不能上传 GitHub Release，完整离线包只供本地或 QQ 分发。Host API 与 Schema 是独立整数协议号，不参与此进位。
@@ -15,7 +15,7 @@ GitHub Actions 不是发布前提。正式版本先完成源码级构建与测�
 确认工作树、差异和远端状态后提交，在已验证的提交上创建带注释标签：
 
 ```powershell
-git tag -a v0.4.6 -m "GameValueEditor v0.4.6"
+git tag -a v0.4.7 -m "GameValueEditor v0.4.7"
 ```
 
 发布脚本从 `origin`（或 `-RemoteName` 指定的远端）解析 GitHub 仓库，避免手工填写错误的所有者或仓库名。可用 `-PushRefs` 同时推送当前分支和标签；脚本先使用配置的 Git 远端，HTTPS 失败时自动通过 GitHub SSH 443 重试。
@@ -24,9 +24,9 @@ git tag -a v0.4.6 -m "GameValueEditor v0.4.6"
 
 ```powershell
 ./scripts/publish-github-release.ps1 `
-  -Tag v0.4.6 `
-  -ReleaseName "肝肾大圣 v0.4.6" `
-  -AssetPath ./dist/GameValueEditor-v0.4.6-win-x64.zip `
+  -Tag v0.4.7 `
+  -ReleaseName "肝肾大圣 v0.4.7" `
+  -AssetPath ./dist/GameValueEditor-v0.4.7-win-x64.zip `
   -PushRefs
 ```
 
@@ -48,9 +48,9 @@ git tag -a v0.4.6 -m "GameValueEditor v0.4.6"
 
 ```powershell
 ./scripts/publish-github-release.ps1 `
-  -Tag v0.4.6 `
-  -ReleaseName "肝肾大圣 v0.4.6" `
-  -AssetPath ./dist/GameValueEditor-v0.4.6-win-x64.zip `
+  -Tag v0.4.7 `
+  -ReleaseName "肝肾大圣 v0.4.7" `
+  -AssetPath ./dist/GameValueEditor-v0.4.7-win-x64.zip `
   -VerifyOnly
 ```
 
@@ -72,6 +72,12 @@ git tag -a v0.4.6 -m "GameValueEditor v0.4.6"
 
 ## 本机安装失败恢复
 
+0.4.7 标准包新增 release-compatibility.json；其版本、API 范围与目录 Schema 上限须与发布索引一致，索引脚本会核对。旧宿主生成的 pending 没有这些字段时，只有通过既有 SHA-256 校验的新包清单可以补足；不能猜测旧包兼容信息。
+
+0.4.7 宿主使用当前安装的更新器副本（data/updates/recovery-runner-*.exe），不使用待回退旧包中的旧更新器。启动时会在正常界面和游戏库加载前拦截未完成事务，包括缺标记但存在 Applying 记录的情况。该保护只适用于新版本，历史旧宿主的启动代码不能被追溯改变。
+
+任何替换前先写 Applying 恢复记录与标记，并把 pending 移入事务目录；强制终止后保留备份、runner 与记录，不再次自动安装。全部替换成功后写 Committed，提交后残留仅清理、不能恢复旧文件。实际替换前重新核对当前模块，期间与模块安装/卸载共用变更锁。
+
 安装失败时更新器先尝试恢复事务前的原文件；这不是自动降级版本。若恢复也因文件占用失败，不会重启混合版本，事务目录中的 `backup` 与 `recovery.json` 必须保留。`data/updates/recovery-required.json` 记录恢复记录及本次更新器的位置，错误提示也提供记录位置。该状态下不允许新更新/回退，不清理更新器及失败证据。
 
 关闭主程序和占用文件的程序后，按记录中的绝对路径执行：
@@ -80,4 +86,4 @@ git tag -a v0.4.6 -m "GameValueEditor v0.4.6"
 & "<RunnerPath>" --recover "<JournalPath>" --app-dir "<应用目录>"
 ```
 
-退出码 0 表示原文件已完整恢复、标记和事务目录已清除；退出码 1 时保留备份，查看事务目录中的 `recovery-error.log`，释放占用后再试。不要手动删除恢复标记绕过检查，也不要移动/编辑恢复记录或覆盖备份。用户 `data` 不在恢复范围内。修复设计与三轮检查记录见[修复设计](COMPATIBILITY_ASYNC_LIFECYCLE_AND_RECOVERY_FIX_DESIGN.md)。
+退出码 0 表示原文件已完整恢复、标记和事务目录已清除；退出码 1 时保留备份，查看事务目录中的 `recovery-error.log`，释放占用后再试。不要手动删除恢复标记绕过检查，也不要移动/编辑恢复记录或覆盖备份。用户 `data` 不在恢复范围内。本次设计与三轮检查记录见[稳定性修复设计](STABILITY_OPERATIONS_STORAGE_AND_RECOVERY_DESIGN.md)，之前一轮的范围见[历史设计](COMPATIBILITY_ASYNC_LIFECYCLE_AND_RECOVERY_FIX_DESIGN.md)。

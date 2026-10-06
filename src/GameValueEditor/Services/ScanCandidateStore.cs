@@ -14,6 +14,9 @@ public sealed class ScanCandidateStore : IDisposable
     private readonly string _storeDirectory;
     private readonly FileStream _lease;
     private bool _disposed;
+    private bool _disposeRequested;
+    private int _readers;
+    private readonly object _lifetime = new();
 
     internal ScanCandidateStore(
         string rootDirectory,
@@ -28,11 +31,14 @@ public sealed class ScanCandidateStore : IDisposable
     }
 
     public IReadOnlyList<ScanCandidatePartition> Partitions { get; }
+    public Guid GenerationId { get; } = Guid.NewGuid();
+    public int ProcessId { get; internal set; }
+    public DateTime ProcessStartTimeUtc { get; internal set; }
     public long Count => Partitions.Sum(partition => partition.Count);
 
     public IReadOnlyList<ScanCandidate> ReadCandidates(int maximumCount)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        using var lease = AcquireReadLease();
         if (maximumCount <= 0 || Count == 0) return [];
 
         var result = new List<ScanCandidate>((int)Math.Min(Count, maximumCount));
@@ -57,6 +63,7 @@ public sealed class ScanCandidateStore : IDisposable
                 result.Add(new ScanCandidate
                 {
                     Address = address,
+                    ScanGenerationId = GenerationId,
                     FirstBytes = partition.FirstBytes.ToArray(),
                     PreviousBytes = previous,
                     CurrentBytes = current,
@@ -74,8 +81,45 @@ public sealed class ScanCandidateStore : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
+        lock (_lifetime)
+        {
+            _disposeRequested = true;
+            if (_disposed || _readers > 0) return;
+            _disposed = true;
+        }
+        DeleteOwnedStore();
+    }
+
+    internal IDisposable AcquireReadLease()
+    {
+        lock (_lifetime)
+        {
+            ObjectDisposedException.ThrowIf(_disposeRequested, this);
+            _readers++;
+            return new ReadLease(this);
+        }
+    }
+
+    private void ReleaseReadLease()
+    {
+        bool delete;
+        lock (_lifetime)
+        {
+            _readers--;
+            delete = _disposeRequested && !_disposed && _readers == 0;
+            if (delete) _disposed = true;
+        }
+        if (delete) DeleteOwnedStore();
+    }
+
+    private sealed class ReadLease(ScanCandidateStore owner) : IDisposable
+    {
+        private ScanCandidateStore? _owner = owner;
+        public void Dispose() => Interlocked.Exchange(ref _owner, null)?.ReleaseReadLease();
+    }
+
+    private void DeleteOwnedStore()
+    {
         _lease.Dispose();
         try
         {

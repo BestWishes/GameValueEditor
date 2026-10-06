@@ -27,6 +27,7 @@ internal static class ModuleLifecycleRegressionTests
                 {
                     await CheckStaleResultsAsync(root);
                     await CheckRecoveryMarkerAsync(root);
+                    await StabilityRegressionTests.RunAsync(root, args);
                     var paths = args.Where(arg => arg.StartsWith("--verify-module-package=", StringComparison.Ordinal))
                         .Select(arg => arg["--verify-module-package=".Length..]).ToArray();
                     if (paths.Length >= 2) await CheckInstalledLifecycleAsync(root, paths);
@@ -46,7 +47,7 @@ internal static class ModuleLifecycleRegressionTests
         return completion.Task;
     }
 
-    private static MainViewModel CreateViewModel(string root, GameModuleCatalogService catalog, GameAdapterRegistry registry)
+    internal static MainViewModel CreateViewModel(string root, GameModuleCatalogService catalog, GameAdapterRegistry registry)
     {
         var store = new ProfileStore(root);
         var ctor = typeof(MainViewModelServices).GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic).Single();

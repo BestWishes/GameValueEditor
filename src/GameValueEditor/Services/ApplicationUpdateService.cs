@@ -5,6 +5,7 @@ using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using GameValueEditor.Updates;
 
 namespace GameValueEditor.Services;
 
@@ -17,14 +18,17 @@ public sealed class ApplicationUpdateService
     private readonly string _updatesDirectory;
     private readonly string _currentVersion;
     private readonly DownloadTimeoutPolicy _downloadTimeoutPolicy;
+    private readonly string _applicationDirectory;
 
     public ApplicationUpdateService(
         string updatesDirectory,
         HttpClient? httpClient = null,
         string? currentVersion = null,
-        DownloadTimeoutPolicy? downloadTimeoutPolicy = null)
+        DownloadTimeoutPolicy? downloadTimeoutPolicy = null,
+        string? applicationDirectory = null)
     {
         _updatesDirectory = updatesDirectory;
+        _applicationDirectory = Path.GetFullPath(applicationDirectory ?? AppContext.BaseDirectory);
         _currentVersion = currentVersion ?? ApplicationVersion.Current;
         _downloadTimeoutPolicy = downloadTimeoutPolicy ?? DownloadTimeoutPolicy.Default;
         _httpClient = httpClient ?? new HttpClient();
@@ -40,10 +44,12 @@ public sealed class ApplicationUpdateService
     public string LastErrorNoticePath => Path.Combine(_updatesDirectory, "last-update-error.json");
     public string RecoveryRequiredPath => Path.Combine(_updatesDirectory, "recovery-required.json");
 
-    private void EnsureNoRecoveryRequired()
+    internal void EnsureNoRecoveryRequired()
     {
         if (File.Exists(RecoveryRequiredPath))
-            throw new InvalidOperationException($"上次更新的旧文件尚未恢复完整，请先按恢复记录完成恢复：{RecoveryRequiredPath}");
+            throw new ApplicationRecoveryRequiredException($"安装尚未完成，请先按恢复记录手动恢复：{RecoveryRequiredPath}");
+        if (UpdateRecovery.FindIncomplete(_applicationDirectory) is { } journal)
+            throw new ApplicationRecoveryRequiredException($"发现未完成的安装事务，请先使用保留的更新器 --recover 此记录 --app-dir 应用目录：{journal}");
     }
 
     public ApplicationUpdateFailure? TakeLastFailure()
@@ -173,7 +179,8 @@ public sealed class ApplicationUpdateService
                 throw new InvalidOperationException("更新包 SHA-256 校验失败，已拒绝安装。");
             File.Move(temporaryPath, finalPath, true);
 
-            var pending = new PendingApplicationUpdate(target.Version, finalPath, actualHash, DateTime.UtcNow, operation);
+            var pending = new PendingApplicationUpdate(target.Version, finalPath, actualHash, DateTime.UtcNow, operation,
+                new ApplicationUpdateCompatibility(target.MinimumModuleHostApi, target.MaximumModuleHostApi, target.MaximumCatalogSchemaVersion));
             var pendingTemporary = PendingManifestPath + ".tmp";
             await File.WriteAllTextAsync(pendingTemporary, JsonSerializer.Serialize(pending, JsonOptions), cancellationToken);
             File.Move(pendingTemporary, PendingManifestPath, true);
@@ -204,7 +211,7 @@ public sealed class ApplicationUpdateService
         start.ArgumentList.Add("--pid");
         start.ArgumentList.Add(Environment.ProcessId.ToString());
         start.ArgumentList.Add("--app-dir");
-        start.ArgumentList.Add(AppContext.BaseDirectory);
+        start.ArgumentList.Add(_applicationDirectory);
         if (restartApplication) start.ArgumentList.Add("--restart");
         try
         {
@@ -232,22 +239,21 @@ public sealed class ApplicationUpdateService
         if (!actualHash.Equals(pending.Sha256, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("待安装更新包的 SHA-256 已变化，已取消安装。");
 
+        using var moduleMutation = ModuleMutationLock.Acquire(Path.Combine(_applicationDirectory, "data", "modules"));
+        var compatibility = ApplicationUpdateCompatibilityValidator.ResolveVerifiedArchive(archivePath, pending.Version, pending.Compatibility);
+        ApplicationUpdateCompatibilityValidator.Validate(_applicationDirectory, pending.Version, compatibility);
+        var installedUpdater = Path.Combine(_applicationDirectory, "GameValueEditor.Updater.exe");
+        if (!File.Exists(installedUpdater) || (File.GetAttributes(installedUpdater) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("当前安装的可信更新器缺失或为链接，已拒绝使用目标旧版本的更新器；请重新解压当前主程序包。");
+
         Directory.CreateDirectory(_updatesDirectory);
-        var runner = Path.Combine(_updatesDirectory, $"updater-{Guid.NewGuid():N}.exe");
+        var runner = Path.Combine(_updatesDirectory, $"recovery-runner-{Guid.NewGuid():N}.exe");
         try
         {
-            using var archive = ZipFile.OpenRead(archivePath);
-            var updaterEntries = archive.Entries.Where(entry =>
-                    string.Equals(entry.FullName.Replace('\\', '/'), "GameValueEditor.Updater.exe",
-                        StringComparison.OrdinalIgnoreCase) &&
-                    !string.IsNullOrEmpty(entry.Name))
-                .ToList();
-            if (updaterEntries.Count != 1)
-                throw new InvalidOperationException("更新包必须且只能在根目录包含一个 GameValueEditor.Updater.exe。");
-            using var source = updaterEntries[0].Open();
+            using var source = File.OpenRead(installedUpdater);
             using var destination = new FileStream(runner, FileMode.CreateNew, FileAccess.Write, FileShare.None);
             source.CopyTo(destination);
-            if (destination.Length == 0) throw new InvalidOperationException("更新包中的更新程序为空。");
+            if (destination.Length == 0) throw new InvalidOperationException("当前安装的更新程序为空。");
             return runner;
         }
         catch
@@ -261,7 +267,7 @@ public sealed class ApplicationUpdateService
     {
         var store = new ProfileStore();
         var service = new ApplicationUpdateService(store.UpdatesDirectory);
-        if (File.Exists(service.RecoveryRequiredPath)) return false;
+        service.EnsureNoRecoveryRequired();
         return File.Exists(service.PendingManifestPath) && service.LaunchPendingUpdate(true);
     }
 
@@ -280,8 +286,14 @@ public sealed class ApplicationUpdateService
 
     private void CleanupStaleUpdateArtifacts()
     {
+        if (UpdateRecovery.FindIncomplete(_applicationDirectory) is null && Directory.Exists(_applicationDirectory) &&
+            Directory.EnumerateDirectories(_applicationDirectory, ".update-transaction-*", SearchOption.TopDirectoryOnly).Any())
+        {
+            using var mutation = ModuleMutationLock.Acquire(Path.Combine(_applicationDirectory, "data", "modules"));
+            UpdateRecovery.CleanupCommitted(_applicationDirectory);
+        }
         // Recovery may need the original runner, archive and failure record. Preserve all evidence.
-        if (File.Exists(RecoveryRequiredPath)) return;
+        if (File.Exists(RecoveryRequiredPath) || UpdateRecovery.FindIncomplete(_applicationDirectory) is not null) return;
         if (!Directory.Exists(_updatesDirectory)) return;
         try
         {
@@ -307,6 +319,8 @@ public sealed class ApplicationUpdateService
             }
 
             foreach (var file in Directory.EnumerateFiles(_updatesDirectory, "updater-*.exe", SearchOption.TopDirectoryOnly))
+                TryDeleteFile(file);
+            foreach (var file in Directory.EnumerateFiles(_updatesDirectory, "recovery-runner-*.exe", SearchOption.TopDirectoryOnly))
                 TryDeleteFile(file);
             foreach (var file in Directory.EnumerateFiles(_updatesDirectory, "failed-update-*.json", SearchOption.TopDirectoryOnly))
                 TryDeleteFile(file);
@@ -436,6 +450,8 @@ public sealed record PendingApplicationUpdate(
     string ArchivePath,
     string Sha256,
     DateTime DownloadedUtc,
-    ApplicationUpdateOperation Operation = ApplicationUpdateOperation.Update);
+    ApplicationUpdateOperation Operation = ApplicationUpdateOperation.Update,
+    ApplicationUpdateCompatibility? Compatibility = null);
+public sealed class ApplicationRecoveryRequiredException(string message) : InvalidOperationException(message);
 public sealed record ApplicationRollbackBlock(string ModuleId, string DisplayName, string ModuleVersion, string Reason);
 public sealed record ApplicationUpdateFailure(DateTimeOffset FailedAt, string Message, string LogPath);

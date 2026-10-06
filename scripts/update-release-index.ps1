@@ -39,6 +39,13 @@ try {
             throw "$binaryName is not traceable to tag commit $sourceCommit`: $productVersion"
         }
     }
+    $compatibility = Get-Content -LiteralPath (Join-Path $probeRoot 'release-compatibility.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($compatibility.SchemaVersion -ne 1 -or $compatibility.Version -ne $Version -or
+        $compatibility.Compatibility.MinimumModuleHostApi -ne $MinimumModuleHostApi -or
+        $compatibility.Compatibility.MaximumModuleHostApi -ne $MaximumModuleHostApi -or
+        $compatibility.Compatibility.MaximumCatalogSchemaVersion -ne $MaximumCatalogSchemaVersion) {
+        throw 'Release compatibility metadata does not match index capabilities.'
+    }
 }
 finally {
     if (Test-Path -LiteralPath $probeRoot) { Remove-Item -LiteralPath $probeRoot -Recurse -Force }

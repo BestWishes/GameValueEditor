@@ -38,6 +38,14 @@ if (args.Contains("--speed-target", StringComparer.OrdinalIgnoreCase))
 if (args.Contains("--speed-stress-target", StringComparer.OrdinalIgnoreCase))
     return await SpeedStressTarget.RunAsync();
 
+if (args.FirstOrDefault(arg => arg.StartsWith("--profile-save-target=", StringComparison.Ordinal)) is { } profileArgument)
+{
+    Console.WriteLine("READY");
+    await new ProfileStore(profileArgument["--profile-save-target=".Length..]).SaveAsync(
+        new LibraryDocument { Games = [new GameProfile { Name = "child-process" }] });
+    return 0;
+}
+
 static void Assert(bool condition, string message)
 {
     if (!condition) throw new InvalidOperationException(message);
@@ -1046,6 +1054,8 @@ try
         Directory.CreateDirectory(bootstrapVersionDirectory);
         var bootstrapArchive = Path.Combine(bootstrapVersionDirectory, "GameValueEditor-v1.0.0-win-x64.zip");
         var packagedUpdater = Encoding.UTF8.GetBytes("new-updater-from-verified-package");
+        var installedUpdater = Encoding.UTF8.GetBytes("current-trusted-recovery-updater");
+        await File.WriteAllBytesAsync(Path.Combine(bootstrapRoot, "GameValueEditor.Updater.exe"), installedUpdater);
         using (var archive = ZipFile.Open(bootstrapArchive, ZipArchiveMode.Create))
         {
             var updaterEntry = archive.CreateEntry("GameValueEditor.Updater.exe");
@@ -1057,7 +1067,8 @@ try
         }
         var bootstrapHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(bootstrapArchive)));
         await File.WriteAllTextAsync(Path.Combine(bootstrapUpdates, "pending-update.json"),
-            $$"""{"Version":"1.0.0","ArchivePath":"{{bootstrapArchive.Replace("\\", "\\\\")}}","Sha256":"{{bootstrapHash}}","DownloadedUtc":"2026-10-05T00:00:00Z"}""");
+            JsonSerializer.Serialize(new PendingApplicationUpdate("1.0.0", bootstrapArchive, bootstrapHash, DateTime.UtcNow,
+                Compatibility: new GameValueEditor.Updates.ApplicationUpdateCompatibility(2, 7, 5))));
         await File.WriteAllTextAsync(Path.Combine(bootstrapUpdates, "updater-stale.exe"), "old-broken-updater");
         await File.WriteAllTextAsync(Path.Combine(bootstrapUpdates, "failed-update-stale.json"), "{}");
         await File.WriteAllTextAsync(Path.Combine(bootstrapUpdates, "update-error.log"), "retain latest error");
@@ -1066,7 +1077,7 @@ try
         Directory.CreateDirectory(staleVersionDirectory);
         await File.WriteAllTextAsync(Path.Combine(staleVersionDirectory, "old.zip"), "old");
 
-        var bootstrapService = new ApplicationUpdateService(bootstrapUpdates);
+        var bootstrapService = new ApplicationUpdateService(bootstrapUpdates, applicationDirectory: bootstrapRoot);
         Assert(File.Exists(bootstrapArchive) && File.Exists(Path.Combine(bootstrapUpdates, "update-error.log")),
             "Update cleanup removed the active package or latest diagnostic");
         Assert(!File.Exists(Path.Combine(bootstrapUpdates, "updater-stale.exe")) &&
@@ -1075,8 +1086,8 @@ try
                !Directory.Exists(staleVersionDirectory),
             "Update cleanup left stale runners, manifests, extraction directories, or old packages");
         var preparedRunner = bootstrapService.PrepareUpdaterRunner();
-        Assert((await File.ReadAllBytesAsync(preparedRunner)).SequenceEqual(packagedUpdater),
-            "Update bootstrap did not select the updater from the verified target package");
+        Assert((await File.ReadAllBytesAsync(preparedRunner)).SequenceEqual(installedUpdater),
+            "Update bootstrap did not preserve the current trusted recovery updater");
     }
     finally
     {

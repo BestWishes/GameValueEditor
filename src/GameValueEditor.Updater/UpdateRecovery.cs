@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.IO;
 
 internal static class UpdateRecovery
 {
@@ -7,8 +8,67 @@ internal static class UpdateRecovery
     internal static async Task SaveAsync(string journalPath, RecoveryJournal journal)
     {
         var temporary = journalPath + ".tmp";
-        await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(journal));
+        await WriteDurableAsync(temporary, JsonSerializer.SerializeToUtf8Bytes(journal));
         File.Move(temporary, journalPath, true);
+    }
+
+    private static async Task WriteDurableAsync(string path, byte[] bytes)
+    {
+        await using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None,
+            16 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough);
+        await stream.WriteAsync(bytes);
+        await stream.FlushAsync();
+        stream.Flush(true);
+    }
+
+    internal static string? FindIncomplete(string appDirectory)
+    {
+        if (!Directory.Exists(appDirectory)) return null;
+        foreach (var directory in Directory.EnumerateDirectories(appDirectory, ".update-transaction-*", SearchOption.TopDirectoryOnly))
+        {
+            var path = Path.Combine(directory, "recovery.json");
+            try
+            {
+                if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0 ||
+                    (File.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)) return path;
+                var journal = JsonSerializer.Deserialize<RecoveryJournal>(File.ReadAllText(path));
+                if (journal is null || journal.State != "Committed" || !SameApplication(journal.ApplicationDirectory, appDirectory)) return path;
+            }
+            catch { return path; }
+        }
+        return null;
+    }
+
+    private static bool SameApplication(string left, string right) => string.Equals(
+        Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar),
+        Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
+
+    internal static void CleanupCommitted(string appDirectory)
+    {
+        if (!Directory.Exists(appDirectory)) return;
+        foreach (var directory in Directory.EnumerateDirectories(appDirectory, ".update-transaction-*", SearchOption.TopDirectoryOnly))
+        {
+            var path = Path.Combine(directory, "recovery.json");
+            try
+            {
+                if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0 ||
+                    !File.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) continue;
+                var journal = JsonSerializer.Deserialize<RecoveryJournal>(File.ReadAllText(path));
+                if (journal is null || journal.State != "Committed" || !SameApplication(journal.ApplicationDirectory, appDirectory)) continue;
+                ClearMarker(appDirectory, path);
+                Directory.Delete(directory, true);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or ArgumentException) { }
+        }
+    }
+
+    internal static void ClearMarker(string appDirectory, string journalPath)
+    {
+        var markerPath = Path.Combine(appDirectory, "data", "updates", MarkerName);
+        if (!File.Exists(markerPath)) return;
+        var marker = JsonSerializer.Deserialize<RecoveryRequired>(File.ReadAllText(markerPath));
+        if (marker is not null && string.Equals(Path.GetFullPath(marker.JournalPath), Path.GetFullPath(journalPath), StringComparison.OrdinalIgnoreCase))
+            File.Delete(markerPath);
     }
 
     internal static async Task RestoreAsync(string journalPath, string appDirectory)
@@ -24,6 +84,8 @@ internal static class UpdateRecovery
             throw new InvalidOperationException("恢复事务或记录包含符号链接或目录联接。");
         var journal = JsonSerializer.Deserialize<RecoveryJournal>(await File.ReadAllTextAsync(journalPath))
                       ?? throw new InvalidOperationException("恢复记录无效。");
+        if (journal.State != "Applying" || journal.Files is null)
+            throw new InvalidOperationException("该事务已经提交或状态无效，不能恢复成旧文件。");
         if (!string.Equals(Path.GetFullPath(journal.ApplicationDirectory).TrimEnd(Path.DirectorySeparatorChar),
                 appRoot, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("恢复记录属于其他应用目录。");
@@ -41,13 +103,7 @@ internal static class UpdateRecovery
             else if (File.Exists(file.Destination))
                 await RetryAsync(() => File.Delete(file.Destination));
         }
-        var markerPath = Path.Combine(appRoot, "data", "updates", MarkerName);
-        if (File.Exists(markerPath))
-        {
-            var marker = JsonSerializer.Deserialize<RecoveryRequired>(await File.ReadAllTextAsync(markerPath));
-            if (marker is not null && string.Equals(Path.GetFullPath(marker.JournalPath),
-                    Path.GetFullPath(journalPath), StringComparison.OrdinalIgnoreCase)) File.Delete(markerPath);
-        }
+        ClearMarker(appRoot, journalPath);
         Directory.Delete(transaction, true);
     }
 
@@ -56,12 +112,12 @@ internal static class UpdateRecovery
         var updates = Path.Combine(appDirectory, "data", "updates");
         Directory.CreateDirectory(updates);
         var path = Path.Combine(updates, MarkerName);
-        await File.WriteAllTextAsync(path + ".tmp", JsonSerializer.Serialize(
+        await WriteDurableAsync(path + ".tmp", JsonSerializer.SerializeToUtf8Bytes(
             new RecoveryRequired(Path.GetFullPath(journalPath), Environment.ProcessPath ?? string.Empty)));
         File.Move(path + ".tmp", path, true);
     }
 
-    private static string ResolveSafe(string root, string relative)
+    internal static string ResolveSafe(string root, string relative)
     {
         var prefix = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
         var path = Path.GetFullPath(Path.Combine(root, relative));
@@ -94,7 +150,7 @@ internal static class UpdateRecovery
 }
 
 internal sealed record RecoveryFile(string RelativePath, bool HadOriginal);
-internal sealed record RecoveryJournal(string ApplicationDirectory, List<RecoveryFile> Files);
+internal sealed record RecoveryJournal(string ApplicationDirectory, List<RecoveryFile> Files, string State = "Applying");
 internal sealed record RecoveryRequired(string JournalPath, string RunnerPath);
 internal sealed class UpdateRecoveryRequiredException(string journalPath, Exception install, Exception recovery)
     : AggregateException($"更新失败且旧文件尚未恢复完整。备份与恢复记录已保留：{journalPath}；关闭程序并释放占用后，可运行更新器 --recover 此记录 --app-dir 应用目录。", install, recovery)

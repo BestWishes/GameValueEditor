@@ -46,6 +46,7 @@ function New-UpdateFixture([string]$name, [bool]$includeLockedFile) {
         ArchivePath = $archivePath
         Sha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
         DownloadedUtc = [DateTime]::UtcNow
+        Compatibility = @{ MinimumModuleHostApi = 2; MaximumModuleHostApi = 7; MaximumCatalogSchemaVersion = 5 }
     }
     $pending | ConvertTo-Json | Set-Content -LiteralPath $pendingPath -Encoding utf8NoBOM
     return [pscustomobject]@{
@@ -173,6 +174,71 @@ try {
         throw 'Explicit recovery did not restore old files, clear recovery state and preserve user data.'
     }
 
+    # Simulate power loss after one replacement, not a caught installation error.
+    $interrupted = New-UpdateFixture 'forced-interruption' $true
+    $interruptLock = [IO.File]::Open((Join-Path $interrupted.AppDirectory 'zz-locked.dll'),
+        [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    try {
+        $interruptedProcess = Start-Updater $resolvedUpdater $interrupted
+        $deadline = [DateTime]::UtcNow.AddSeconds(6)
+        $firstChanged = $false
+        while ([DateTime]::UtcNow -lt $deadline) {
+            try { $firstChanged = (Get-Content -LiteralPath (Join-Path $interrupted.AppDirectory 'GameValueEditor.exe') -Raw).Trim() -eq 'new-app' } catch { }
+            if ($firstChanged) { break }
+            Start-Sleep -Milliseconds 20
+        }
+        if (-not $firstChanged) { throw 'Interruption did not reach a replaced file.' }
+        $interruptedProcess.Kill($true)
+        $interruptedProcess.WaitForExit()
+    }
+    finally { $interruptLock.Dispose() }
+    $interruptTransactions = @(Get-ChildItem -LiteralPath $interrupted.AppDirectory -Directory -Filter '.update-transaction-*')
+    if ($interruptTransactions.Count -ne 1 -or (Test-Path -LiteralPath $interrupted.PendingPath) -or
+        -not (Test-Path -LiteralPath (Join-Path $interrupted.UpdatesDirectory 'recovery-required.json'))) {
+        throw 'Interruption lost the durable gate or retained an automatically installable pending manifest.'
+    }
+    $interruptJournal = Join-Path $interruptTransactions[0].FullName 'recovery.json'
+    if ((Get-Content -LiteralPath $interruptJournal -Raw | ConvertFrom-Json).State -ne 'Applying') { throw 'Interrupted state is not Applying.' }
+    $interruptRestore = Start-Process -FilePath $resolvedUpdater -WindowStyle Hidden -PassThru -ArgumentList @(
+        '--recover', $interruptJournal, '--app-dir', $interrupted.AppDirectory)
+    if ((Wait-Updater $interruptRestore) -ne 0 -or
+        (Get-Content -LiteralPath (Join-Path $interrupted.AppDirectory 'GameValueEditor.exe') -Raw).Trim() -ne 'old-app' -or
+        (Test-Path -LiteralPath $interruptJournal)) { throw 'Interrupted transaction did not recover old files.' }
+
+    $incompatible = New-UpdateFixture 'apply-time-incompatible-module' $false
+    $moduleRoot = Join-Path $incompatible.AppDirectory 'data/modules'
+    $modulePackage = Join-Path $moduleRoot 'packages/game.fixture/1.0.0'
+    New-Item -ItemType Directory -Path $modulePackage -Force | Out-Null
+    @{ SchemaVersion = 1; Modules = @(@{ Id = 'game.fixture'; Version = '1.0.0' }) } |
+        ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $moduleRoot 'installed.json') -Encoding utf8NoBOM
+    @{ id = 'game.fixture'; version = '1.0.0'; displayName = 'Fixture'; hostApiVersion = 8; minimumHostVersion = '99.0.0' } |
+        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $modulePackage 'module.json') -Encoding utf8NoBOM
+    if ((Wait-Updater (Start-Updater $resolvedUpdater $incompatible)) -eq 0 -or
+        (Get-Content -LiteralPath (Join-Path $incompatible.AppDirectory 'GameValueEditor.exe') -Raw).Trim() -ne 'old-app' -or
+        @(Get-ChildItem -LiteralPath $incompatible.AppDirectory -Directory -Filter '.update-transaction-*').Count -ne 0) {
+        throw 'Apply-time incompatibility did not stop before application mutation.'
+    }
+
+    # The old host did not write Compatibility. The verified new ZIP supplies it.
+    $legacy = New-UpdateFixture 'legacy-host-upgrade' $false
+    $legacyPending = Get-Content -LiteralPath $legacy.PendingPath -Raw | ConvertFrom-Json
+    $legacyPending.PSObject.Properties.Remove('Compatibility')
+    $archive = [IO.Compression.ZipFile]::Open($legacy.ArchivePath, [IO.Compression.ZipArchiveMode]::Update)
+    try {
+        $entry = $archive.CreateEntry('release-compatibility.json')
+        $writer = [IO.StreamWriter]::new($entry.Open())
+        try { $writer.Write((@{ SchemaVersion = 1; Version = '99.0.0'; Compatibility = @{
+            MinimumModuleHostApi = 2; MaximumModuleHostApi = 7; MaximumCatalogSchemaVersion = 5 } } | ConvertTo-Json -Depth 5)) }
+        finally { $writer.Dispose() }
+    }
+    finally { $archive.Dispose() }
+    $legacyPending.Sha256 = (Get-FileHash -LiteralPath $legacy.ArchivePath -Algorithm SHA256).Hash
+    $legacyPending | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $legacy.PendingPath -Encoding utf8NoBOM
+    if ((Wait-Updater (Start-Updater $resolvedUpdater $legacy)) -ne 0 -or
+        (Get-Content -LiteralPath (Join-Path $legacy.AppDirectory 'GameValueEditor.exe') -Raw).Trim() -ne 'new-app') {
+        throw 'Legacy host could not upgrade using verified archive compatibility metadata.'
+    }
+
     foreach ($unsafePath in @('../outside.txt', 'data/library.json', 'C:/outside.txt')) {
         $invalid = New-UpdateFixture ("invalid-" + [Guid]::NewGuid().ToString('N')) $false
         $invalidTransaction = Join-Path $invalid.AppDirectory '.update-transaction-invalid'
@@ -193,7 +259,7 @@ try {
             throw 'Unsafe recovery journal changed files or deleted recovery evidence.'
         }
     }
-    Write-Host "Updater sandbox tests passed: temporary lock, rollback, failed recovery backup preservation, repeat failure, explicit recovery and unsafe journal rejection."
+    Write-Host "Updater sandbox tests passed: temporary lock, rollback, repeated failed recovery, explicit recovery, forced interruption, apply-time compatibility, legacy upgrade and unsafe journal rejection."
 }
 finally {
     if ($sandboxRoot.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase) -and

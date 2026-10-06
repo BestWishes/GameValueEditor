@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidatePattern('^(0|[1-9][0-9]*)\.[0-9]\.[0-9]$')] [string]$Version = "0.4.6"
+    [ValidatePattern('^(0|[1-9][0-9]*)\.[0-9]\.[0-9]$')] [string]$Version = "0.4.7"
 )
 
 $ErrorActionPreference = "Stop"
@@ -84,6 +84,9 @@ Copy-Item -LiteralPath (Join-Path $updaterPublishDir "GameValueEditor.Updater.ex
 Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $packageDir
 Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination $packageDir
 Copy-Item -LiteralPath (Join-Path $repoRoot "SECURITY.md") -Destination $packageDir
+@{ SchemaVersion = 1; Version = $Version; Compatibility = @{
+    MinimumModuleHostApi = 2; MaximumModuleHostApi = 7; MaximumCatalogSchemaVersion = 5
+} } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $packageDir 'release-compatibility.json') -Encoding utf8NoBOM
 
 if (Test-Path -LiteralPath $archivePath) {
     Remove-Item -LiteralPath $archivePath -Force

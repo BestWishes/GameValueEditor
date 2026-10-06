@@ -10,7 +10,11 @@
     <AssemblyName>GameValueEditor.Updater</AssemblyName>
     <RootNamespace>GameValueEditor.Updater</RootNamespace>
     <Product>肝肾大圣更新程序</Product>
-    <Version>0.4.6</Version>
+    <Version>0.4.7</Version>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\GameValueEditor\Services\Updates\ApplicationUpdateCompatibility.cs" Link="ApplicationUpdateCompatibility.cs" />
+  </ItemGroup>
 
 </Project>

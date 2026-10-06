@@ -223,8 +223,8 @@ internal static partial class ModuleCompatibilityDiagnosticsService
         if (adapter is IGameEditorPageFactoryProvider)
         {
             foreach (var editor in adapter.Editors.OrderBy(editor => editor.Order))
-                Add(items, "页面兼容", editor.DisplayName, GameCompatibilityDiagnosticStatus.Passed,
-                    "模块自有 WPF 页面将由 Host API 6 页面工厂创建。");
+                Add(items, "页面注册", editor.DisplayName, GameCompatibilityDiagnosticStatus.Information,
+                    "已注册模块自有页面；注册不等于当前构建可用，请查看模块扩展诊断。未在诊断中执行页面读写。");
             return;
         }
 
