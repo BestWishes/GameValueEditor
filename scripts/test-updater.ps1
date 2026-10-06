@@ -16,7 +16,7 @@ function Resolve-Updater {
     }
 
     $project = Join-Path $repoRoot "src\GameValueEditor.Updater\GameValueEditor.Updater.csproj"
-    dotnet build $project -c Release | Out-Host
+    dotnet build $project -c Release -p:Platform=x64 | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "Updater build failed with code $LASTEXITCODE." }
     return (Resolve-Path -LiteralPath (Join-Path $repoRoot "src\GameValueEditor.Updater\bin\x64\Release\net8.0-windows\GameValueEditor.Updater.exe")).Path
 }
@@ -128,7 +128,72 @@ try {
     $transactionResidue = @(Get-ChildItem -LiteralPath $persistent.AppDirectory -Directory -Filter ".update-transaction-*" -ErrorAction Stop)
     if ($transactionResidue.Count -ne 0) { throw "Updater left transaction directories after rollback." }
 
-    Write-Host "Updater sandbox smoke tests passed: temporary lock retry and persistent lock rollback."
+    $recovery = New-UpdateFixture "recovery-lock" $true
+    $recoveryExe = Join-Path $recovery.AppDirectory "GameValueEditor.exe"
+    $failureLock = [IO.File]::Open((Join-Path $recovery.AppDirectory "zz-locked.dll"),
+        [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    $restoreLock = $null
+    try {
+        $recoveryProcess = Start-Updater $resolvedUpdater $recovery
+        $deadline = [DateTime]::UtcNow.AddSeconds(6)
+        $replaced = $false
+        while ([DateTime]::UtcNow -lt $deadline) {
+            try { $replaced = (Get-Content -LiteralPath $recoveryExe -Raw).Trim() -eq 'new-app' } catch { }
+            if ($replaced) { break }
+            Start-Sleep -Milliseconds 20
+        }
+        if (-not $replaced) { throw 'Recovery fixture did not reach the first replaced file.' }
+        $restoreLock = [IO.File]::Open($recoveryExe, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        if ((Wait-Updater $recoveryProcess 40000) -eq 0) { throw 'Recovery lock unexpectedly succeeded.' }
+        $transactions = @(Get-ChildItem -LiteralPath $recovery.AppDirectory -Directory -Filter '.update-transaction-*')
+        if ($transactions.Count -ne 1) { throw 'Failed recovery did not preserve its transaction directory.' }
+        $journalPath = Join-Path $transactions[0].FullName 'recovery.json'
+        $markerPath = Join-Path $recovery.UpdatesDirectory 'recovery-required.json'
+        $backupExe = Join-Path $transactions[0].FullName 'backup\GameValueEditor.exe'
+        if (-not (Test-Path -LiteralPath $journalPath) -or -not (Test-Path -LiteralPath $markerPath) -or
+            (Get-Content -LiteralPath $backupExe -Raw).Trim() -ne 'old-app') {
+            throw 'Failed recovery lost its journal, marker or original application backup.'
+        }
+        $retry = Start-Process -FilePath $resolvedUpdater -WindowStyle Hidden -PassThru -ArgumentList @(
+            '--recover', $journalPath, '--app-dir', $recovery.AppDirectory)
+        if ((Wait-Updater $retry 20000) -eq 0 -or -not (Test-Path -LiteralPath $backupExe)) {
+            throw 'Repeated locked recovery did not preserve the original backup.'
+        }
+    }
+    finally {
+        if ($restoreLock) { $restoreLock.Dispose() }
+        $failureLock.Dispose()
+    }
+    $restore = Start-Process -FilePath $resolvedUpdater -WindowStyle Hidden -PassThru -ArgumentList @(
+        '--recover', $journalPath, '--app-dir', $recovery.AppDirectory)
+    if ((Wait-Updater $restore 20000) -ne 0 -or
+        (Get-Content -LiteralPath $recoveryExe -Raw).Trim() -ne 'old-app' -or
+        (Test-Path -LiteralPath $markerPath) -or (Test-Path -LiteralPath $journalPath) -or
+        (Get-Content -LiteralPath (Join-Path $recovery.AppDirectory 'data\library.json') -Raw).Trim() -ne 'preserve-me') {
+        throw 'Explicit recovery did not restore old files, clear recovery state and preserve user data.'
+    }
+
+    foreach ($unsafePath in @('../outside.txt', 'data/library.json', 'C:/outside.txt')) {
+        $invalid = New-UpdateFixture ("invalid-" + [Guid]::NewGuid().ToString('N')) $false
+        $invalidTransaction = Join-Path $invalid.AppDirectory '.update-transaction-invalid'
+        $invalidBackup = Join-Path $invalidTransaction 'backup'
+        New-Item -ItemType Directory -Path $invalidBackup -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $invalidBackup 'GameValueEditor.exe') -Value 'backup-app' -Encoding utf8NoBOM
+        $invalidJournal = Join-Path $invalidTransaction 'recovery.json'
+        @{ ApplicationDirectory = $invalid.AppDirectory; Files = @(
+            @{ RelativePath = 'GameValueEditor.exe'; HadOriginal = $true },
+            @{ RelativePath = $unsafePath; HadOriginal = $false }) } |
+            ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $invalidJournal -Encoding utf8NoBOM
+        $invalidRestore = Start-Process -FilePath $resolvedUpdater -WindowStyle Hidden -PassThru -ArgumentList @(
+            '--recover', $invalidJournal, '--app-dir', $invalid.AppDirectory)
+        if ((Wait-Updater $invalidRestore) -eq 0 -or
+            (Get-Content -LiteralPath (Join-Path $invalid.AppDirectory 'GameValueEditor.exe') -Raw).Trim() -ne 'old-app' -or
+            (Get-Content -LiteralPath (Join-Path $invalid.AppDirectory 'data/library.json') -Raw).Trim() -ne 'preserve-me' -or
+            -not (Test-Path -LiteralPath $invalidJournal)) {
+            throw 'Unsafe recovery journal changed files or deleted recovery evidence.'
+        }
+    }
+    Write-Host "Updater sandbox tests passed: temporary lock, rollback, failed recovery backup preservation, repeat failure, explicit recovery and unsafe journal rejection."
 }
 finally {
     if ($sandboxRoot.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase) -and

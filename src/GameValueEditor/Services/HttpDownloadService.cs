@@ -55,6 +55,8 @@ public static class HttpDownloadService
 
         using var totalTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         totalTimeout.CancelAfter(policy.TotalTimeout);
+        var downloadStarted = false;
+        var completed = false;
         try
         {
             using var response = await httpClient.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead,
@@ -69,6 +71,7 @@ public static class HttpDownloadService
             await using var source = await response.Content.ReadAsStreamAsync(totalTimeout.Token);
             await using var target = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None,
                 BufferSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            downloadStarted = true;
             var buffer = new byte[BufferSize];
             var received = 0L;
             var lastReportedBytes = 0L;
@@ -106,16 +109,20 @@ public static class HttpDownloadService
             if (expectedLength > 0 && received != expectedLength)
                 throw new InvalidOperationException("下载文件大小与发布记录不一致。");
             progress?.Report(new DownloadProgressSnapshot(received, totalLength ?? received));
+            completed = true;
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested &&
                                                  totalTimeout.IsCancellationRequested)
         {
             throw new TimeoutException($"下载超过 {policy.TotalTimeout.TotalMinutes:0} 分钟，已自动停止。");
         }
-        catch
+        finally
         {
-            if (File.Exists(destinationPath)) File.Delete(destinationPath);
-            throw;
+            if (downloadStarted && !completed)
+            {
+                try { if (File.Exists(destinationPath)) File.Delete(destinationPath); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
+            }
         }
     }
 }

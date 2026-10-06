@@ -4,6 +4,21 @@ using System.Security.Cryptography;
 using System.Text.Json;
 
 var options = ParseArguments(args);
+if (options.TryGetValue("recover", out var recoveryPath))
+{
+    if (!options.TryGetValue("app-dir", out var recoveryApplication)) return 2;
+    try
+    {
+        await UpdateRecovery.RestoreAsync(recoveryPath, recoveryApplication);
+        return 0;
+    }
+    catch (Exception exception)
+    {
+        try { await File.WriteAllTextAsync(Path.Combine(Path.GetDirectoryName(recoveryPath)!, "recovery-error.log"), exception.ToString()); }
+        catch { }
+        return 1;
+    }
+}
 if (!options.TryGetValue("pending", out var pendingPath) ||
     !options.TryGetValue("pid", out var pidText) ||
     !options.TryGetValue("app-dir", out var appDirectory) ||
@@ -15,6 +30,8 @@ var errorPath = Path.Combine(updatesDirectory, "update-error.log");
 var errorNoticePath = Path.Combine(updatesDirectory, "last-update-error.json");
 try
 {
+    if (File.Exists(Path.Combine(updatesDirectory, UpdateRecovery.MarkerName)))
+        throw new InvalidOperationException("上次更新尚需恢复旧文件，请先使用保留的恢复记录完成恢复。");
     var pending = JsonSerializer.Deserialize<PendingUpdate>(await File.ReadAllTextAsync(pendingPath))
                   ?? throw new InvalidOperationException("待安装更新记录无效。");
     if (!File.Exists(pending.ArchivePath)) throw new FileNotFoundException("已下载的更新包不存在。", pending.ArchivePath);
@@ -48,7 +65,7 @@ try
     }
     finally
     {
-        if (Directory.Exists(extractionDirectory)) Directory.Delete(extractionDirectory, true);
+        TryDeleteDirectory(extractionDirectory);
     }
 
     File.Delete(pendingPath);
@@ -88,7 +105,8 @@ catch (Exception exception)
     catch
     {
     }
-    if (restart)
+    if (restart && exception is not UpdateRecoveryRequiredException &&
+        !File.Exists(Path.Combine(updatesDirectory, UpdateRecovery.MarkerName)))
     {
         var executable = Path.Combine(appDirectory, "GameValueEditor.exe");
         if (File.Exists(executable)) _ = Process.Start(new ProcessStartInfo(executable) { UseShellExecute = true });
@@ -105,6 +123,10 @@ static async Task InstallUpdateAsync(string extractionDirectory, string appDirec
     var stagedRoot = Path.Combine(transactionDirectory, "staged");
     var backupRoot = Path.Combine(transactionDirectory, "backup");
     var files = new List<UpdateFile>();
+    var retainTransaction = false;
+    var journalPath = Path.Combine(transactionDirectory, "recovery.json");
+    var journal = new RecoveryJournal(Path.GetFullPath(appDirectory), []);
+    var hasSavedJournal = false;
     Directory.CreateDirectory(stagedRoot);
     try
     {
@@ -123,7 +145,6 @@ static async Task InstallUpdateAsync(string extractionDirectory, string appDirec
             files.Add(new UpdateFile(relative, destination, staged, backup, File.Exists(destination)));
         }
 
-        var applied = new List<UpdateFile>();
         try
         {
             foreach (var file in files)
@@ -135,37 +156,32 @@ static async Task InstallUpdateAsync(string extractionDirectory, string appDirec
                     await RetryFileOperationAsync(
                         () => File.Copy(file.Destination, file.Backup, true), file.Destination, "备份");
                 }
+                journal.Files.Add(new RecoveryFile(file.RelativePath, file.HadOriginal));
+                await UpdateRecovery.SaveAsync(journalPath, journal);
+                hasSavedJournal = true;
                 await RetryFileOperationAsync(
                     () => File.Move(file.Staged, file.Destination, true), file.Destination, "替换");
-                applied.Add(file);
             }
         }
         catch (Exception installException)
         {
-            Exception? rollbackException = null;
-            foreach (var file in applied.AsEnumerable().Reverse())
+            try
             {
-                try
-                {
-                    if (file.HadOriginal)
-                        await RetryFileOperationAsync(
-                            () => File.Move(file.Backup, file.Destination, true), file.Destination, "回滚");
-                    else if (File.Exists(file.Destination))
-                        await RetryFileOperationAsync(() => File.Delete(file.Destination), file.Destination, "回滚删除");
-                }
-                catch (Exception exception)
-                {
-                    rollbackException ??= exception;
-                }
+                if (hasSavedJournal) await UpdateRecovery.RestoreAsync(journalPath, appDirectory);
             }
-            if (rollbackException is not null)
-                throw new AggregateException("应用更新失败，并且回滚部分文件时也发生错误。", installException, rollbackException);
+            catch (Exception recoveryException)
+            {
+                retainTransaction = true;
+                try { await UpdateRecovery.RecordRequiredAsync(appDirectory, journalPath); }
+                catch (Exception noticeException) { recoveryException = new AggregateException(recoveryException, noticeException); }
+                throw new UpdateRecoveryRequiredException(journalPath, installException, recoveryException);
+            }
             throw;
         }
     }
     finally
     {
-        TryDeleteDirectory(transactionDirectory);
+        if (!retainTransaction) TryDeleteDirectory(transactionDirectory);
     }
 }
 

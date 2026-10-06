@@ -45,6 +45,7 @@ static void Assert(bool condition, string message)
 
 try
 {
+    await ModuleLifecycleRegressionTests.RunAsync(args);
     Assert(MemoryValueCodec.TryParse("123456", MemoryValueType.Int32, out var integerBytes), "Int32 parse failed");
     Assert(MemoryValueCodec.Format(integerBytes, MemoryValueType.Int32) == "123456", "Int32 roundtrip failed");
     Assert(MemoryValueCodec.TryParse("1.95", MemoryValueType.Double, out var doubleBytes), "Double parse failed");
@@ -1019,6 +1020,18 @@ try
         {
         }
         Assert(!File.Exists(stalledDestination), "Timed-out download left a partial file behind");
+        Assert(DownloadTimeoutPolicy.Default.InactivityTimeout == TimeSpan.FromSeconds(60) &&
+               DownloadTimeoutPolicy.Default.TotalTimeout == TimeSpan.FromMinutes(20),
+            "Default inactivity or total download timeout changed");
+        try
+        {
+            await HttpDownloadService.DownloadToFileAsync(stalledClient, "https://example.invalid/total-stalled",
+                stalledDestination, 0, timeoutPolicy: new DownloadTimeoutPolicy(
+                    TimeSpan.FromMilliseconds(80), TimeSpan.FromSeconds(2)));
+            throw new InvalidOperationException("Total download timeout unexpectedly completed");
+        }
+        catch (TimeoutException exception) when (exception.Message.Contains("已自动停止", StringComparison.Ordinal)) { }
+        Assert(!File.Exists(stalledDestination), "Total timed-out download left a partial file behind");
 
         Directory.CreateDirectory(Path.GetDirectoryName(updateService.LastErrorNoticePath)!);
         await File.WriteAllTextAsync(updateService.LastErrorNoticePath,

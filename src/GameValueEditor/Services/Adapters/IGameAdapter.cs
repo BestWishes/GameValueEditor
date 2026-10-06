@@ -18,6 +18,9 @@ public sealed class GameAdapterRegistry : IDisposable
     private readonly List<ModuleLoadContext> _loadContexts = [];
     private readonly List<string> _shadowDirectories = [];
     private readonly List<string> _loadErrors = [];
+    private readonly HashSet<string> _restartRequiredIds = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _nonCollectibleModuleIds = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _loadedVersions = new(StringComparer.Ordinal);
 
     public GameAdapterRegistry(string? modulesDirectory = null)
     {
@@ -30,15 +33,23 @@ public sealed class GameAdapterRegistry : IDisposable
 
     public void Reload()
     {
-        UnloadAll();
         _loadErrors.Clear();
         var installedPath = Path.Combine(_modulesDirectory, "installed.json");
-        if (!File.Exists(installedPath)) return;
         try
         {
-            var document = JsonSerializer.Deserialize<InstalledModuleDocument>(File.ReadAllText(installedPath),
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            foreach (var module in document?.Modules ?? [])
+            var document = File.Exists(installedPath)
+                ? JsonSerializer.Deserialize<InstalledModuleDocument>(File.ReadAllText(installedPath),
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                : null;
+            var records = document?.Modules ?? [];
+            foreach (var adapter in _adapters.ToArray())
+            {
+                var record = records.FirstOrDefault(item => string.Equals(item.Id, adapter.Id, StringComparison.Ordinal));
+                if (record is not null && _loadedVersions.GetValueOrDefault(adapter.Id) == record.Version) continue;
+                if (_nonCollectibleModuleIds.Contains(adapter.Id)) DeactivateUntilRestart(adapter.Id);
+                else Deactivate(adapter.Id);
+            }
+            foreach (var module in records)
             {
                 try { LoadModule(module); }
                 catch (Exception exception) { _loadErrors.Add($"{module.Id} v{module.Version}: {exception.Message}"); }
@@ -63,8 +74,21 @@ public sealed class GameAdapterRegistry : IDisposable
         string.Equals(adapter.Id, id, StringComparison.Ordinal) ||
         adapter.LegacyIds.Any(alias => string.Equals(alias, id, StringComparison.Ordinal))) > 0;
 
+    public bool RequiresRestart(string id) =>
+        _restartRequiredIds.Contains(id) || _nonCollectibleModuleIds.Contains(id);
+
+    public bool IsRestartRequired(string id) => _restartRequiredIds.Contains(id);
+
+    public void DeactivateUntilRestart(string id)
+    {
+        var canonicalId = FindById(id)?.Id ?? id;
+        _restartRequiredIds.Add(canonicalId);
+        Deactivate(canonicalId);
+    }
+
     public void LoadInstalledModule(string id)
     {
+        if (_restartRequiredIds.Contains(id)) return;
         if (FindById(id) is not null) return;
         var installedPath = Path.Combine(_modulesDirectory, "installed.json");
         if (!File.Exists(installedPath)) throw new InvalidOperationException("模块安装记录不存在。");
@@ -115,6 +139,13 @@ public sealed class GameAdapterRegistry : IDisposable
 
     private void LoadModule(InstalledModuleRecord record)
     {
+        if (_restartRequiredIds.Contains(record.Id)) return;
+        if (FindById(record.Id) is not null) return;
+        if (_nonCollectibleModuleIds.Contains(record.Id))
+        {
+            DeactivateUntilRestart(record.Id);
+            return;
+        }
         if (!IsSafePathSegment(record.Id) || !IsSafePathSegment(record.Version)) return;
         var packagesRoot = Path.GetFullPath(Path.Combine(_modulesDirectory, "packages")) + Path.DirectorySeparatorChar;
         var packageDirectory = Path.GetFullPath(Path.Combine(packagesRoot, record.Id, record.Version));
@@ -173,6 +204,8 @@ public sealed class GameAdapterRegistry : IDisposable
             }
             if (loadedAdapters.Count > 0)
             {
+                _loadedVersions[record.Id] = record.Version;
+                if (!context.IsCollectible) _nonCollectibleModuleIds.Add(record.Id);
                 _loadContexts.Add(context);
                 _shadowDirectories.Add(shadowDirectory);
                 context = null;

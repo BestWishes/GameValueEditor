@@ -10,7 +10,7 @@
     <AssemblyName>GameValueEditor.Updater</AssemblyName>
     <RootNamespace>GameValueEditor.Updater</RootNamespace>
     <Product>肝肾大圣更新程序</Product>
-    <Version>0.4.5</Version>
+    <Version>0.4.6</Version>
   </PropertyGroup>
 
 </Project>

@@ -104,6 +104,8 @@ public sealed class MainViewModel : ObservableObject
     private string _moduleStatusText = "尚未检查当前游戏的专属模块";
     private bool _isModuleControlBlocked;
     private GameModuleCheckResult? _moduleCheckResult;
+    private long _moduleViewGeneration;
+    private ModuleOperationContext? _moduleCheckContext;
     private bool _moduleRestartRequired;
     private string _applicationUpdateStatusText = string.Empty;
     private string _applicationUpdateActionText = "检查更新";
@@ -263,6 +265,7 @@ public sealed class MainViewModel : ObservableObject
         private set
         {
             if (!SetProperty(ref _attachedProcess, value)) return;
+            ResetModuleCheckState();
             OnPropertyChanged(nameof(HasAttachedProcess));
             OnPropertyChanged(nameof(CanAccelerate));
             OnPropertyChanged(nameof(CanRestoreSpeed));
@@ -444,12 +447,13 @@ public sealed class MainViewModel : ObservableObject
     public bool CanCheckGameModules => !_isModuleControlBlocked &&
         ((AttachedProcess is not null && _attachedFingerprint is not null) ||
          (SelectedGame is not null && SelectedVersion is not null));
-    public bool CanInstallGameModule => !_isModuleControlBlocked && _moduleCheckResult?.Availability is
-        GameModuleAvailability.Available or GameModuleAvailability.UpdateAvailable;
+    public bool CanInstallGameModule => !_isModuleControlBlocked && IsModuleContextCurrent(_moduleCheckContext) &&
+        _moduleCheckResult?.Availability is GameModuleAvailability.Available or GameModuleAvailability.UpdateAvailable;
     public string ModuleInstallActionText => _moduleCheckResult?.Availability == GameModuleAvailability.Available
         ? _moduleCheckResult.IsExactBuildMatch ? "可下载" : "下载后验证"
         : _moduleCheckResult?.IsExactBuildMatch == false ? "更新后验证" : "可更新";
-    public bool CanRollbackGameModule => !_isModuleControlBlocked && _moduleCheckResult?.RollbackModule is not null;
+    public bool CanRollbackGameModule => !_isModuleControlBlocked && IsModuleContextCurrent(_moduleCheckContext) &&
+        _moduleCheckResult?.RollbackModule is not null;
     public string ModuleRollbackActionText => _moduleCheckResult?.RollbackModule is { } rollback
         ? $"回退到 v{rollback.Version}"
         : "无可回退版本";
@@ -796,9 +800,10 @@ public sealed class MainViewModel : ObservableObject
         finally { ReleaseLibraryControlsAfter(cooldown); }
     }
 
-    private async Task<GameProfile> AddCurrentProcessToLibraryCoreAsync(string userName, ProcessItem process)
+    private async Task<GameProfile> AddCurrentProcessToLibraryCoreAsync(string userName, ProcessItem process,
+        VersionFingerprint? existingFingerprint = null)
     {
-        var fingerprint = await _fingerprintService.CreateAsync(process.ExecutablePath);
+        var fingerprint = existingFingerprint ?? await _fingerprintService.CreateAsync(process.ExecutablePath);
         _attachedFingerprint = fingerprint;
         SetActiveAdapter(_adapterRegistry.Resolve(process, fingerprint));
         if (_activeSession is not null)
@@ -1700,6 +1705,7 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task CheckGameModuleUpdatesAsync()
     {
+        var context = CaptureModuleContext();
         var game = SelectedGame;
         var version = SelectedVersion;
         var process = AttachedProcess;
@@ -1716,12 +1722,15 @@ public sealed class MainViewModel : ObservableObject
             var result = process is not null && fingerprint is not null
                 ? await _moduleCatalogService.CheckAsync(process.ProcessName, fingerprint)
                 : await _moduleCatalogService.CheckAsync(game!, version!);
+            if (!IsModuleContextCurrent(context)) return;
+            _moduleCheckContext = context;
             _moduleCheckResult = result;
             ModuleStatusText = result.StatusText;
             NotifyModuleControls();
         }
         catch (HttpRequestException exception) when (exception.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
+            if (!IsModuleContextCurrent(context)) return;
             _moduleCheckResult = null;
             ModuleStatusText = "检查失败：服务器暂未发布专属模块清单。";
             NotifyModuleControls();
@@ -1729,6 +1738,7 @@ public sealed class MainViewModel : ObservableObject
         }
         catch (Exception exception)
         {
+            if (!IsModuleContextCurrent(context)) return;
             _moduleCheckResult = null;
             ModuleStatusText = $"检查失败：{exception.Message}";
             NotifyModuleControls();
@@ -1742,6 +1752,7 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task InstallAvailableGameModuleAsync()
     {
+        var context = RequireModuleCheckContext();
         var module = _moduleCheckResult?.RemoteModule
                      ?? throw new InvalidOperationException("请先点击“检查新有”。");
         var game = SelectedGame;
@@ -1756,16 +1767,20 @@ public sealed class MainViewModel : ObservableObject
         _isModuleControlBlocked = true;
         NotifyModuleControls();
         var cooldown = Task.Delay(TimeSpan.FromSeconds(3));
+        var downloadInProgress = true;
         try
         {
             ModuleStatusText = $"正在下载并校验 {module.DisplayName} v{module.Version}…";
             var progress = new Progress<DownloadProgressSnapshot>(snapshot =>
             {
-                ModuleStatusText = $"正在下载 {module.DisplayName} v{module.Version} · {snapshot.DisplayText}";
-                StatusText = ModuleStatusText;
+                if (!downloadInProgress) return;
+                var message = $"正在下载 {module.DisplayName} v{module.Version} · {snapshot.DisplayText}";
+                if (IsModuleContextCurrent(context)) ModuleStatusText = message;
+                StatusText = message;
             });
             await _moduleCatalogService.InstallAsync(module, progress);
-            var replacementRequiresRestart = installedBefore is not null;
+            downloadInProgress = false;
+            var replacementRequiresRestart = installedBefore is not null || _adapterRegistry.RequiresRestart(module.Id);
             _moduleRestartRequired |= replacementRequiresRestart;
             if (replacementRequiresRestart)
             {
@@ -1778,11 +1793,21 @@ public sealed class MainViewModel : ObservableObject
             }
             if (game is null)
             {
-                if (process is null) throw new InvalidOperationException("模块已下载，但当前游戏连接已断开，无法自动保存入库。");
+                if (process is null || !IsModuleContextCurrent(context))
+                {
+                    ReconcileInstalledModulesWithLibrary();
+                    await SaveLibraryAsync();
+                    ResetModuleCheckState();
+                    StatusText = $"已安装 {module.DisplayName} v{module.Version}，请连接游戏后验证。";
+                    return;
+                }
                 game = await AddCurrentProcessToLibraryCoreAsync(
                     string.IsNullOrWhiteSpace(module.GameDisplayName) ? process.ProcessName : module.GameDisplayName,
-                    process);
-                version = SelectedVersion;
+                    process, context.Fingerprint);
+                version = context.Fingerprint is { } originalFingerprint
+                    ? FindMatchingVersion(game, originalFingerprint) : null;
+                if (ReferenceEquals(SelectedGame, game) && ReferenceEquals(AttachedProcess, process))
+                    context = CaptureModuleContext();
             }
             game.ModuleId = module.Id;
             game.IsModuleInstalled = true;
@@ -1798,6 +1823,13 @@ public sealed class MainViewModel : ObservableObject
             }
             await SaveLibraryAsync();
             GamesView.Refresh();
+            if (!IsModuleContextCurrent(context))
+            {
+                ResetModuleCheckState();
+                StatusText = $"已安装 {module.DisplayName} v{module.Version}。";
+                return;
+            }
+            _moduleCheckContext = CaptureModuleContext();
             _moduleCheckResult = new GameModuleCheckResult(GameModuleAvailability.Current, module,
                 _moduleCatalogService.FindInstalled(module.Id), $"已安装最新专属模块：{module.DisplayName} v{module.Version}",
                 exactBuildMatch, CatalogReferenceModule: module);
@@ -1818,29 +1850,41 @@ public sealed class MainViewModel : ObservableObject
         }
         finally
         {
+            downloadInProgress = false;
             ReleaseModuleControlsAfter(cooldown);
         }
     }
 
     public async Task RollbackCurrentGameModuleAsync()
     {
+        var context = RequireModuleCheckContext();
         var rollback = _moduleCheckResult?.RollbackModule
                        ?? throw new InvalidOperationException("当前没有兼容的较低模块版本可回退。");
         if (_isModuleControlBlocked) return;
         _isModuleControlBlocked = true;
         NotifyModuleControls();
         var cooldown = Task.Delay(TimeSpan.FromSeconds(3));
+        var downloadInProgress = true;
         try
         {
             ModuleStatusText = $"正在下载并校验 {rollback.DisplayName} v{rollback.Version}…";
             var progress = new Progress<DownloadProgressSnapshot>(snapshot =>
             {
-                ModuleStatusText = $"正在下载 {rollback.DisplayName} v{rollback.Version} · {snapshot.DisplayText}";
-                StatusText = ModuleStatusText;
+                if (!downloadInProgress) return;
+                var message = $"正在下载 {rollback.DisplayName} v{rollback.Version} · {snapshot.DisplayText}";
+                if (IsModuleContextCurrent(context)) ModuleStatusText = message;
+                StatusText = message;
             });
             await _moduleCatalogService.InstallAsync(rollback, progress);
+            downloadInProgress = false;
             _moduleRestartRequired = true;
             DeactivateModuleUntilRestart(rollback.Id);
+            if (!IsModuleContextCurrent(context))
+            {
+                ResetModuleCheckState();
+                StatusText = $"已手动回退 {rollback.DisplayName} 到 v{rollback.Version}；请重启主程序后启用。";
+                return;
+            }
             _moduleCheckResult = new GameModuleCheckResult(GameModuleAvailability.Current, rollback,
                 _moduleCatalogService.FindInstalled(rollback.Id),
                 $"已手动回退到 {rollback.DisplayName} v{rollback.Version}；请重启主程序后启用。");
@@ -1850,6 +1894,7 @@ public sealed class MainViewModel : ObservableObject
         }
         finally
         {
+            downloadInProgress = false;
             ReleaseModuleControlsAfter(cooldown);
         }
     }
@@ -1870,12 +1915,13 @@ public sealed class MainViewModel : ObservableObject
             session.SelectedCharacterAttributeKey = null;
         }
         if (string.Equals(_activeAdapter?.Id, moduleId, StringComparison.Ordinal)) SetActiveAdapter(null);
-        _adapterRegistry.Deactivate(moduleId);
+        _adapterRegistry.DeactivateUntilRestart(moduleId);
         RestartLockMaintenance();
     }
 
     public async Task UninstallCurrentGameModuleAsync()
     {
+        var context = CaptureModuleContext();
         var moduleId = ResolveActiveModuleId();
         if (string.IsNullOrWhiteSpace(moduleId)) throw new InvalidOperationException("当前游戏没有本地专属模块。");
         var record = _moduleCatalogService.FindInstalled(moduleId)
@@ -1890,10 +1936,13 @@ public sealed class MainViewModel : ObservableObject
             var packageDeleted = await RemoveInstalledModuleCoreAsync(moduleId);
             foreach (var game in Games.Where(item => string.Equals(item.ModuleId, moduleId, StringComparison.Ordinal)))
                 game.IsModuleInstalled = false;
-            _moduleCheckResult = null;
-            ModuleStatusText = packageDeleted
+            var message = packageDeleted
                 ? $"已卸载专属模块 v{record.Version}；游戏库和快捷入口已保留。"
                 : $"已停用专属模块 v{record.Version}；残留文件将在下次启动自动清理。";
+            var isCurrent = IsModuleContextCurrent(context);
+            ResetModuleCheckState();
+            if (isCurrent) ModuleStatusText = message;
+            StatusText = $"{moduleId}：{message}";
             GamesView.Refresh();
             NotifyModuleControls();
         }
@@ -1921,13 +1970,18 @@ public sealed class MainViewModel : ObservableObject
             }
             if (string.Equals(_activeAdapter?.Id, moduleId, StringComparison.Ordinal))
                 SetActiveAdapter(null);
-            _adapterRegistry.Reload();
+            if (_adapterRegistry.RequiresRestart(moduleId))
+            {
+                _adapterRegistry.DeactivateUntilRestart(moduleId);
+                _moduleRestartRequired = true;
+            }
+            else _adapterRegistry.Deactivate(moduleId);
             ReloadAdaptersForSessions();
         }
         catch
         {
             _moduleCatalogService.RestoreRegistration(removed);
-            _adapterRegistry.Reload();
+            _adapterRegistry.LoadInstalledModule(moduleId);
             ReloadAdaptersForSessions();
             RestartLockMaintenance();
             throw;
@@ -2153,10 +2207,14 @@ public sealed class MainViewModel : ObservableObject
 
     private void ResetModuleCheckState()
     {
+        _moduleViewGeneration++;
+        _moduleCheckContext = null;
         _moduleCheckResult = null;
         var moduleId = ResolveActiveModuleId();
         var installed = string.IsNullOrWhiteSpace(moduleId) ? null : _moduleCatalogService.FindInstalled(moduleId);
-        ModuleStatusText = _activeAdapter is not null
+        ModuleStatusText = _adapterRegistry.IsRestartRequired(moduleId)
+            ? "该模块已停用，请手动重启主程序后启用"
+            : _activeAdapter is not null
             ? $"本地已装配：{_activeAdapter.DisplayName}（尚未检查更新）"
             : installed is not null
                 ? $"本地已安装专属模块 v{installed.Version}，连接兼容游戏版本后启用"
@@ -2168,6 +2226,21 @@ public sealed class MainViewModel : ObservableObject
         !string.IsNullOrWhiteSpace(SelectedGame?.ModuleId) ? SelectedGame.ModuleId :
         !string.IsNullOrWhiteSpace(_activeAdapter?.Id) ? _activeAdapter.Id :
         _moduleCheckResult?.RemoteModule?.Id ?? string.Empty;
+
+    private sealed record ModuleOperationContext(long Generation, GameProfile? Game, GameVersionProfile? Version,
+        ProcessItem? Process, VersionFingerprint? Fingerprint, GameConnectionSession? Session);
+
+    private ModuleOperationContext CaptureModuleContext() => new(_moduleViewGeneration, SelectedGame,
+        SelectedVersion, AttachedProcess, _attachedFingerprint, _activeSession);
+
+    private bool IsModuleContextCurrent(ModuleOperationContext? context) => context is not null &&
+        context.Generation == _moduleViewGeneration && ReferenceEquals(context.Game, SelectedGame) &&
+        ReferenceEquals(context.Version, SelectedVersion) && ReferenceEquals(context.Process, AttachedProcess) &&
+        ReferenceEquals(context.Fingerprint, _attachedFingerprint) && ReferenceEquals(context.Session, _activeSession);
+
+    private ModuleOperationContext RequireModuleCheckContext() => IsModuleContextCurrent(_moduleCheckContext)
+        ? _moduleCheckContext!
+        : throw new InvalidOperationException("游戏、版本或连接已变化，请重新点击“检查新有”。");
 
     private void ReloadAdaptersForSessions()
     {

@@ -38,6 +38,13 @@ public sealed class ApplicationUpdateService
 
     public string PendingManifestPath => Path.Combine(_updatesDirectory, "pending-update.json");
     public string LastErrorNoticePath => Path.Combine(_updatesDirectory, "last-update-error.json");
+    public string RecoveryRequiredPath => Path.Combine(_updatesDirectory, "recovery-required.json");
+
+    private void EnsureNoRecoveryRequired()
+    {
+        if (File.Exists(RecoveryRequiredPath))
+            throw new InvalidOperationException($"上次更新的旧文件尚未恢复完整，请先按恢复记录完成恢复：{RecoveryRequiredPath}");
+    }
 
     public ApplicationUpdateFailure? TakeLastFailure()
     {
@@ -137,6 +144,7 @@ public sealed class ApplicationUpdateService
         IProgress<DownloadProgressSnapshot>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        EnsureNoRecoveryRequired();
         var current = ParseVersion(_currentVersion);
         var requested = ParseVersion(target.Version);
         if (operation == ApplicationUpdateOperation.Update && requested.CompareTo(current) <= 0)
@@ -183,6 +191,7 @@ public sealed class ApplicationUpdateService
 
     public bool LaunchPendingUpdate(bool restartApplication)
     {
+        EnsureNoRecoveryRequired();
         if (!File.Exists(PendingManifestPath)) return false;
         var runner = PrepareUpdaterRunner();
         var start = new ProcessStartInfo(runner)
@@ -211,6 +220,7 @@ public sealed class ApplicationUpdateService
 
     internal string PrepareUpdaterRunner()
     {
+        EnsureNoRecoveryRequired();
         var pending = JsonSerializer.Deserialize<PendingApplicationUpdate>(
                           File.ReadAllText(PendingManifestPath), JsonOptions)
                       ?? throw new InvalidOperationException("待安装更新记录无效。");
@@ -251,6 +261,7 @@ public sealed class ApplicationUpdateService
     {
         var store = new ProfileStore();
         var service = new ApplicationUpdateService(store.UpdatesDirectory);
+        if (File.Exists(service.RecoveryRequiredPath)) return false;
         return File.Exists(service.PendingManifestPath) && service.LaunchPendingUpdate(true);
     }
 
@@ -269,6 +280,8 @@ public sealed class ApplicationUpdateService
 
     private void CleanupStaleUpdateArtifacts()
     {
+        // Recovery may need the original runner, archive and failure record. Preserve all evidence.
+        if (File.Exists(RecoveryRequiredPath)) return;
         if (!Directory.Exists(_updatesDirectory)) return;
         try
         {
