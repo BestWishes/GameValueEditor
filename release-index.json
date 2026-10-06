@@ -2,6 +2,17 @@
   "schemaVersion": 1,
   "releases": [
     {
+      "version": "0.4.7",
+      "assetName": "GameValueEditor-v0.4.7-win-x64.zip",
+      "downloadUrl": "https://github.com/BestWishes/GameValueEditor/releases/download/v0.4.7/GameValueEditor-v0.4.7-win-x64.zip",
+      "sizeBytes": 97572320,
+      "sha256": "AF186F322097C49CDC7BD229687E4D0BF121FDBFD42064CDF14C45A883DCF5DA",
+      "sourceCommit": "7c939d137b7a0169565fe8c9c08f21d6acd68ed0",
+      "minimumModuleHostApi": 2,
+      "maximumModuleHostApi": 7,
+      "maximumCatalogSchemaVersion": 5
+    },
+    {
       "version": "0.4.6",
       "assetName": "GameValueEditor-v0.4.6-win-x64.zip",
       "downloadUrl": "https://github.com/BestWishes/GameValueEditor/releases/download/v0.4.6/GameValueEditor-v0.4.6-win-x64.zip",
@@ -19,17 +30,6 @@
       "sizeBytes": 97541483,
       "sha256": "B7579858CE1E3A3A19E52A5D565091EFE88B802E94824ADE75608CDFFEA82E48",
       "sourceCommit": "6a60f4ef8dc9b537b49eb5f1bb154966a1edb234",
-      "minimumModuleHostApi": 2,
-      "maximumModuleHostApi": 7,
-      "maximumCatalogSchemaVersion": 5
-    },
-    {
-      "version": "0.4.4",
-      "assetName": "GameValueEditor-v0.4.4-win-x64.zip",
-      "downloadUrl": "https://github.com/BestWishes/GameValueEditor/releases/download/v0.4.4/GameValueEditor-v0.4.4-win-x64.zip",
-      "sizeBytes": 97539922,
-      "sha256": "CAABE17CE3A538A551DA2780B572A47802AF3BDE3FBFB29AB1D41DE721134B4E",
-      "sourceCommit": "25b2e9d8ce31d65c343e77ca5e52742f700340ca",
       "minimumModuleHostApi": 2,
       "maximumModuleHostApi": 7,
       "maximumCatalogSchemaVersion": 5
