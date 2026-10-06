@@ -1,11 +1,12 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
 namespace GameValueEditor.Services;
 
-public sealed class ProcessMemoryAccessor : IDisposable, IMemoryWriteAccess
+public sealed class ProcessMemoryAccessor : IDisposable, IMemoryWriteAccess, IScanMemoryReader
 {
     private readonly SafeProcessHandle _handle;
 
@@ -35,6 +36,10 @@ public sealed class ProcessMemoryAccessor : IDisposable, IMemoryWriteAccess
 
     public int ProcessId { get; }
     public DateTime StartTimeUtc { get; }
+    internal int RegionQueryCount { get; private set; }
+    internal int RegionQueryError { get; private set; }
+    int IScanMemoryReader.RegionQueryCount => RegionQueryCount;
+    int IScanMemoryReader.RegionQueryError => RegionQueryError;
 
     public void EnsureInstance(int processId, DateTime startTimeUtc)
     {
@@ -44,6 +49,25 @@ public sealed class ProcessMemoryAccessor : IDisposable, IMemoryWriteAccess
 
     public IReadOnlyList<MemoryRegion> EnumerateReadableRegions(bool writableOnly)
     {
+        var structureSize = (nuint)Marshal.SizeOf<NativeMethods.MemoryBasicInformation64>();
+        RegionQueryCount = 0;
+        RegionQueryError = 0;
+        if (!NativeMethods.IsWow64Process(_handle, out var is32BitTarget))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "无法核对目标进程的地址空间类型。");
+        return EnumerateReadableRegionsCore(writableOnly, address =>
+        {
+            var size = NativeMethods.VirtualQueryEx(_handle, unchecked((nint)(long)address), out var info, structureSize);
+            // Capture native error before any subsequent native call can replace it.
+            var error = size == 0 ? Marshal.GetLastWin32Error() : 0;
+            RegionQueryCount++;
+            RegionQueryError = error;
+            return new MemoryRegionQuery(size, info, error);
+        }, is32BitTarget);
+    }
+
+    internal static IReadOnlyList<MemoryRegion> EnumerateReadableRegionsCore(bool writableOnly,
+        Func<ulong, MemoryRegionQuery> query, bool is32BitTarget = false)
+    {
         var regions = new List<MemoryRegion>();
         ulong address = 0;
         const ulong maximumUserAddress = 0x00007FFFFFFFFFFF;
@@ -51,12 +75,18 @@ public sealed class ProcessMemoryAccessor : IDisposable, IMemoryWriteAccess
 
         while (address < maximumUserAddress)
         {
-            var result = NativeMethods.VirtualQueryEx(
-                _handle,
-                unchecked((nint)(long)address),
-                out var info,
-                structureSize);
-            if (result == 0) break;
+            var result = query(address);
+            if (result.Size == 0)
+            {
+                // 32-bit targets can terminate below the x64 ceiling. An initial
+                // or low-address failure is not a successful empty enumeration.
+                if (result.Error == 87 && address >= (is32BitTarget ? 0x7FFF0000UL : 0x7FFFFFFF0000UL)) break;
+                throw new Win32Exception(result.Error, $"无法枚举目标进程内存（系统错误 {result.Error}），请重新连接后再试。");
+            }
+            var info = result.Information;
+            if (result.Size < structureSize || info.RegionSize == 0 || info.BaseAddress > address ||
+                info.RegionSize > ulong.MaxValue - info.BaseAddress || info.BaseAddress + info.RegionSize <= address)
+                throw new IOException("目标内存区域信息无效，扫描已停止，请重新连接后再试。");
 
             var readable = info.State == NativeMethods.MemoryCommit && IsReadable(info.Protect);
             var writable = IsWritable(info.Protect);
@@ -66,7 +96,6 @@ public sealed class ProcessMemoryAccessor : IDisposable, IMemoryWriteAccess
             }
 
             var next = info.BaseAddress + info.RegionSize;
-            if (next <= address) break;
             address = next;
         }
 
@@ -178,6 +207,7 @@ public sealed class ProcessMemoryAccessor : IDisposable, IMemoryWriteAccess
 
 public sealed record MemoryRegion(ulong BaseAddress, ulong RegionSize, bool IsWritable);
 public sealed record ModuleLocation(string ModuleName, ulong ModuleBase, long Offset);
+internal sealed record MemoryRegionQuery(nuint Size, NativeMethods.MemoryBasicInformation64 Information, int Error);
 
 internal static class NativeMethods
 {
@@ -221,6 +251,10 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool GetProcessTimes(SafeProcessHandle process, out long creation, out long exit,
         out long kernel, out long user);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool IsWow64Process(SafeProcessHandle process, [MarshalAs(UnmanagedType.Bool)] out bool wow64Process);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     internal static extern nuint VirtualQueryEx(

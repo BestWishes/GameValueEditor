@@ -7,9 +7,14 @@ public sealed class MemoryScanService
 {
     private const int ChunkSize = 1024 * 1024;
     private readonly string _scanRootDirectory;
+    private readonly Func<int, IScanMemoryReader> _openScanMemory;
 
     public MemoryScanService(string? scanRootDirectory = null)
+        : this(scanRootDirectory, processId => new ProcessMemoryAccessor(processId)) { }
+
+    internal MemoryScanService(string? scanRootDirectory, Func<int, IScanMemoryReader> openScanMemory)
     {
+        _openScanMemory = openScanMemory;
         _scanRootDirectory = Path.GetFullPath(scanRootDirectory ?? Path.Combine(Path.GetTempPath(), "GameValueEditor", "scan-temp"));
         Directory.CreateDirectory(_scanRootDirectory);
         CleanupStaleStores();
@@ -27,10 +32,12 @@ public sealed class MemoryScanService
         var store = CreateStore(targets);
         try
         {
-            using var memory = new ProcessMemoryAccessor(processId);
+            using var memory = _openScanMemory(processId);
             store.ProcessId = memory.ProcessId;
             store.ProcessStartTimeUtc = memory.StartTimeUtc;
             var regions = memory.EnumerateReadableRegions(writableOnly);
+            if (regions.Count == 0)
+                throw new IOException("未找到可读取的扫描区域，请检查目标进程并重新连接。");
             var total = regions.Aggregate<MemoryRegion, ulong>(0, (current, region) => current + region.RegionSize);
             var maximumValueSize = targets.Max(target => target.ValueType.Size());
             var writers = store.Partitions.Select(partition => new BinaryWriter(new FileStream(
@@ -44,6 +51,40 @@ public sealed class MemoryScanService
             {
                 ulong completed = 0;
                 long resultCount = 0;
+                long readAttempts = 0;
+                long successfulReads = 0;
+                bool TryRead(ulong address, int length, out byte[] bytes)
+                {
+                    readAttempts++;
+                    if (!memory.TryRead(address, length, out bytes)) return false;
+                    successfulReads++;
+                    return true;
+                }
+
+                void ScanBuffer(ulong address, int payloadLength, byte[] buffer)
+                {
+                    for (var targetIndex = 0; targetIndex < targets.Count; targetIndex++)
+                    {
+                        var target = targets[targetIndex];
+                        var valueSize = target.ValueType.Size();
+                        var alignment = alignedOnly ? Math.Min(valueSize, 4) : 1;
+                        var firstOffset = alignedOnly
+                            ? (int)((ulong)alignment - (address % (ulong)alignment)) % alignment
+                            : 0;
+                        var maxOffset = Math.Min(payloadLength - 1, buffer.Length - valueSize);
+                        var writer = writers[targetIndex];
+                        var partition = store.Partitions[targetIndex];
+                        for (var offset = firstOffset; offset <= maxOffset; offset += alignment)
+                        {
+                            if (!buffer.AsSpan(offset, valueSize).SequenceEqual(target.TargetBytes)) continue;
+                            writer.Write(address + (ulong)offset);
+                            writer.Write(target.TargetBytes);
+                            writer.Write(target.TargetBytes);
+                            partition.Count++;
+                            resultCount++;
+                        }
+                    }
+                }
                 foreach (var region in regions)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -57,28 +98,26 @@ public sealed class MemoryScanService
                             region.RegionSize - position);
                         var chunkAddress = region.BaseAddress + position;
 
-                        if (memory.TryRead(chunkAddress, readLength, out var buffer))
+                        if (TryRead(chunkAddress, readLength, out var buffer))
                         {
-                            for (var targetIndex = 0; targetIndex < targets.Count; targetIndex++)
+                            ScanBuffer(chunkAddress, payloadLength, buffer);
+                        }
+                        else
+                        {
+                            // A region can change after enumeration. Recover only readable pages,
+                            // never concatenate bytes across a failed page or retry the whole scan.
+                            for (var pageOffset = 0; pageOffset < payloadLength;)
                             {
-                                var target = targets[targetIndex];
-                                var valueSize = target.ValueType.Size();
-                                var alignment = alignedOnly ? Math.Min(valueSize, 4) : 1;
-                                var firstOffset = alignedOnly
-                                    ? (int)((ulong)alignment - (chunkAddress % (ulong)alignment)) % alignment
-                                    : 0;
-                                var maxOffset = Math.Min(payloadLength - 1, buffer.Length - valueSize);
-                                var writer = writers[targetIndex];
-                                var partition = store.Partitions[targetIndex];
-                                for (var offset = firstOffset; offset <= maxOffset; offset += alignment)
-                                {
-                                    if (!buffer.AsSpan(offset, valueSize).SequenceEqual(target.TargetBytes)) continue;
-                                    writer.Write(chunkAddress + (ulong)offset);
-                                    writer.Write(target.TargetBytes);
-                                    writer.Write(target.TargetBytes);
-                                    partition.Count++;
-                                    resultCount++;
-                                }
+                                cancellationToken.ThrowIfCancellationRequested();
+                                var pageAddress = chunkAddress + (ulong)pageOffset;
+                                var pagePayload = Math.Min(payloadLength - pageOffset,
+                                    Environment.SystemPageSize - (int)(pageAddress % (ulong)Environment.SystemPageSize));
+                                var pageReadLength = (int)Math.Min((ulong)(pagePayload + maximumValueSize - 1),
+                                    region.RegionSize - position - (ulong)pageOffset);
+                                if (TryRead(pageAddress, pageReadLength, out var pageBuffer) ||
+                                    (pageReadLength > pagePayload && TryRead(pageAddress, pagePayload, out pageBuffer)))
+                                    ScanBuffer(pageAddress, pagePayload, pageBuffer);
+                                pageOffset += pagePayload;
                             }
                         }
 
@@ -90,7 +129,13 @@ public sealed class MemoryScanService
                     progress?.Report(new ScanProgress(completed, total, resultCount));
                 }
 
-                return new ScanRunResult(store, completed);
+                if (successfulReads == 0)
+                    throw new IOException("扫描区域均无法读取，目标进程可能已退出或内存权限已变化，请重新连接后再试。");
+                return new ScanRunResult(store, completed)
+                {
+                    Diagnostics = new ScanDiagnostics(regions.Count, memory.RegionQueryCount,
+                        memory.RegionQueryError, readAttempts, successfulReads)
+                };
             }
             finally
             {
@@ -317,4 +362,9 @@ public sealed record ScanProgress(ulong CompletedBytes, ulong TotalBytes, long R
     public double Percentage => TotalBytes == 0 ? 0 : Math.Clamp(CompletedBytes * 100d / TotalBytes, 0, 100);
 }
 
-public sealed record ScanRunResult(ScanCandidateStore Candidates, ulong ScannedBytes);
+public sealed record ScanRunResult(ScanCandidateStore Candidates, ulong ScannedBytes)
+{
+    internal ScanDiagnostics? Diagnostics { get; init; }
+}
+
+internal sealed record ScanDiagnostics(int RegionCount, int QueryCount, int QueryError, long ReadAttempts, long SuccessfulReads);

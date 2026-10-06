@@ -106,9 +106,54 @@ static void Assert(bool condition, string message)
     if (!condition) throw new InvalidOperationException(message);
 }
 
+if (args.Contains("--scan-read-only", StringComparer.Ordinal))
+{
+    await ScanReadRegressionTests.RunAsync();
+    return 0;
+}
+
+if (args.Contains("--scan-diagnostics-only", StringComparer.Ordinal) || args.Contains("--scan-gc-diagnostics-only", StringComparer.Ordinal))
+{
+    using var pressureCancellation = new CancellationTokenSource();
+    var pressure = args.Contains("--scan-gc-diagnostics-only", StringComparer.Ordinal)
+        ? Task.Run(() =>
+        {
+            while (!pressureCancellation.IsCancellationRequested)
+            {
+                _ = new byte[4 * 1024 * 1024];
+                GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+                Thread.Sleep(5);
+            }
+        }) : Task.CompletedTask;
+    try
+    {
+        for (var iteration = 1; iteration <= 12; iteration++)
+        {
+            var diagnosticMarker = 0x13579BDF + iteration;
+            var payload = new byte[128];
+            BitConverter.GetBytes(diagnosticMarker).CopyTo(payload, 19);
+            var pinned = GCHandle.Alloc(payload, GCHandleType.Pinned);
+            try
+            {
+                var address = unchecked((ulong)pinned.AddrOfPinnedObject().ToInt64()) + 19;
+                var run = await new MemoryScanService().InitialExactScanAsync(Environment.ProcessId,
+                    [new ScanTargetDefinition(MemoryValueType.Int32, SearchRoutineIds.DirectNumeric, "诊断", 1,
+                        BitConverter.GetBytes(diagnosticMarker))], true, false, null, CancellationToken.None);
+                using var candidates = run.Candidates;
+                Console.WriteLine($"Scan diagnostic {iteration}/12: bytes={run.ScannedBytes}, count={candidates.Count}, {run.Diagnostics}");
+                Assert(FindStoredCandidate(candidates, address) is not null, "Diagnostic scan missed pinned marker.");
+            }
+            finally { pinned.Free(); }
+        }
+    }
+    finally { pressureCancellation.Cancel(); await pressure; }
+    return 0;
+}
+
 try
 {
     await ModuleLifecycleRegressionTests.RunAsync(args);
+    await ScanReadRegressionTests.RunAsync();
     Assert(MemoryValueCodec.TryParse("123456", MemoryValueType.Int32, out var integerBytes), "Int32 parse failed");
     Assert(MemoryValueCodec.Format(integerBytes, MemoryValueType.Int32) == "123456", "Int32 roundtrip failed");
     Assert(MemoryValueCodec.TryParse("1.95", MemoryValueType.Double, out var doubleBytes), "Double parse failed");
@@ -150,6 +195,24 @@ try
         var markerPreview = markerCandidates.ReadCandidates(10_000);
         var markerCandidate = markerPreview.FirstOrDefault(candidate => candidate.Address == expectedAddress)
                               ?? FindStoredCandidate(markerCandidates, expectedAddress);
+        if (markerCandidate is null)
+        {
+            using var probe = new ProcessMemoryAccessor(Environment.ProcessId);
+            var readable = probe.EnumerateReadableRegions(writableOnly: true);
+            var containing = readable.FirstOrDefault(region => expectedAddress >= region.BaseAddress &&
+                expectedAddress - region.BaseAddress < region.RegionSize);
+            var directMatches = probe.TryRead(expectedAddress, sizeof(int), out var directBytes) &&
+                directBytes.AsSpan().SequenceEqual(BitConverter.GetBytes(marker));
+            var chunkReadable = false;
+            if (containing is not null)
+            {
+                var position = (expectedAddress - containing.BaseAddress) / (1024 * 1024) * (1024 * 1024);
+                var length = (int)Math.Min((ulong)(1024 * 1024 + sizeof(int) - 1), containing.RegionSize - position);
+                chunkReadable = probe.TryRead(containing.BaseAddress + position, length, out _);
+            }
+            Console.Error.WriteLine($"Self-scan diagnostic: scannedBytes={scanResult.ScannedBytes}, readableRegions={readable.Count}, " +
+                $"markerInWritableRegion={containing is not null}, directMarkerMatches={directMatches}, markerChunkReadable={chunkReadable}, {scanResult.Diagnostics}");
+        }
         Assert(markerCandidate is not null, $"Pinned marker was not found in complete memory scan (total={markerCandidates.Count}, preview={markerPreview.Count})");
         Assert(markerCandidate!.FirstBytes.SequenceEqual(BitConverter.GetBytes(marker)), "Initial scan value was not preserved");
         Assert(markerCandidate.FirstDisplay == marker.ToString(), "Initial scan display value is invalid");
