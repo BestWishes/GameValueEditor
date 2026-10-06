@@ -8,7 +8,26 @@
     <Window.Resources>
         <ImageBrush x:Key="DedicatedModuleIconMask"
                     ImageSource="pack://application:,,,/GameValueEditor;component/Assets/GameValueEditorDedicatedModuleLoaded.png"
-                    Viewbox="0.264,0.377,0.472,0.265" ViewboxUnits="RelativeToBoundingBox" Stretch="Uniform"/>
+                    Viewbox="0.237,0.242,0.525,0.528" ViewboxUnits="RelativeToBoundingBox" Stretch="Uniform"/>
+        <ImageBrush x:Key="LockedIconMask"
+                    ImageSource="pack://application:,,,/GameValueEditor;component/Assets/GameValueEditorLocked.png"
+                    Viewbox="0.349,0.295,0.302,0.429" ViewboxUnits="RelativeToBoundingBox" Stretch="Uniform"/>
+        <ImageBrush x:Key="TopmostIconMask"
+                    ImageSource="pack://application:,,,/GameValueEditor;component/Assets/GameValueEditorTopmost.png"
+                    Viewbox="0.384,0.323,0.285,0.362" ViewboxUnits="RelativeToBoundingBox" Stretch="Uniform"/>
+        <ImageBrush x:Key="ConnectedIconMask"
+                    ImageSource="pack://application:,,,/GameValueEditor;component/Assets/GameValueEditorConnected.png"
+                    Viewbox="0.357,0.263,0.268,0.474" ViewboxUnits="RelativeToBoundingBox" Stretch="Uniform"/>
+        <Style x:Key="LibraryStatusIconStyle" TargetType="Rectangle">
+            <Setter Property="Width" Value="18"/>
+            <Setter Property="Height" Value="20"/>
+            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Fill" Value="{DynamicResource AccentBrush}"/>
+            <Setter Property="Visibility" Value="Hidden"/>
+            <Setter Property="RenderOptions.BitmapScalingMode" Value="HighQuality"/>
+            <Setter Property="ToolTipService.InitialShowDelay" Value="350"/>
+        </Style>
         <Style x:Key="ModuleActionButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
             <Setter Property="Width" Value="64"/>
             <Setter Property="Height" Value="32"/>
@@ -20,7 +39,7 @@
             <Setter Property="Width" Value="52"/>
             <Setter Property="Height" Value="24"/>
             <Setter Property="Padding" Value="6,2"/>
-            <Setter Property="Margin" Value="8,0,0,0"/>
+            <Setter Property="Margin" Value="12,0,0,0"/>
             <Setter Property="VerticalAlignment" Value="Center"/>
             <Setter Property="ToolTipService.ShowOnDisabled" Value="True"/>
         </Style>
@@ -311,34 +330,67 @@
                         <ComboBox Grid.Column="1" ItemsSource="{Binding LibrarySortChoices}" SelectedItem="{Binding SelectedLibrarySort}"
                                   DisplayMemberPath="Display" Height="30"/>
                     </Grid>
-                    <ListBox x:Name="GameLibraryList" Grid.Row="3" ItemsSource="{Binding GamesView}" SelectedItem="{Binding SelectedLibraryGame}">
+                    <ListBox x:Name="GameLibraryList" Grid.Row="3" ItemsSource="{Binding GamesView}" SelectedItem="{Binding SelectedLibraryGame}"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                         <ListBox.ItemTemplate>
                             <DataTemplate>
-                                <Grid>
+                                <Grid x:Name="LibraryEntryGrid">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="Auto"/>
                                         <ColumnDefinition Width="*"/>
-                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="24"/>
+                                        <ColumnDefinition Width="24"/>
+                                        <ColumnDefinition Width="24"/>
+                                        <ColumnDefinition Width="32"/>
                                     </Grid.ColumnDefinitions>
-                                    <Border Width="38" Height="38" CornerRadius="9" Background="{DynamicResource AccentSoftBrush}" Margin="0,0,10,0">
+                                    <Border x:Name="LibraryGameAvatar" Width="38" Height="38" CornerRadius="9"
+                                            Background="{DynamicResource AccentSoftBrush}" Margin="0,0,8,0">
                                         <Image Source="{Binding IconSource}" Width="28" Height="28" Stretch="Uniform"/>
                                     </Border>
-                                    <StackPanel Grid.Column="1">
-                                        <TextBlock FontWeight="SemiBold" TextTrimming="CharacterEllipsis">
-                                            <Run Text="{Binding Badges, Mode=OneWay}"/><Run Text="{Binding Name, Mode=OneWay}"/>
-                                        </TextBlock>
-                                        <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="{Binding Summary}" Foreground="{DynamicResource MutedTextBrush}" FontSize="11"/>
-                                            <Rectangle x:Name="DedicatedModuleInstalledIcon" Width="20" Height="16" Margin="16,0,0,0"
-                                                       VerticalAlignment="Center" Fill="{DynamicResource AccentBrush}"
-                                                       OpacityMask="{StaticResource DedicatedModuleIconMask}"
-                                                       RenderOptions.BitmapScalingMode="HighQuality"
-                                                       Visibility="{Binding IsModuleInstalled, Converter={StaticResource BooleanToVisibilityConverter}}"
-                                                       ToolTip="已装专属模块" AutomationProperties.Name="已装专属模块"/>
-                                        </StackPanel>
-                                    </StackPanel>
-                                    <TextBlock Grid.Column="2" Text="{Binding ConnectionDisplay}" FontSize="17" FontWeight="SemiBold"
-                                               Foreground="{DynamicResource AccentBrush}" VerticalAlignment="Center" Margin="8,0,2,0"/>
+                                    <TextBlock x:Name="LibraryGameName" Grid.Column="1" Text="{Binding Name}"
+                                               FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,8,0"
+                                               TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" ToolTip="{Binding Name}"/>
+                                    <Rectangle x:Name="LockedStatusIcon" Grid.Column="2" OpacityMask="{StaticResource LockedIconMask}"
+                                               ToolTip="已锁定" AutomationProperties.Name="已锁定">
+                                        <Rectangle.Style>
+                                            <Style TargetType="Rectangle" BasedOn="{StaticResource LibraryStatusIconStyle}">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsLocked}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Rectangle.Style>
+                                    </Rectangle>
+                                    <Rectangle x:Name="TopmostStatusIcon" Grid.Column="3" OpacityMask="{StaticResource TopmostIconMask}"
+                                               ToolTip="已置顶" AutomationProperties.Name="已置顶">
+                                        <Rectangle.Style>
+                                            <Style TargetType="Rectangle" BasedOn="{StaticResource LibraryStatusIconStyle}">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsPinned}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Rectangle.Style>
+                                    </Rectangle>
+                                    <Rectangle x:Name="DedicatedModuleLoadedIcon" Grid.Column="4" OpacityMask="{StaticResource DedicatedModuleIconMask}"
+                                               ToolTip="已加载本地模块" AutomationProperties.Name="已加载本地模块">
+                                        <Rectangle.Style>
+                                            <Style TargetType="Rectangle" BasedOn="{StaticResource LibraryStatusIconStyle}">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsModuleLoaded}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Rectangle.Style>
+                                    </Rectangle>
+                                    <Rectangle x:Name="ConnectedStatusIcon" Grid.Column="5" Width="24" Height="28"
+                                               OpacityMask="{StaticResource ConnectedIconMask}"
+                                               ToolTip="已连接到游戏" AutomationProperties.Name="已连接到游戏">
+                                        <Rectangle.Style>
+                                            <Style TargetType="Rectangle" BasedOn="{StaticResource LibraryStatusIconStyle}">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsConnected}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Rectangle.Style>
+                                    </Rectangle>
                                 </Grid>
                             </DataTemplate>
                         </ListBox.ItemTemplate>

@@ -24,7 +24,9 @@
 
 ## 固定操作栏与模块标记
 
-宿主游戏库用嵌入的原始 PNG 透明轮廓和动态 AccentBrush 标记已安装模块；渲染 Viewbox 排除大面积透明留白，图标不代表实际构建已兼容。模块操作栏和页脚分别使用局部固定宽度按钮，实际边缘间距均为 8 DIP，不继承全局按钮额外 Margin。查新、更新为独立状态及事件；版本、进度、后验证提示放状态区或 ToolTip，不改变操作按钮坐标。具体契约与回归见 [固定布局设计](STABLE_MODULE_AND_UPDATE_ACTION_LAYOUT_DESIGN.md)。
+宿主游戏库条目单行显示头像及名称，右侧四个固定槽位依次展示锁定、置顶、本地模块加载和连接状态。图标使用内嵌原始 PNG 的透明轮廓与动态 AccentBrush，渲染 Viewbox 排除透明留白；状态隐藏时不折叠槽位。名称与四图标提供提示，头像不提供提示。运行态 IsModuleLoaded 按注册表实际加载结果计算、不持久化；不等同 IsModuleInstalled 或游戏构建兼容，等待重启、卸载、加载失败时应为 false。版本/字段摘要仅移除列表展示，数据与其他页面不变。具体契约与回归见 [单行游戏库设计](SINGLE_LINE_GAME_LIBRARY_DESIGN.md)。
+
+模块操作栏和页脚分别使用局部固定宽度按钮，边缘间距分别为 8 DIP 和 12 DIP，不继承全局按钮额外 Margin。查新、更新为独立状态及事件；版本、进度、后验证提示放状态区或 ToolTip，不改变操作按钮坐标。操作栏其余契约沿用 [0.4.8 固定布局设计](STABLE_MODULE_AND_UPDATE_ACTION_LAYOUT_DESIGN.md)。
 
 ## 持久数据
 

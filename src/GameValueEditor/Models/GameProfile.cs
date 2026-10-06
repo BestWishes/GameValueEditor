@@ -15,6 +15,7 @@ public sealed class GameProfile : ObservableObject
     private DateTime _lastUsedUtc = DateTime.UtcNow;
     private bool _isConnected;
     private bool _isModuleInstalled;
+    private bool _isModuleLoaded;
     private ImageSource? _iconSource;
 
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -41,6 +42,9 @@ public sealed class GameProfile : ObservableObject
 
     [JsonIgnore]
     public ImageSource? IconSource { get => _iconSource; set => SetProperty(ref _iconSource, value); }
+
+    [JsonIgnore]
+    public bool IsModuleLoaded { get => _isModuleLoaded; set => SetProperty(ref _isModuleLoaded, value); }
 
     [JsonIgnore]
     public bool IsModuleInstalled

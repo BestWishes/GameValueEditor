@@ -1996,6 +1996,7 @@ public sealed class MainViewModel : ObservableObject
         }
         if (string.Equals(_activeAdapter?.Id, moduleId, StringComparison.Ordinal)) SetActiveAdapter(null);
         _adapterRegistry.DeactivateUntilRestart(moduleId);
+        RefreshLibraryModuleLoadStates();
         RestartLockMaintenance();
     }
 
@@ -2319,6 +2320,7 @@ public sealed class MainViewModel : ObservableObject
 
     private void ReloadAdaptersForSessions()
     {
+        RefreshLibraryModuleLoadStates();
         var sessions = _sessions.Values
             .Append(_activeSession)
             .Where(session => session is not null)
@@ -2558,7 +2560,17 @@ public sealed class MainViewModel : ObservableObject
         return false;
     }
 
-    private async Task SaveLibraryAsync() => await _profileStore.SaveAsync(_document);
+    private async Task SaveLibraryAsync()
+    {
+        RefreshLibraryModuleLoadStates();
+        await _profileStore.SaveAsync(_document);
+    }
+
+    private void RefreshLibraryModuleLoadStates()
+    {
+        foreach (var game in Games)
+            game.IsModuleLoaded = !string.IsNullOrWhiteSpace(game.ModuleId) && _adapterRegistry.FindById(game.ModuleId) is not null;
+    }
 
     private sealed record GameOperationContext(long Generation, GameProfile? Game, GameVersionProfile? Version,
         ProcessItem? Process, Guid? AttachedGameId, GameConnectionSession? Session);
@@ -2890,6 +2902,7 @@ public sealed class MainViewModel : ObservableObject
 
         foreach (var game in Games)
             game.IsModuleInstalled = !string.IsNullOrWhiteSpace(game.ModuleId) && installedIds.Contains(game.ModuleId);
+        RefreshLibraryModuleLoadStates();
         return changed;
     }
 

@@ -26,19 +26,19 @@ internal static class LayoutRegressionTests
     internal static async Task CheckUpdateStatesAsync(string root)
     {
         var payload = new byte[] { 1, 2, 3, 4 };
-        var target = Target("0.4.9", payload);
+        var target = Target("0.5.0", payload);
         var checkGate = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
         var downloadGate = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var client = new HttpClient(new Handler(request => request.RequestUri!.AbsoluteUri switch
         {
             ApplicationUpdateService.ReleaseIndexUrl => checkGate.Task,
-            "https://example.invalid/0.4.9.zip" => downloadGate.Task,
-            _ => Task.FromResult(Json(new[] { new { tag_name = "v0.4.9", draft = false, prerelease = false,
+            "https://example.invalid/0.5.0.zip" => downloadGate.Task,
+            _ => Task.FromResult(Json(new[] { new { tag_name = "v0.5.0", draft = false, prerelease = false,
                 assets = new[] { new { name = target.AssetName, browser_download_url = target.DownloadUrl,
                     size = target.SizeBytes, digest = "sha256:" + target.Sha256 } } } }))
         }));
         var folder = System.IO.Path.Combine(root, "layout-update-states");
-        var updater = new ApplicationUpdateService(System.IO.Path.Combine(folder, "updates"), client, "0.4.8", applicationDirectory: folder);
+        var updater = new ApplicationUpdateService(System.IO.Path.Combine(folder, "updates"), client, "0.4.9", applicationDirectory: folder);
         using var registry = new GameAdapterRegistry(System.IO.Path.Combine(folder, "modules"));
         var vm = ModuleLifecycleRegressionTests.CreateViewModel(folder,
             new GameModuleCatalogService(System.IO.Path.Combine(folder, "modules"), client), registry, updater);
@@ -62,7 +62,7 @@ internal static class LayoutRegressionTests
         foreach (var scenario in new[] { "check-failure", "latest", "download-retry" })
         {
             var scenarioFolder = System.IO.Path.Combine(root, "layout-" + scenario);
-            var release = scenario == "latest" ? Target("0.4.8", payload) : target;
+            var release = scenario == "latest" ? Target("0.4.9", payload) : target;
             var downloadAttempts = 0;
             using var scenarioClient = new HttpClient(new Handler(request => Task.FromResult(
                 request.RequestUri!.AbsoluteUri == ApplicationUpdateService.ReleaseIndexUrl
@@ -75,7 +75,7 @@ internal static class LayoutRegressionTests
                             assets = new[] { new { name = release.AssetName, browser_download_url = release.DownloadUrl,
                                 size = release.SizeBytes, digest = "sha256:" + release.Sha256 } } } }))));
             using var scenarioRegistry = new GameAdapterRegistry(System.IO.Path.Combine(scenarioFolder, "modules"));
-            var scenarioUpdater = new ApplicationUpdateService(System.IO.Path.Combine(scenarioFolder, "updates"), scenarioClient, "0.4.8",
+            var scenarioUpdater = new ApplicationUpdateService(System.IO.Path.Combine(scenarioFolder, "updates"), scenarioClient, "0.4.9",
                 applicationDirectory: scenarioFolder);
             var scenarioVm = ModuleLifecycleRegressionTests.CreateViewModel(scenarioFolder,
                 new GameModuleCatalogService(System.IO.Path.Combine(scenarioFolder, "modules"), scenarioClient), scenarioRegistry, scenarioUpdater);
@@ -119,8 +119,12 @@ internal static class LayoutRegressionTests
         var window = new MainWindow(vm);
         try
         {
-            var game = new GameProfile { Name = "布局测试 · 已安装模块", IsModuleInstalled = true, Versions = [new()] };
+            var game = new GameProfile { Name = "布局示例", IsModuleInstalled = true, IsModuleLoaded = true,
+                IsLocked = true, IsPinned = true, IsConnected = true, IconSource = window.Icon,
+                Versions = [new() { Fields = [new() { Name = "保留的字段" }] }] };
             vm.Games.Add(game); vm.SelectedGame = game; vm.SelectedVersion = game.Versions[0];
+            vm.Games.Add(new GameProfile { Name = "这是一个很长的游戏名称，悬停可看全文", IconSource = window.Icon, IsModuleLoaded = true });
+            vm.Games.Add(new GameProfile { Name = "普通游戏", IconSource = window.Icon });
             var root = (FrameworkElement)window.Content;
             var moduleButtons = ((StackPanel)window.FindName("ModuleActionButtons")).Children.OfType<Button>().ToArray();
             var appButtons = ((StackPanel)window.FindName("ApplicationActionButtons")).Children.OfType<Button>().ToArray();
@@ -140,12 +144,12 @@ internal static class LayoutRegressionTests
                 Arrange(root, width);
                 var baselineModule = Positions(moduleButtons, root);
                 var baselineApp = Positions(appButtons, root);
-                CheckSpacing(moduleButtons, root, 64);
-                CheckSpacing(appButtons, root, 52);
+                CheckSpacing(moduleButtons, root, 64, 8);
+                CheckSpacing(appButtons, root, 52, 12);
                 foreach (var state in new[] { "initial", "checking", "available", "latest", "failed", "downloading", "pending" })
                 {
                     SetField(vm, "_applicationUpdateResult", state == "available"
-                        ? new ApplicationUpdateCheckResult("0.4.8", Target("12.3.4", [1]), Target("0.4.6", [1])) : null);
+                        ? new ApplicationUpdateCheckResult("0.4.9", Target("12.3.4", [1]), Target("0.4.7", [1])) : null);
                     SetField(vm, "_isApplicationUpdateBusy", state is "checking" or "downloading");
                     SetField(vm, "_applicationUpdateDownloaded", state == "pending");
                     typeof(MainViewModel).GetProperty(nameof(MainViewModel.ApplicationUpdateStatusText))!.SetValue(vm,
@@ -166,36 +170,33 @@ internal static class LayoutRegressionTests
                         vm.ModuleInstallToolTip.Contains("后验证", StringComparison.Ordinal), "Download or post-validation hint was lost.");
                     Assert(Positions(moduleButtons, root).SequenceEqual(baselineModule), "Download/update text changed button positions.");
                 }
-                SetField(vm, "_applicationUpdateResult", new ApplicationUpdateCheckResult("0.4.8", null, Target("0.4.7", [1])));
+                SetField(vm, "_applicationUpdateResult", new ApplicationUpdateCheckResult("0.4.9", null, Target("0.4.8", [1])));
                 SetField(vm, "_isApplicationUpdateBusy", false);
                 SetField(vm, "_applicationUpdateDownloaded", false);
-                typeof(MainViewModel).GetProperty(nameof(MainViewModel.ApplicationUpdateStatusText))!.SetValue(vm, "已最新 · 可回退 v0.4.7");
-                typeof(MainViewModel).GetProperty(nameof(MainViewModel.StatusText))!.SetValue(vm, "布局预览：模块图标随主题变色，操作按钮位置固定。");
+                typeof(MainViewModel).GetProperty(nameof(MainViewModel.ApplicationUpdateStatusText))!.SetValue(vm, "已最新 · 可回退 v0.4.8");
+                typeof(MainViewModel).GetProperty(nameof(MainViewModel.StatusText))!.SetValue(vm, "布局预览：单行游戏库，四个固定状态图标，页脚间距 12 DIP。");
                 typeof(MainViewModel).GetMethod("NotifyApplicationUpdateState", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(vm, null);
                 foreach (var theme in Enum.GetValues<ApplicationTheme>())
                 {
                     themes.Apply(theme); Arrange(root, width);
-                    var icon = Descendants(root).OfType<Rectangle>().Single(item => item.Name == "DedicatedModuleInstalledIcon");
-                    Assert(icon.Visibility == Visibility.Visible && icon.ActualWidth == 20 && icon.ActualHeight == 16 &&
-                        icon.Fill is SolidColorBrush fill && fill.Color == ((SolidColorBrush)Application.Current.Resources["AccentBrush"]).Color,
-                        $"Installed icon does not follow {theme}.");
-                    Assert(icon.OpacityMask is ImageBrush mask && mask.ViewboxUnits == BrushMappingMode.RelativeToBoundingBox && mask.Viewbox.Width < 0.5,
-                        "Icon mask did not exclude oversized transparent padding.");
-                    Assert(AutomationProperties.GetName(icon) == "已装专属模块", "Icon lost its accessible name.");
-                    var summary = (TextBlock)((StackPanel)icon.Parent).Children[0];
-                    Assert(Math.Abs(icon.TranslatePoint(new Point(), root).X - summary.TranslatePoint(new Point(), root).X - summary.ActualWidth - 16) < 0.01,
-                        "Installed icon did not retain the requested 16 DIP rightward spacing.");
-                    game.IsModuleInstalled = false; Arrange(root, width);
-                    Assert(icon.Visibility == Visibility.Collapsed, "Uninstalled game shows an installed-module icon.");
-                    game.IsModuleInstalled = true; Arrange(root, width);
+                    CheckLibraryEntry(root, game, width, theme);
                     if (args.Contains("--render-layout", StringComparer.OrdinalIgnoreCase)) Render(root, theme, width);
                 }
             }
-            var resource = Application.GetResourceStream(new Uri("pack://application:,,,/GameValueEditor;component/Assets/GameValueEditorDedicatedModuleLoaded.png"))!;
-            using (resource.Stream)
-                Assert(Convert.ToHexString(SHA256.HashData(resource.Stream)) == "B9AF9ED8EA56547B69A342BF98B46585CA7AEE30F5DCF8CDB70743F30A981B2C",
-                    "Embedded icon differs from the original user image.");
-            Console.WriteLine("Layout regressions passed: fixed actions, 8 DIP gaps, five themed icon masks and separate update commands.");
+            foreach (var (file, hash) in new[] {
+                ("Locked", "4419E2269EB02C99FDB0737AA9BFCA4EB1771D1E0FA2571EEA819D14807A517E"),
+                ("Topmost", "B7754C2A88454B9FD9906943645F64678C92C1C5D2B8299F338420F30968C44F"),
+                ("Connected", "78B18183AF72FE9CF1F8BCC10C048DCDDE73BE66AAC67A63488393ACC482D51F"),
+                ("DedicatedModuleLoaded", "F837EFD14BD7EF93951A24AA9615FE858D078066343531B22009211718E14FA3") })
+            {
+                var resource = Application.GetResourceStream(new Uri($"pack://application:,,,/GameValueEditor;component/Assets/GameValueEditor{file}.png"))!;
+                using (resource.Stream) Assert(Convert.ToHexString(SHA256.HashData(resource.Stream)) == hash, $"Embedded {file} differs from the final user image.");
+            }
+            using var serialized = JsonDocument.Parse(JsonSerializer.Serialize(game));
+            Assert(!serialized.RootElement.TryGetProperty(nameof(GameProfile.IsModuleLoaded), out _) &&
+                serialized.RootElement.GetProperty(nameof(GameProfile.Versions))[0].GetProperty(nameof(GameVersionProfile.Fields)).GetArrayLength() == 1,
+                "Loaded state was persisted or library version/field data was removed.");
+            Console.WriteLine("Layout regressions passed: single-line library, 16 status combinations, four final themed icons, 8/12 DIP action gaps and stable commands.");
         }
         finally
         {
@@ -204,19 +205,76 @@ internal static class LayoutRegressionTests
         }
     }
 
+    private static void CheckLibraryEntry(FrameworkElement root, GameProfile game, int width, ApplicationTheme theme)
+    {
+        var entry = Descendants(root).OfType<Grid>().Single(item => item.Name == "LibraryEntryGrid" && ReferenceEquals(item.DataContext, game));
+        var avatar = entry.Children.OfType<Border>().Single();
+        var name = entry.Children.OfType<TextBlock>().Single();
+        var icons = entry.Children.OfType<Rectangle>().OrderBy(Grid.GetColumn).ToArray();
+        var library = Descendants(root).OfType<ListBox>().Single(item => item.Name == "GameLibraryList");
+        Assert(ScrollViewer.GetHorizontalScrollBarVisibility(library) == ScrollBarVisibility.Disabled && entry.ActualWidth <= library.ActualWidth,
+            "Library entry escaped its bounded sidebar viewport.");
+        Assert(entry.RowDefinitions.Count == 0 && entry.ColumnDefinitions.Count == 6 &&
+            entry.ColumnDefinitions.Skip(2).Select(column => column.ActualWidth).SequenceEqual(new double[] { 24, 24, 24, 32 }),
+            "Library is not one row with four fixed status slots.");
+        Assert(icons.Select(icon => icon.Name).SequenceEqual(new[] { "LockedStatusIcon", "TopmostStatusIcon", "DedicatedModuleLoadedIcon", "ConnectedStatusIcon" }),
+            "Library status order changed.");
+        Assert(avatar.ActualWidth == 38 && avatar.ActualHeight == 38 && avatar.ToolTip is null &&
+            ((Image)avatar.Child).ToolTip is null && ((Image)avatar.Child).Source is not null && entry.ToolTip is null,
+            "Avatar was removed, resized or received a tooltip.");
+        Assert(name.Text == game.Name && name.TextTrimming == TextTrimming.CharacterEllipsis && name.TextWrapping == TextWrapping.NoWrap &&
+            (string)name.ToolTip == game.Name && name.ActualWidth > 0, "Name lost its single-line full-name tooltip.");
+        var tips = new[] { "已锁定", "已置顶", "已加载本地模块", "已连接到游戏" };
+        for (var index = 0; index < icons.Length; index++)
+        {
+            var icon = icons[index];
+            Assert(icon.ActualWidth == (index == 3 ? 24 : 18) && icon.ActualHeight == (index == 3 ? 28 : 20) &&
+                icon.Fill is SolidColorBrush fill && fill.Color == ((SolidColorBrush)Application.Current.Resources["AccentBrush"]).Color &&
+                (string)icon.ToolTip == tips[index] && AutomationProperties.GetName(icon) == tips[index] && !icon.Focusable,
+                $"Icon size, theme, tooltip or accessibility changed: {theme}/{icon.Name}.");
+            Assert(icon.OpacityMask is ImageBrush mask && mask.ViewboxUnits == BrushMappingMode.RelativeToBoundingBox && mask.Viewbox.Width < 0.6,
+                "Icon mask retained oversized transparent padding.");
+            var point = icon.TranslatePoint(new Point(), entry);
+            Assert(Math.Abs(point.Y + icon.ActualHeight / 2 - entry.ActualHeight / 2) < 0.01 && point.X + icon.ActualWidth <= entry.ActualWidth,
+                "Status icon is misaligned or exceeds its entry.");
+        }
+        var baseline = icons.Select(icon => icon.TranslatePoint(new Point(), root)).ToArray();
+        var originalName = game.Name;
+        foreach (var text in new[] { originalName, new string('长', 80) })
+        {
+            game.Name = text;
+            for (var bits = 0; bits < 16; bits++)
+            {
+                game.IsLocked = (bits & 1) != 0; game.IsPinned = (bits & 2) != 0;
+                game.IsModuleLoaded = (bits & 4) != 0; game.IsConnected = (bits & 8) != 0;
+                Arrange(root, width);
+                var current = icons.Select(icon => icon.TranslatePoint(new Point(), root)).ToArray();
+                Assert(current.SequenceEqual(baseline), $"Status or long name moved a library icon: width={width}, theme={theme}, bits={bits}, nameLength={text.Length}, baseline={string.Join(';', baseline)}, current={string.Join(';', current)}.");
+                for (var index = 0; index < icons.Length; index++)
+                    Assert(icons[index].Visibility == ((bits & (1 << index)) != 0 ? Visibility.Visible : Visibility.Hidden),
+                        "Missing status did not leave its fixed hidden slot.");
+                Assert(name.Text == text && (string)name.ToolTip == text && name.TranslatePoint(new Point(name.ActualWidth, 0), entry).X <=
+                    icons[0].TranslatePoint(new Point(), entry).X, "Long name collided with status icons.");
+            }
+        }
+        game.Name = originalName;
+        game.IsLocked = game.IsPinned = game.IsModuleLoaded = game.IsConnected = true;
+        Arrange(root, width);
+    }
+
     private static void Arrange(FrameworkElement root, int width)
     {
         root.Measure(new Size(width, 780)); root.Arrange(new Rect(0, 0, width, 780)); root.UpdateLayout();
     }
     private static Point[] Positions(Button[] buttons, FrameworkElement root) => buttons.Select(button => button.TranslatePoint(new Point(), root)).ToArray();
-    private static void CheckSpacing(Button[] buttons, FrameworkElement root, int width)
+    private static void CheckSpacing(Button[] buttons, FrameworkElement root, int width, int gap)
     {
         var positions = Positions(buttons, root);
         for (var index = 0; index < buttons.Length; index++)
         {
             Assert(buttons[index].ActualWidth == width && positions[index].X >= 0 && positions[index].X + width <= root.ActualWidth,
                 "Button width changed or exceeded the viewport.");
-            if (index > 0) Assert(Math.Abs(positions[index].X - positions[index - 1].X - width - 8) < 0.01, "Button edge spacing is not 8 DIP.");
+            if (index > 0) Assert(Math.Abs(positions[index].X - positions[index - 1].X - width - gap) < 0.01, $"Button edge spacing is not {gap} DIP.");
         }
     }
     private static IEnumerable<DependencyObject> Descendants(DependencyObject parent)

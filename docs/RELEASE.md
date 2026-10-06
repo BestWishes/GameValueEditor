@@ -5,7 +5,7 @@ GitHub Actions 不是发布前提。正式版本先完成源码级构建与测�
 ## 1. 验证标准包
 
 ```powershell
-./scripts/verify-release.ps1 -Version 0.4.8
+./scripts/verify-release.ps1 -Version 0.4.9
 ```
 
 记录脚本输出的标准 ZIP 路径与 SHA-256。正式发布版本是独立的十进制计数器：每次只加 `0.0.1`，`0.4.9` 的下一版是 `0.5.0`，`0.9.9` 的下一版是 `1.0.0`。发布脚本从最新正式标签计算唯一下一版本并拒绝跳号；预览标签和 `complete-offline` 完整离线包均不能上传 GitHub Release，完整离线包只供本地或 QQ 分发。Host API 与 Schema 是独立整数协议号，不参与此进位。
@@ -15,7 +15,7 @@ GitHub Actions 不是发布前提。正式版本先完成源码级构建与测�
 确认工作树、差异和远端状态后提交，在已验证的提交上创建带注释标签：
 
 ```powershell
-git tag -a v0.4.8 -m "GameValueEditor v0.4.8"
+git tag -a v0.4.9 -m "GameValueEditor v0.4.9"
 ```
 
 发布脚本从 `origin`（或 `-RemoteName` 指定的远端）解析 GitHub 仓库，避免手工填写错误的所有者或仓库名。可用 `-PushRefs` 同时推送当前分支和标签；脚本先使用配置的 Git 远端，HTTPS 失败时自动通过 GitHub SSH 443 重试。
@@ -24,9 +24,9 @@ git tag -a v0.4.8 -m "GameValueEditor v0.4.8"
 
 ```powershell
 ./scripts/publish-github-release.ps1 `
-  -Tag v0.4.8 `
-  -ReleaseName "肝肾大圣 v0.4.8" `
-  -AssetPath ./dist/GameValueEditor-v0.4.8-win-x64.zip `
+  -Tag v0.4.9 `
+  -ReleaseName "肝肾大圣 v0.4.9" `
+  -AssetPath ./dist/GameValueEditor-v0.4.9-win-x64.zip `
   -PushRefs
 ```
 
@@ -48,9 +48,9 @@ git tag -a v0.4.8 -m "GameValueEditor v0.4.8"
 
 ```powershell
 ./scripts/publish-github-release.ps1 `
-  -Tag v0.4.8 `
-  -ReleaseName "肝肾大圣 v0.4.8" `
-  -AssetPath ./dist/GameValueEditor-v0.4.8-win-x64.zip `
+  -Tag v0.4.9 `
+  -ReleaseName "肝肾大圣 v0.4.9" `
+  -AssetPath ./dist/GameValueEditor-v0.4.9-win-x64.zip `
   -VerifyOnly
 ```
 

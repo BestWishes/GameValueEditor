@@ -136,16 +136,25 @@ internal static class ModuleLifecycleRegressionTests
         vm.SelectedGame = b; vm.SelectedVersion = b.Versions[0];
         downloadGate.SetResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(File.ReadAllBytes(paths[0])) });
         await install;
+        if (!a.IsModuleLoaded || b.IsModuleLoaded)
+            throw new Exception("Initial module load marker was missing or rebound to another game.");
         if (a.ModuleId != entries[0].Id || b.ModuleId.Length != 0 || vm.CanInstallGameModule ||
             vm.ModuleStatusText.Contains(entries[0].DisplayName, StringComparison.Ordinal))
             throw new Exception("Download completion rebound the module or status to another game.");
         gated = false;
         foreach (var entry in entries.Skip(1)) { await catalog.InstallAsync(entry); registry.LoadInstalledModule(entry.Id); }
+        var moduleGames = entries.Skip(1).Select(entry => new GameProfile { Name = entry.Id, ModuleId = entry.Id }).ToArray();
+        foreach (var game in moduleGames) vm.Games.Add(game);
+        RefreshModuleMarkers(vm);
+        if (moduleGames.Any(game => !game.IsModuleLoaded)) throw new Exception("Loaded module markers were not refreshed.");
         var other = entries.Length >= 3 ? registry.FindById(entries[2].Id) : null;
         typeof(MainViewModel).GetMethod("DeactivateModuleUntilRestart", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(vm, new object[] { entries[0].Id });
+        if (a.IsModuleLoaded) throw new Exception("Module waiting for restart still showed a loaded marker.");
         await (Task<bool>)typeof(MainViewModel).GetMethod("RemoveInstalledModuleCoreAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(vm, new object[] { entries[1].Id })!;
+        if (moduleGames[0].IsModuleLoaded || moduleGames.Skip(1).Any(game => !game.IsModuleLoaded))
+            throw new Exception("Uninstall retained a loaded marker or removed another module marker.");
         registry.Reload(); registry.LoadInstalledModule(entries[0].Id);
         if (registry.FindById(entries[0].Id) is not null || !registry.IsRestartRequired(entries[0].Id) ||
             other is not null && !ReferenceEquals(other, registry.FindById(entries[2].Id)))
@@ -156,12 +165,61 @@ internal static class ModuleLifecycleRegressionTests
             throw new Exception("Reinstallation bypassed the restart requirement.");
         using var afterRestart = new GameAdapterRegistry(Path.Combine(installRoot, "modules"));
         if (afterRestart.FindById(entries[0].Id) is null) throw new Exception(string.Join(";", afterRestart.LoadErrors));
+        var restartedVm = CreateViewModel(installRoot, catalog, afterRestart);
+        var restartedGame = new GameProfile { Name = "restart", ModuleId = entries[0].Id };
+        restartedVm.Games.Add(restartedGame);
+        RefreshModuleMarkers(restartedVm, reconcile: true);
+        if (!restartedGame.IsModuleLoaded || !restartedGame.IsModuleInstalled || restartedGame.IsConnected)
+            throw new Exception("Startup did not distinguish loaded module from game connection.");
         File.Delete(Path.Combine(installRoot, "modules", "installed.json"));
         afterRestart.Reload();
+        RefreshModuleMarkers(restartedVm, reconcile: true);
+        if (restartedGame.IsModuleLoaded || restartedGame.IsModuleInstalled)
+            throw new Exception("Missing registration retained the library module marker.");
         if (afterRestart.FindById(entries[0].Id) is not null || !afterRestart.IsRestartRequired(entries[0].Id))
             throw new Exception("Missing installation record retained a live WPF module.");
+        restartedVm.Shutdown();
+        foreach (var scenario in new[] { "missing-dll", "invalid-dll", "host-incompatible" })
+        {
+            var failureRoot = Path.Combine(root, scenario);
+            var failureModules = Path.Combine(failureRoot, "modules");
+            var failureCatalog = new GameModuleCatalogService(failureModules, client);
+            await failureCatalog.InstallAsync(entries[0]);
+            var package = Path.Combine(failureModules, "packages", entries[0].Id, entries[0].Version);
+            if (scenario == "host-incompatible")
+            {
+                var manifestPath = Path.Combine(package, "module.json");
+                var manifest = JsonSerializer.Deserialize<InstalledModuleManifest>(File.ReadAllText(manifestPath),
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+                manifest.MinimumHostVersion = "999.0.0";
+                File.WriteAllText(manifestPath, JsonSerializer.Serialize(manifest));
+            }
+            else
+            {
+                var dll = Directory.GetFiles(package, "*.dll").Single();
+                if (scenario == "missing-dll") File.Delete(dll);
+                else File.WriteAllText(dll, "invalid test DLL");
+            }
+            using var failedRegistry = new GameAdapterRegistry(failureModules);
+            var failedVm = CreateViewModel(failureRoot, failureCatalog, failedRegistry);
+            try
+            {
+                var failedGame = new GameProfile { ModuleId = entries[0].Id, IsModuleLoaded = true };
+                failedVm.Games.Add(failedGame);
+                RefreshModuleMarkers(failedVm, reconcile: true);
+                if (!failedGame.IsModuleInstalled || failedGame.IsModuleLoaded)
+                    throw new Exception($"Installation without a successful module load showed a marker: {scenario}.");
+                if (scenario != "missing-dll" && failedRegistry.LoadErrors.Count == 0)
+                    throw new Exception("Failed module load did not retain diagnostic information.");
+            }
+            finally { failedVm.Shutdown(); }
+        }
         vm.Shutdown();
     }
+
+    private static void RefreshModuleMarkers(MainViewModel vm, bool reconcile = false) =>
+        typeof(MainViewModel).GetMethod(reconcile ? "ReconcileInstalledModulesWithLibrary" : "RefreshLibraryModuleLoadStates",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(vm, null);
 
     private static GameModuleCatalogEntry ReadEntry(string path)
     {
