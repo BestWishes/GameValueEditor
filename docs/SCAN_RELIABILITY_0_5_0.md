@@ -42,6 +42,6 @@
 
 独立本地 review 包 `artifacts/local-review-b13e0f8f255d4f2dba288254527efd2f/GameValueEditor-local-review-v0.5.0-win-x64.zip` 的严格文件/版本检查、实际启动与更新器完整沙箱通过；再次独立启动验证通过。它包含未提交工作树、基线为 90d6b97，明确不是正式资产，SHA-256 `557D04A182C1C39AD6E6791AB33712546745B63988197269CD9FDAAFFDEA8FB9`。源码和新文件的空白/冲突检查通过。
 
-接下来从干净提交验证正式标准包及真实完整离线包，证据统一记录在[集成发布记录](RELEASE_0_5_0_INTEGRATION_REVIEW.md)。以上证明已确认的漏扫和错误伪零问题得到处理，不声称重建了历史那一次失败的唯一现场。若原断言或任何新门禁再次失败，继续停止发布，不删断言、不按通过次数替代分析。
+最终干净源码提交 `7fb7976f37336ede5d5969f12750b68cf4199b57` 的全部正式门禁、标准包启动/更新器、真实完整离线包、实际模块页面及负向输入核验通过。v0.5.0 已发布，独立线上摘要核验、公开索引与三版本保留收尾完成；产物散列、提交和线上证据统一记录在[集成发布记录](RELEASE_0_5_0_INTEGRATION_REVIEW.md)。以上证明已确认的漏扫和错误伪零问题得到处理，不声称重建了历史那一次失败的唯一现场。若原断言或任何新门禁再次失败，必须停止后续发布，不删断言、不按通过次数替代分析。
 
 技术依据：[ReadProcessMemory](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-readprocessmemory)、[VirtualQueryEx](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualqueryex)、[MEMORY_BASIC_INFORMATION](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-memory_basic_information)。
