@@ -63,10 +63,20 @@ public sealed class ProcessService
     }
 
     public ProcessItem? FindRunningGame(GameProfile game)
+        => FindRunningGame(game, GetProcesses());
+
+    internal static ProcessItem? FindRunningGame(GameProfile game, IReadOnlyList<ProcessItem> processes)
     {
-        var candidates = GetProcesses().Where(item =>
-            PathsEqual(item.ExecutablePath, game.ExecutablePath) ||
-            string.Equals(item.ProcessName, game.ProcessName, StringComparison.OrdinalIgnoreCase));
+        var candidates = processes.Where(item => PathsEqual(item.ExecutablePath, game.ExecutablePath)).ToArray();
+        if (candidates.Length == 0)
+        {
+            candidates = processes.Where(item => !string.IsNullOrWhiteSpace(game.ProcessName) &&
+                string.Equals(item.ProcessName, game.ProcessName, StringComparison.OrdinalIgnoreCase)).ToArray();
+            // Names only discover candidates; the caller must verify game identity before binding.
+            // Do not choose a different installation by window title or memory usage.
+            if (candidates.Select(item => item.ExecutablePath).Distinct(StringComparer.OrdinalIgnoreCase).Count() != 1)
+                return null;
+        }
         return candidates
             .OrderByDescending(item => item.Role == GameProcessRole.Main)
             .ThenByDescending(item => !string.IsNullOrWhiteSpace(item.WindowTitle))

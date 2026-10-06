@@ -799,18 +799,23 @@
             <Grid Margin="14,0">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="76"/>
                     <ColumnDefinition Width="220"/>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <TextBlock Text="{Binding StatusText}" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"
                            TextTrimming="CharacterEllipsis" ToolTip="{Binding StatusText}"/>
-                <TextBlock Grid.Column="1" Text="{Binding ApplicationUpdateStatusText}" Foreground="{DynamicResource MutedTextBrush}"
+                <Button x:Name="DownloadCancelButton" Grid.Column="1" Content="取消" Width="64" Margin="12,0,0,0"
+                        Style="{StaticResource ApplicationActionButtonStyle}"
+                        VerticalAlignment="Center" IsEnabled="{Binding CanCancelDownload}" Visibility="{Binding DownloadCancelVisibility}"
+                        ToolTip="取消当前下载；校验或安装阶段不可取消" Click="CancelDownload_OnClick"/>
+                <TextBlock Grid.Column="2" Text="{Binding ApplicationUpdateStatusText}" Foreground="{DynamicResource MutedTextBrush}"
                            VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding ApplicationUpdateStatusText}" Margin="12,0,0,0"/>
-                <TextBlock Grid.Column="2" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" Margin="12,0,16,0">
+                <TextBlock Grid.Column="3" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" Margin="12,0,16,0">
                     <Run Text="仅用于离线单机游戏 · v"/><Run Text="{Binding CurrentApplicationVersion, Mode=OneWay}"/>
                 </TextBlock>
-                <StackPanel x:Name="ApplicationActionButtons" Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
+                <StackPanel x:Name="ApplicationActionButtons" Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center">
                     <Button x:Name="ApplicationRollbackButton" Content="回退" IsEnabled="{Binding CanUseApplicationRollback}"
                             Style="{StaticResource ApplicationActionButtonStyle}" Margin="0" ToolTip="{Binding ApplicationRollbackActionText}"
                             Click="ApplicationRollback_OnClick"/>

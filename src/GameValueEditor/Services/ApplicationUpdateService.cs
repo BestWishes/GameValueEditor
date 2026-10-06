@@ -177,6 +177,7 @@ public sealed class ApplicationUpdateService
             var actualHash = await ComputeSha256Async(temporaryPath, cancellationToken);
             if (!actualHash.Equals(target.Sha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("更新包 SHA-256 校验失败，已拒绝安装。");
+            progress?.Report(new DownloadProgressSnapshot(target.SizeBytes, target.SizeBytes) { Phase = DownloadPhase.Installing });
             File.Move(temporaryPath, finalPath, true);
 
             var pending = new PendingApplicationUpdate(target.Version, finalPath, actualHash, DateTime.UtcNow, operation,

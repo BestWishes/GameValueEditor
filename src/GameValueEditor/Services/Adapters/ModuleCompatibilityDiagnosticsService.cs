@@ -15,7 +15,8 @@ internal sealed record ModuleCompatibilityDiagnosticContext(
     InstalledModuleManifest? InstalledManifest,
     GameModuleCheckResult? CheckResult,
     IGameAdapter? Adapter,
-    IReadOnlyList<string> LoadErrors);
+    IReadOnlyList<string> LoadErrors,
+    IReadOnlyList<string>? StorageErrors = null);
 
 internal sealed record ModuleCompatibilityReportItem(
     string Category,
@@ -97,14 +98,23 @@ internal static partial class ModuleCompatibilityDiagnosticsService
         if (string.IsNullOrWhiteSpace(context.ModuleId))
         {
             Add(items, "专属模块", "模块身份", GameCompatibilityDiagnosticStatus.Warning,
-                "尚未识别当前游戏的专属模块。可先点击“检查新有”，或安装模块后重新诊断。");
+                "尚未识别当前游戏的专属模块。可先点击“查新”，或安装模块后重新诊断。");
         }
         else
         {
             Add(items, "专属模块", "模块 ID", GameCompatibilityDiagnosticStatus.Passed, context.ModuleId);
         }
 
-        if (context.InstalledModule is null)
+        var storageErrors = (context.StorageErrors ?? []).Concat(context.LoadErrors.Where(IsGlobalStorageError))
+            .Distinct(StringComparer.Ordinal).ToArray();
+        foreach (var error in storageErrors)
+            Add(items, "专属模块", "模块资料/安装恢复", GameCompatibilityDiagnosticStatus.Failed, error);
+        if (storageErrors.Length > 0)
+        {
+            Add(items, "专属模块", "本地安装", GameCompatibilityDiagnosticStatus.Failed,
+                "模块资料无法安全读取或安装事务未完成；不能判定为未安装。原记录与备份已保留。");
+        }
+        else if (context.InstalledModule is null)
         {
             Add(items, "专属模块", "本地安装", GameCompatibilityDiagnosticStatus.Information, "未安装专属模块。");
         }
@@ -164,12 +174,18 @@ internal static partial class ModuleCompatibilityDiagnosticsService
 
         var relevantErrors = context.LoadErrors.Where(error =>
                 string.IsNullOrWhiteSpace(context.ModuleId) ||
-                error.Contains(context.ModuleId, StringComparison.Ordinal))
+                IsGlobalStorageError(error) ||
+                error.StartsWith(context.ModuleId + " v", StringComparison.Ordinal))
             .ToList();
         if (relevantErrors.Count == 0)
         {
-            Add(items, "专属模块", "模块加载", GameCompatibilityDiagnosticStatus.Passed,
-                "没有记录到模块加载错误。");
+            Add(items, "专属模块", "模块加载",
+                context.Adapter is not null && storageErrors.Length == 0 ? GameCompatibilityDiagnosticStatus.Passed :
+                context.InstalledModule is not null || storageErrors.Length > 0 ? GameCompatibilityDiagnosticStatus.Failed :
+                GameCompatibilityDiagnosticStatus.Information,
+                context.Adapter is not null && storageErrors.Length == 0 ? "已成功加载适配器。" :
+                context.InstalledModule is not null || storageErrors.Length > 0 ? "模块未成功加载，请检查资料、包文件或待重启状态。" :
+                "本地未安装模块，尚未执行模块加载检查。");
         }
         else
         {
@@ -352,6 +368,9 @@ internal static partial class ModuleCompatibilityDiagnosticsService
                 ? $"当前 {ShortHash(current)} 已命中目录登记值（共 {expected.Count} 个）。"
                 : $"当前 {ShortHash(current)} 未命中目录值：{expectedDisplay}。");
     }
+
+    private static bool IsGlobalStorageError(string error) => error.StartsWith("模块资料:", StringComparison.Ordinal) ||
+        error.StartsWith("installed.json:", StringComparison.Ordinal) || error.StartsWith("pending-deletions.json:", StringComparison.Ordinal);
 
     private static string ShortHash(string value) =>
         value.Length <= 12 ? value : $"{value[..12]}…";

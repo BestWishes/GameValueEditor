@@ -1,8 +1,8 @@
 #Requires -Version 7.4
-# Backward-compatible command; packaging lives in the canonical tool.
 [CmdletBinding()]
 param(
     [string]$ApplicationVersion = '',
+    [string]$ApplicationRepository = (Join-Path $PSScriptRoot '..'),
     [string]$ModuleRepository = '',
     [string[]]$ModuleIds = @(),
     [string]$OutputPath = '',
@@ -11,4 +11,5 @@ param(
     [switch]$VerifyOnly
 )
 $ErrorActionPreference = 'Stop'
-& (Join-Path $PSScriptRoot 'build-complete-offline-bundle.ps1') @PSBoundParameters
+. (Join-Path $PSScriptRoot 'offline-bundle.ps1')
+Invoke-OfflineBundle @PSBoundParameters

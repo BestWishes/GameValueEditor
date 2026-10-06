@@ -25,10 +25,19 @@ internal static class ModuleLifecycleRegressionTests
                 Directory.CreateDirectory(root);
                 try
                 {
+                    if (args.Contains("--game-lifecycle-only", StringComparer.Ordinal))
+                    { await GameLifecycleRegressionTests.RunAsync(Path.Combine(root, "game-lifecycle")); completion.SetResult(); return; }
+                    if (args.Contains("--safety-boundaries-only", StringComparer.Ordinal))
+                    { await SafetyBoundaryRegressionTests.RunAsync(Path.Combine(root, "safety-boundaries")); completion.SetResult(); return; }
+                    await ModuleReliabilityRegressionTests.RunAsync(Path.Combine(root, "module-reliability"));
+                    if (args.Contains("--module-reliability-only", StringComparer.Ordinal)) { completion.SetResult(); return; }
+                    await SafetyBoundaryRegressionTests.RunAsync(Path.Combine(root, "safety-boundaries"));
+                    await GameLifecycleRegressionTests.RunAsync(Path.Combine(root, "game-lifecycle"));
                     await CheckStaleResultsAsync(root);
                     await CheckRecoveryMarkerAsync(root);
                     await StabilityRegressionTests.RunAsync(root, args);
                     await LayoutRegressionTests.CheckUpdateStatesAsync(root);
+                    await DownloadFeedbackRegressionTests.RunAsync(root);
                     var paths = args.Where(arg => arg.StartsWith("--verify-module-package=", StringComparison.Ordinal))
                         .Select(arg => arg["--verify-module-package=".Length..]).ToArray();
                     if (paths.Length >= 2) await CheckInstalledLifecycleAsync(root, paths);
@@ -209,7 +218,7 @@ internal static class ModuleLifecycleRegressionTests
                 RefreshModuleMarkers(failedVm, reconcile: true);
                 if (!failedGame.IsModuleInstalled || failedGame.IsModuleLoaded)
                     throw new Exception($"Installation without a successful module load showed a marker: {scenario}.");
-                if (scenario != "missing-dll" && failedRegistry.LoadErrors.Count == 0)
+                if (failedRegistry.LoadErrors.Count == 0)
                     throw new Exception("Failed module load did not retain diagnostic information.");
             }
             finally { failedVm.Shutdown(); }

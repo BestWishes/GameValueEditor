@@ -5,7 +5,7 @@ using Microsoft.Win32.SafeHandles;
 
 namespace GameValueEditor.Services;
 
-public sealed class ProcessMemoryAccessor : IDisposable
+public sealed class ProcessMemoryAccessor : IDisposable, IMemoryWriteAccess
 {
     private readonly SafeProcessHandle _handle;
 

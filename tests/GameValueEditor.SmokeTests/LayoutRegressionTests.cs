@@ -144,6 +144,15 @@ internal static class LayoutRegressionTests
                 Arrange(root, width);
                 var baselineModule = Positions(moduleButtons, root);
                 var baselineApp = Positions(appButtons, root);
+                var cancel = (Button)window.FindName("DownloadCancelButton");
+                Assert(cancel.Width == 64 && cancel.Visibility == Visibility.Hidden, "Idle cancel slot must be fixed and hidden, not collapsed.");
+                Assert(cancel.ActualHeight == appButtons[0].ActualHeight, "Cancel must use the same footer action height.");
+                foreach (var visibility in new[] { Visibility.Visible, Visibility.Hidden })
+                {
+                    cancel.Visibility = visibility;
+                    Arrange(root, width);
+                    Assert(Positions(appButtons, root).SequenceEqual(baselineApp), "Cancel visibility moved the existing footer buttons.");
+                }
                 CheckSpacing(moduleButtons, root, 64, 8);
                 CheckSpacing(appButtons, root, 52, 12);
                 foreach (var state in new[] { "initial", "checking", "available", "latest", "failed", "downloading", "pending" })
@@ -180,7 +189,14 @@ internal static class LayoutRegressionTests
                 {
                     themes.Apply(theme); Arrange(root, width);
                     CheckLibraryEntry(root, game, width, theme);
-                    if (args.Contains("--render-layout", StringComparer.OrdinalIgnoreCase)) Render(root, theme, width);
+                    if (args.Contains("--render-layout", StringComparer.OrdinalIgnoreCase))
+                    {
+                        Render(root, theme, width);
+                        cancel.Visibility = Visibility.Visible; cancel.IsEnabled = true; Arrange(root, width);
+                        Assert(Positions(appButtons, root).SequenceEqual(baselineApp), "Visible themed cancel moved the footer actions.");
+                        Render(root, theme, width, "-cancel");
+                        cancel.Visibility = Visibility.Hidden; Arrange(root, width);
+                    }
                 }
             }
             foreach (var (file, hash) in new[] {
@@ -289,12 +305,12 @@ internal static class LayoutRegressionTests
         typeof(MainViewModel).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(vm, value);
     private static HttpResponseMessage Json(object value) => new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(value)) };
     private static void Assert(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
-    private static void Render(FrameworkElement root, ApplicationTheme theme, int width)
+    private static void Render(FrameworkElement root, ApplicationTheme theme, int width, string suffix = "")
     {
         var bitmap = new RenderTargetBitmap(width, 780, 96, 96, PixelFormats.Pbgra32); bitmap.Render(root);
         var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
         var folder = System.IO.Path.GetFullPath("artifacts/layout-review"); Directory.CreateDirectory(folder);
-        var path = System.IO.Path.Combine(folder, $"layout-{theme}-{width}.png");
+        var path = System.IO.Path.Combine(folder, $"layout-{theme}-{width}{suffix}.png");
         using var file = File.Create(path); encoder.Save(file);
         Console.WriteLine($"Rendered layout: {path}");
     }

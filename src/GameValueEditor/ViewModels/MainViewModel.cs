@@ -16,7 +16,7 @@ using GameValueEditor.Services.Adapters;
 
 namespace GameValueEditor.ViewModels;
 
-public sealed class MainViewModel : ObservableObject
+public sealed partial class MainViewModel : ObservableObject
 {
     private const int ScanResultPreviewLimit = 1_000;
 
@@ -95,6 +95,7 @@ public sealed class MainViewModel : ObservableObject
     private string _speedMultiplier = "2";
     private bool _isSpeedActive;
     private bool _isSpeedControlBlocked;
+    private int _speedOperationsInFlight;
     private bool _isProcessRefreshBlocked;
     private bool _isConnectionControlBlocked;
     private bool _isLibraryControlBlocked;
@@ -138,6 +139,8 @@ public sealed class MainViewModel : ObservableObject
         _editorHostServices = services ?? throw new ArgumentNullException(nameof(services));
 
     internal void ReportModulePageStatus(string message) => StatusText = message;
+
+    internal Func<int, IMemoryWriteAccess> MemoryWriteAccessFactory { get; set; } = processId => new ProcessMemoryAccessor(processId);
 
     public ObservableCollection<GameProfile> Games => _document.Games;
     public ObservableCollection<ProcessItem> Processes { get; } = [];
@@ -414,7 +417,8 @@ public sealed class MainViewModel : ObservableObject
         _sessions.ContainsKey(SelectedGame.Id);
     public bool CanDisconnectCurrentProcess => !_isConnectionControlBlocked && AttachedProcess is not null && _activeSession is not null;
     public bool CanSaveCurrentGame => !_isLibraryControlBlocked && AttachedProcess is not null;
-    public bool CanRemoveCurrentGame => !_isLibraryControlBlocked && SelectedGame is { IsPinned: false, IsLocked: false };
+    public bool CanRemoveCurrentGame => !_isLibraryControlBlocked && SelectedGame is { IsPinned: false, IsLocked: false } &&
+        (string.IsNullOrWhiteSpace(SelectedGame.ModuleId) || _moduleCatalogService.StorageErrors.Count == 0);
     public bool HasScanSession => _scanCandidates is { Count: > 0 };
     public bool CanUndoScan => !IsBusy && _scanHistory.Count > 0;
     public bool HasActiveAdapter => _activeAdapter is not null;
@@ -448,22 +452,22 @@ public sealed class MainViewModel : ObservableObject
                                           AttachedProcess?.Icon ?? DefaultGameIcon;
     public string CurrentApplicationVersion => ApplicationVersion.Current;
     public string ModuleStatusText { get => _moduleStatusText; private set => SetProperty(ref _moduleStatusText, value); }
-    public bool CanCheckGameModules => !_isModuleControlBlocked &&
+    public bool CanCheckGameModules => !IsDownloadActive && !_isModuleControlBlocked &&
         ((AttachedProcess is not null && _attachedFingerprint is not null) ||
          (SelectedGame is not null && SelectedVersion is not null));
-    public bool CanInstallGameModule => !_isModuleControlBlocked && IsModuleContextCurrent(_moduleCheckContext) &&
+    public bool CanInstallGameModule => _moduleCatalogService.StorageErrors.Count == 0 && !IsDownloadActive && !_isModuleControlBlocked && IsModuleContextCurrent(_moduleCheckContext) &&
         _moduleCheckResult?.Availability is GameModuleAvailability.Available or GameModuleAvailability.UpdateAvailable;
     public string ModuleInstallActionText => _moduleCheckResult?.Availability == GameModuleAvailability.Available ? "下载" : "更新";
     public string ModuleInstallToolTip => _moduleCheckResult?.Availability == GameModuleAvailability.Available
         ? _moduleCheckResult.IsExactBuildMatch ? "可下载" : "下载后验证"
         : _moduleCheckResult?.IsExactBuildMatch == false ? "更新后验证" : "可更新";
-    public bool CanRollbackGameModule => !_isModuleControlBlocked && IsModuleContextCurrent(_moduleCheckContext) &&
+    public bool CanRollbackGameModule => _moduleCatalogService.StorageErrors.Count == 0 && !IsDownloadActive && !_isModuleControlBlocked && IsModuleContextCurrent(_moduleCheckContext) &&
         _moduleCheckResult?.RollbackModule is not null;
     public string ModuleRollbackActionText => _moduleCheckResult?.RollbackModule is { } rollback
         ? $"回退到 v{rollback.Version}"
         : "无可回退版本";
     public bool ModuleRestartRequired => _moduleRestartRequired;
-    public bool CanUninstallGameModule => !_isModuleControlBlocked &&
+    public bool CanUninstallGameModule => _moduleCatalogService.StorageErrors.Count == 0 && !_isModuleControlBlocked &&
         !string.IsNullOrWhiteSpace(ResolveActiveModuleId()) &&
         _moduleCatalogService.FindInstalled(ResolveActiveModuleId()) is not null;
     public bool CanViewModuleCompatibilityDiagnostics => !_isModuleControlBlocked &&
@@ -474,10 +478,10 @@ public sealed class MainViewModel : ObservableObject
         get => _applicationUpdateStatusText;
         private set => SetProperty(ref _applicationUpdateStatusText, value);
     }
-    public bool CanCheckApplicationUpdate => !_isApplicationUpdateBusy && !_applicationUpdateDownloaded && !_isApplicationUpdateCheckCooldown;
-    public bool CanUseApplicationUpdate => !_isApplicationUpdateBusy && HasApplicationUpdateAvailable;
+    public bool CanCheckApplicationUpdate => !IsDownloadActive && !_isApplicationUpdateBusy && !_applicationUpdateDownloaded && !_isApplicationUpdateCheckCooldown;
+    public bool CanUseApplicationUpdate => !IsDownloadActive && !_isApplicationUpdateBusy && HasApplicationUpdateAvailable;
     public bool HasApplicationUpdateAvailable => _applicationUpdateResult?.IsUpdateAvailable == true && !_applicationUpdateDownloaded;
-    public bool CanUseApplicationRollback => !_isApplicationUpdateBusy && !_applicationUpdateDownloaded &&
+    public bool CanUseApplicationRollback => !IsDownloadActive && !_isApplicationUpdateBusy && !_applicationUpdateDownloaded &&
         _applicationUpdateResult?.RollbackTarget is not null;
     public string ApplicationRollbackActionText => _applicationUpdateResult?.RollbackTarget is { } rollback
         ? $"回退到 v{rollback.Version}"
@@ -617,15 +621,23 @@ public sealed class MainViewModel : ObservableObject
 
     public void Attach(ProcessItem process, GameProfile? preferredGame = null)
     {
-        CaptureActiveSession();
-        StopLiveCandidateRefresh();
         var snapshot = _processService.GetProcesses();
         var group = _processService.ResolveLogicalGame(process, snapshot);
+        var game = ResolveGameForProcess(group.DataProcess);
+        if (preferredGame is not null && !ReferenceEquals(game, preferredGame))
+            throw new InvalidOperationException("不能仅凭进程名确认所选游戏，请通过游戏库连接执行构建验证。");
+        AttachCore(process, group, game);
+    }
+
+    private void AttachCore(ProcessItem process, LogicalGameProcessGroup group, GameProfile? matchingGame)
+    {
         var dataProcess = group.DataProcess;
+        using var memory = new ProcessMemoryAccessor(dataProcess.ProcessId);
+        memory.EnsureInstance(dataProcess.ProcessId, dataProcess.StartTimeUtc);
+        CaptureActiveSession();
+        StopLiveCandidateRefresh();
         if (_activeSession is { GameId: null } transient && !transient.ProcessGroup.IsSameInstance(group))
             DisconnectSession(transient, false);
-        using var _ = new ProcessMemoryAccessor(dataProcess.ProcessId);
-        var matchingGame = ResolveGameForProcess(dataProcess, preferredGame);
         if (matchingGame is not null && _sessions.TryGetValue(matchingGame.Id, out var previous) &&
             !previous.ProcessGroup.IsSameInstance(group))
             DisconnectSession(previous, false);
@@ -670,8 +682,7 @@ public sealed class MainViewModel : ObservableObject
         var cooldown = BeginConnectionControlInteraction();
         try
         {
-            Attach(process);
-            await MatchAttachedVersionAsync();
+            await ConnectToProcessAsync(process);
         }
         finally { ReleaseConnectionControlsAfter(cooldown); }
     }
@@ -684,9 +695,8 @@ public sealed class MainViewModel : ObservableObject
         try
         {
             var process = _processService.FindRunningGame(game)
-                          ?? throw new InvalidOperationException("没有检测到这个游戏正在运行。");
-            Attach(process, game);
-            await MatchAttachedVersionAsync();
+                          ?? throw new InvalidOperationException("没有找到可确认的游戏进程。若有多个同名程序，请在顶部选择实际游戏进程连接。");
+            await ConnectToProcessAsync(process, game);
         }
         finally { ReleaseConnectionControlsAfter(cooldown); }
     }
@@ -720,18 +730,32 @@ public sealed class MainViewModel : ObservableObject
         await Task.CompletedTask;
     }
 
-    public async Task MatchAttachedVersionAsync()
+    private async Task ConnectToProcessAsync(ProcessItem process, GameProfile? preferredGame = null)
+    {
+        var operation = CaptureGameOperation();
+        var group = _processService.ResolveLogicalGame(process, _processService.GetProcesses());
+        var fingerprint = await AwaitGameOperationAsync(operation, _fingerprintService.CreateAsync(group.DataProcess.ExecutablePath));
+        var adapter = _adapterRegistry.Resolve(group.DataProcess, fingerprint);
+        RequireCurrentGameOperation(operation);
+        var game = ResolveGameForProcess(group.DataProcess, fingerprint, adapter);
+        if (preferredGame is not null && !ReferenceEquals(game, preferredGame))
+            throw new InvalidOperationException("候选进程的路径、已知构建或已验证模块身份无法确认是所选游戏，未更改游戏档案。请在顶部选择实际进程连接。");
+        AttachCore(process, group, game);
+        await MatchAttachedVersionCoreAsync(fingerprint);
+    }
+
+    public Task MatchAttachedVersionAsync() => MatchAttachedVersionCoreAsync();
+
+    private async Task MatchAttachedVersionCoreAsync(VersionFingerprint? existingFingerprint = null)
     {
         var operation = CaptureGameOperation();
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
-        var fingerprint = await AwaitGameOperationAsync(operation, _fingerprintService.CreateAsync(process.ExecutablePath));
+        var fingerprint = existingFingerprint ?? await AwaitGameOperationAsync(operation, _fingerprintService.CreateAsync(process.ExecutablePath));
         RequireCurrentGameOperation(operation);
         _attachedFingerprint = fingerprint;
         if (_activeSession is not null) _activeSession.Fingerprint = fingerprint;
         SetActiveAdapter(_adapterRegistry.Resolve(process, fingerprint));
-        var game = _attachedGameId is Guid attachedGameId
-            ? Games.FirstOrDefault(item => item.Id == attachedGameId)
-            : ResolveGameForProcess(process, SelectedGame);
+        var game = ResolveGameForProcess(process, fingerprint, _activeAdapter);
         if (game is null)
         {
             SelectedVersion = null;
@@ -742,6 +766,7 @@ public sealed class MainViewModel : ObservableObject
             return;
         }
 
+        BindActiveSessionToGame(game);
         _suppressGameActivation = true;
         try { SelectedGame = game; }
         finally { _suppressGameActivation = false; }
@@ -820,10 +845,7 @@ public sealed class MainViewModel : ObservableObject
             _activeSession.Adapter = _activeAdapter;
         }
 
-        var game = operation.AttachedGameId is Guid attachedGameId
-            ? Games.FirstOrDefault(item => item.Id == attachedGameId)
-            : ResolveGameForProcess(process, operation.Game)
-              ?? Games.FirstOrDefault(item => item.Versions.Any(version => VersionMatches(version, fingerprint)));
+        var game = ResolveGameForProcess(process, fingerprint, _activeAdapter);
         if (game is null)
         {
             game = new GameProfile
@@ -852,11 +874,7 @@ public sealed class MainViewModel : ObservableObject
         game.IsConnected = true;
         _gameIconService.Save(game, process.Icon);
         game.IconSource ??= DefaultGameIcon;
-        if (_activeSession is not null)
-        {
-            _activeSession.GameId = game.Id;
-            _sessions[game.Id] = _activeSession;
-        }
+        BindActiveSessionToGame(game);
 
         var version = FindMatchingVersion(game, fingerprint);
         if (version is null)
@@ -909,6 +927,8 @@ public sealed class MainViewModel : ObservableObject
         var game = SelectedGame ?? throw new InvalidOperationException("请先选择游戏条目。");
         if (game.IsPinned) throw new InvalidOperationException("置顶游戏不能从库移出，请先取消置顶。");
         if (game.IsLocked) throw new InvalidOperationException("锁定游戏不能从库移出，请先解锁。");
+        if (!string.IsNullOrWhiteSpace(game.ModuleId) && _moduleCatalogService.StorageErrors.Count > 0)
+            throw new InvalidOperationException("模块资料无法安全读取或安装恢复未完成，暂不能移出关联游戏。请先打开“诊断”检查并恢复资料。");
         var cooldown = BeginLibraryControlInteraction();
         try
         {
@@ -923,6 +943,7 @@ public sealed class MainViewModel : ObservableObject
                 {
                     moduleFilesDeleted = await RemoveInstalledModuleCoreAsync(game.ModuleId);
                     removedModule = true;
+                    game.IsModuleInstalled = false;
                 }
                 finally
                 {
@@ -930,24 +951,31 @@ public sealed class MainViewModel : ObservableObject
                     NotifyModuleControls();
                 }
             }
-            var keptConnection = _sessions.Remove(game.Id, out var session);
+            var keptConnection = _sessions.TryGetValue(game.Id, out var session) &&
+                                 ReferenceEquals(_activeSession, session) && ReferenceEquals(SelectedGame, game);
             if (keptConnection && session is not null)
             {
+                CaptureActiveSession();
                 StopSessionLockMaintenance(session);
+                _sessions.Remove(game.Id);
                 session.GameId = null;
                 session.VersionId = null;
                 game.IsConnected = false;
-                _activeSession = session;
-                _speedService = session.SpeedService;
                 _attachedGameId = null;
                 _suppressGameActivation = true;
                 try { SelectedGame = null; }
                 finally { _suppressGameActivation = false; }
-                SelectedVersion = null;
+                RestoreSessionIntoView(session, null);
+            }
+            else if (session is not null)
+            {
+                if (session.IsSpeedOperationRunning)
+                    throw new InvalidOperationException("待移出的游戏正在调整倍速，档案和连接已保留，请稍后重新移出。");
+                DisconnectSession(session, false);
             }
 
             Games.Remove(game);
-            if (!keptConnection) SelectedGame = Games.FirstOrDefault();
+            if (ReferenceEquals(SelectedGame, game)) SelectedGame = Games.FirstOrDefault();
             GamesView.Refresh();
             await SaveLibraryAsync();
             var moduleSuffix = !removedModule
@@ -1293,26 +1321,22 @@ public sealed class MainViewModel : ObservableObject
         StopLiveCandidateRefresh();
         try
         {
-            using var memory = new ProcessMemoryAccessor(process.ProcessId);
+            using var memory = MemoryWriteAccessFactory(process.ProcessId);
             memory.EnsureInstance(process.ProcessId, process.StartTimeUtc);
-            var failures = new List<string>();
+            var counts = new int[4];
+            var warnings = new List<string>();
             foreach (var write in writes)
             {
-                if (!memory.TryWrite(write.Candidate.Address, write.Bytes, out var error))
-                {
-                    failures.Add($"{write.Candidate.AddressDisplay}: {error}");
-                    continue;
-                }
-                if (!memory.TryRead(write.Candidate.Address, write.Candidate.ValueType.Size(), out var current))
-                    current = write.Bytes;
-                write.Candidate.CurrentBytes = current;
+                var result = MemoryWriteVerifier.Write(memory, write.Candidate.Address, write.Bytes);
+                counts[(int)result.State]++;
+                write.Candidate.CurrentBytes = result.CurrentBytes;
+                if (result.State != MemoryWriteState.ReadbackConfirmed && warnings.Count < 3)
+                    warnings.Add($"{write.Candidate.AddressDisplay}: {result.Description}");
             }
 
-            if (failures.Count > 0)
-                throw new InvalidOperationException($"已写入 {writes.Count - failures.Count} 个地址，{failures.Count} 个失败：{string.Join("；", failures.Take(3))}");
-            StatusText = writes.Count == 1
-                ? $"已临时写入 {writes[0].Candidate.AddressDisplay}；确认有效后可保存为字段"
-                : $"已把 {writes.Count:N0} 个候选地址的界面值批量修改为 {value.Trim()}";
+            StatusText = $"回读一致 {counts[(int)MemoryWriteState.ReadbackConfirmed]:N0}，回读失败 {counts[(int)MemoryWriteState.ReadbackFailed]:N0}，回读不一致 {counts[(int)MemoryWriteState.ReadbackMismatch]:N0}，写入失败 {counts[(int)MemoryWriteState.WriteFailed]:N0}；实际效果请在游戏内确认";
+            if (warnings.Count > 0)
+                throw new InvalidOperationException(StatusText + "\n" + string.Join("；", warnings));
         }
         finally
         {
@@ -1346,21 +1370,40 @@ public sealed class MainViewModel : ObservableObject
         if (!MemoryValueCodec.TryParseEncoded(value, field.ValueType, field.ScaleMultiplier, out var bytes))
             throw new InvalidOperationException("输入值无法按该字段保存的搜索套路进行编码。");
 
-        using var memory = new ProcessMemoryAccessor(process.ProcessId);
-        memory.EnsureInstance(process.ProcessId, process.StartTimeUtc);
-        if (!TryResolveAddress(memory, process, field, out var address))
-            throw new InvalidOperationException("该字段是动态地址，游戏重启后需要重新扫描并更新位置。");
-        if (!memory.TryWrite(address, bytes, out var error))
-            throw new InvalidOperationException($"写入失败：{error}");
-        field.LastAddress = address;
-        field.CurrentValue = MemoryValueCodec.FormatDecoded(bytes, field.ValueType, field.ScaleMultiplier);
-        field.Status = "刚刚写入";
-        field.LastVerifiedUtc = DateTime.UtcNow;
-        field.ProcessStartTimeUtcTicks = process.StartTimeUtc.Ticks;
-        if (field.IsValueLocked) field.LockedValue = field.CurrentValue;
-        await SaveLibraryAsync();
-        RequireCurrentGameOperation(operation);
-        StatusText = $"已修改 {field.Name}";
+        var wasLocked = field.IsValueLocked;
+        try
+        {
+            using var memory = MemoryWriteAccessFactory(process.ProcessId);
+            memory.EnsureInstance(process.ProcessId, process.StartTimeUtc);
+            if (!TryResolveAddress(memory, process, field, out var address))
+                throw new InvalidOperationException("该字段是动态地址，游戏重启后需要重新扫描并更新位置。");
+            var result = MemoryWriteVerifier.Write(memory, address, bytes);
+            field.CurrentValue = result.HasReadback
+                ? MemoryValueCodec.FormatDecoded(result.CurrentBytes, field.ValueType, field.ScaleMultiplier) : "—";
+            field.Status = result.Description;
+            StatusText = $"{field.Name}：{field.Status}";
+            if (result.State == MemoryWriteState.WriteFailed)
+                throw new InvalidOperationException(StatusText);
+            field.LastAddress = address;
+            if (result.HasReadback) field.LastVerifiedUtc = DateTime.UtcNow;
+            field.ProcessStartTimeUtcTicks = process.StartTimeUtc.Ticks;
+            if (field.IsValueLocked)
+            {
+                if (result.State == MemoryWriteState.ReadbackConfirmed) field.LockedValue = field.CurrentValue;
+                else
+                {
+                    field.IsValueLocked = false;
+                    field.LockedValue = string.Empty;
+                    field.Status += "；已暂停该字段锁定";
+                }
+            }
+            await SaveLibraryAsync();
+            RequireCurrentGameOperation(operation);
+            StatusText = $"{field.Name}：{field.Status}";
+            if (result.State != MemoryWriteState.ReadbackConfirmed)
+                throw new InvalidOperationException(StatusText);
+        }
+        finally { if (wasLocked && IsCurrentGameOperation(operation)) RestartLockMaintenance(); }
     }
 
     public async Task<SavedField> AddAdapterFieldAsync(string fieldKey, string displayName, string group)
@@ -1567,6 +1610,8 @@ public sealed class MainViewModel : ObservableObject
         var process = AttachedProcess ?? throw new InvalidOperationException("请先连接游戏进程。");
         var multiplier = ParseSpeedMultiplier(SpeedMultiplier);
         var cooldown = BeginSpeedControlInteraction();
+        _speedOperationsInFlight++;
+        if (operation.Session is not null) operation.Session.IsSpeedOperationRunning = true;
         try
         {
             SpeedMultiplier = FormatSpeedMultiplier(multiplier);
@@ -1601,6 +1646,8 @@ public sealed class MainViewModel : ObservableObject
         }
         finally
         {
+            _speedOperationsInFlight--;
+            if (operation.Session is not null) operation.Session.IsSpeedOperationRunning = false;
             ReleaseSpeedControlAfter(cooldown);
         }
     }
@@ -1611,6 +1658,8 @@ public sealed class MainViewModel : ObservableObject
         var speedService = _speedService;
         _ = AttachedProcess ?? throw new InvalidOperationException("请先连接游戏进程。");
         var cooldown = BeginSpeedControlInteraction();
+        _speedOperationsInFlight++;
+        if (operation.Session is not null) operation.Session.IsSpeedOperationRunning = true;
         try
         {
             if (!speedService.HasHooks || speedService.Multiplier == 1d)
@@ -1632,6 +1681,8 @@ public sealed class MainViewModel : ObservableObject
         }
         finally
         {
+            _speedOperationsInFlight--;
+            if (operation.Session is not null) operation.Session.IsSpeedOperationRunning = false;
             ReleaseSpeedControlAfter(cooldown);
         }
     }
@@ -1748,9 +1799,11 @@ public sealed class MainViewModel : ObservableObject
         field.Name = name.Trim();
         field.Group = NormalizeGroup(group);
         if (!string.IsNullOrWhiteSpace(value) && !string.Equals(value.Trim(), field.CurrentValue, StringComparison.Ordinal))
+        {
             await WriteSelectedFieldAsync(value.Trim());
-        else
-            await SaveLibraryAsync();
+            return; // Keep the actual write/readback outcome, including module-specific feedback.
+        }
+        await SaveLibraryAsync();
         StatusText = $"已更新字段 {field.Name}";
     }
 
@@ -1785,6 +1838,7 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task CheckGameModuleUpdatesAsync()
     {
+        if (IsDownloadActive) return;
         var context = CaptureModuleContext();
         var game = SelectedGame;
         var version = SelectedVersion;
@@ -1830,7 +1884,7 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
-    public async Task InstallAvailableGameModuleAsync()
+    public async Task<bool> InstallAvailableGameModuleAsync()
     {
         var context = RequireModuleCheckContext();
         var module = _moduleCheckResult?.RemoteModule
@@ -1843,23 +1897,21 @@ public sealed class MainViewModel : ObservableObject
         var exactBuildMatch = _moduleCheckResult?.IsExactBuildMatch == true;
         if (_moduleCheckResult?.Availability is not (GameModuleAvailability.Available or GameModuleAvailability.UpdateAvailable))
             throw new InvalidOperationException("当前没有可下载或更新的专属模块。");
-        if (_isModuleControlBlocked) return;
+        if (_isModuleControlBlocked || IsDownloadActive) return false;
         _isModuleControlBlocked = true;
         NotifyModuleControls();
         var cooldown = Task.Delay(TimeSpan.FromSeconds(3));
-        var downloadInProgress = true;
+        DownloadOperation? download = null;
         try
         {
             ModuleStatusText = $"正在下载并校验 {module.DisplayName} v{module.Version}…";
-            var progress = new Progress<DownloadProgressSnapshot>(snapshot =>
+            download = BeginDownload(snapshot =>
             {
-                if (!downloadInProgress) return;
-                var message = $"正在下载 {module.DisplayName} v{module.Version} · {snapshot.DisplayText}";
+                var message = $"{module.DisplayName} v{module.Version} · {snapshot.DisplayText}";
                 if (IsModuleContextCurrent(context)) ModuleStatusText = message;
                 StatusText = message;
             });
-            await _moduleCatalogService.InstallAsync(module, progress);
-            downloadInProgress = false;
+            await _moduleCatalogService.InstallAsync(module, download, download.Token);
             var replacementRequiresRestart = installedBefore is not null || _adapterRegistry.RequiresRestart(module.Id);
             _moduleRestartRequired |= replacementRequiresRestart;
             if (replacementRequiresRestart)
@@ -1879,7 +1931,7 @@ public sealed class MainViewModel : ObservableObject
                     await SaveLibraryAsync();
                     ResetModuleCheckState();
                     StatusText = $"已安装 {module.DisplayName} v{module.Version}，请连接游戏后验证。";
-                    return;
+                    return true;
                 }
                 game = await AddCurrentProcessToLibraryCoreAsync(
                     string.IsNullOrWhiteSpace(module.GameDisplayName) ? process.ProcessName : module.GameDisplayName,
@@ -1907,7 +1959,7 @@ public sealed class MainViewModel : ObservableObject
             {
                 ResetModuleCheckState();
                 StatusText = $"已安装 {module.DisplayName} v{module.Version}。";
-                return;
+                return true;
             }
             _moduleCheckContext = CaptureModuleContext();
             _moduleCheckResult = new GameModuleCheckResult(GameModuleAvailability.Current, module,
@@ -1928,42 +1980,47 @@ public sealed class MainViewModel : ObservableObject
                             : $"已安装 {module.DisplayName} v{module.Version}；当前构建已通过本地只读兼容验证并启用。";
             NotifyModuleControls();
         }
+        catch (OperationCanceledException) when (download?.IsCanceled == true)
+        {
+            StatusText = "已取消下载，本地模块版本未改变。";
+            if (IsModuleContextCurrent(context)) ModuleStatusText = StatusText;
+            return false;
+        }
         finally
         {
-            downloadInProgress = false;
+            if (download is not null) EndDownload(download);
             ReleaseModuleControlsAfter(cooldown);
         }
+        return true;
     }
 
-    public async Task RollbackCurrentGameModuleAsync()
+    public async Task<bool> RollbackCurrentGameModuleAsync()
     {
         var context = RequireModuleCheckContext();
         var rollback = _moduleCheckResult?.RollbackModule
                        ?? throw new InvalidOperationException("当前没有兼容的较低模块版本可回退。");
-        if (_isModuleControlBlocked) return;
+        if (_isModuleControlBlocked || IsDownloadActive) return false;
         _isModuleControlBlocked = true;
         NotifyModuleControls();
         var cooldown = Task.Delay(TimeSpan.FromSeconds(3));
-        var downloadInProgress = true;
+        DownloadOperation? download = null;
         try
         {
             ModuleStatusText = $"正在下载并校验 {rollback.DisplayName} v{rollback.Version}…";
-            var progress = new Progress<DownloadProgressSnapshot>(snapshot =>
+            download = BeginDownload(snapshot =>
             {
-                if (!downloadInProgress) return;
-                var message = $"正在下载 {rollback.DisplayName} v{rollback.Version} · {snapshot.DisplayText}";
+                var message = $"{rollback.DisplayName} v{rollback.Version} · {snapshot.DisplayText}";
                 if (IsModuleContextCurrent(context)) ModuleStatusText = message;
                 StatusText = message;
             });
-            await _moduleCatalogService.InstallAsync(rollback, progress);
-            downloadInProgress = false;
+            await _moduleCatalogService.InstallAsync(rollback, download, download.Token);
             _moduleRestartRequired = true;
             DeactivateModuleUntilRestart(rollback.Id);
             if (!IsModuleContextCurrent(context))
             {
                 ResetModuleCheckState();
                 StatusText = $"已手动回退 {rollback.DisplayName} 到 v{rollback.Version}；请重启主程序后启用。";
-                return;
+                return true;
             }
             _moduleCheckResult = new GameModuleCheckResult(GameModuleAvailability.Current, rollback,
                 _moduleCatalogService.FindInstalled(rollback.Id),
@@ -1972,11 +2029,18 @@ public sealed class MainViewModel : ObservableObject
             StatusText = ModuleStatusText;
             NotifyModuleControls();
         }
+        catch (OperationCanceledException) when (download?.IsCanceled == true)
+        {
+            StatusText = "已取消下载，本地模块版本未改变。";
+            if (IsModuleContextCurrent(context)) ModuleStatusText = StatusText;
+            return false;
+        }
         finally
         {
-            downloadInProgress = false;
+            if (download is not null) EndDownload(download);
             ReleaseModuleControlsAfter(cooldown);
         }
+        return true;
     }
 
     private void DeactivateModuleUntilRestart(string moduleId)
@@ -2034,9 +2098,9 @@ public sealed class MainViewModel : ObservableObject
     {
         var sessions = _sessions.Values.Append(_activeSession).Where(item => item is not null)
             .Cast<GameConnectionSession>().Distinct().ToList();
-        foreach (var session in sessions) StopSessionLockMaintenance(session);
         var removed = _moduleCatalogService.Unregister(moduleId)
                       ?? throw new InvalidOperationException("模块安装记录不存在。");
+        foreach (var session in sessions) StopSessionLockMaintenance(session);
         try
         {
             foreach (var session in sessions.Where(session =>
@@ -2135,7 +2199,8 @@ public sealed class MainViewModel : ObservableObject
             manifest,
             checkResult,
             adapter,
-            _adapterRegistry.LoadErrors));
+            _adapterRegistry.LoadErrors,
+            _moduleCatalogService.StorageErrors));
     }
 
     private static bool IsSafeContributor(GameModuleContributor contributor) =>
@@ -2148,7 +2213,7 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task CheckApplicationUpdateAsync()
     {
-        if (_isApplicationUpdateBusy || _isApplicationUpdateCheckCooldown || _applicationUpdateDownloaded) return;
+        if (IsDownloadActive || _isApplicationUpdateBusy || _isApplicationUpdateCheckCooldown || _applicationUpdateDownloaded) return;
         _isApplicationUpdateBusy = true;
         _isApplicationUpdateCheckCooldown = true;
         ReleaseApplicationUpdateCheckCooldownAfterDelay();
@@ -2214,25 +2279,37 @@ public sealed class MainViewModel : ObservableObject
         ApplicationReleaseTarget target,
         ApplicationUpdateOperation operation)
     {
-        if (_isApplicationUpdateBusy || _applicationUpdateDownloaded) return false;
+        if (_isApplicationUpdateBusy || _applicationUpdateDownloaded || IsDownloadActive) return false;
         _isApplicationUpdateBusy = true;
         NotifyApplicationUpdateState();
+        DownloadOperation? download = null;
         try
         {
             ApplicationUpdateStatusText = $"　v{target.Version} 下载中";
-            var progress = new Progress<DownloadProgressSnapshot>(snapshot =>
+            download = BeginDownload(snapshot =>
             {
-                var progressText = snapshot.Percentage is { } percentage
-                    ? $"下载 {percentage}% "
-                    : "下载中 ";
+                var progressText = snapshot.Phase switch
+                {
+                    DownloadPhase.Connecting => "连接中",
+                    DownloadPhase.Waiting => "等待数据",
+                    DownloadPhase.Verifying => "校验中",
+                    DownloadPhase.Installing => "准备安装",
+                    _ => snapshot.Percentage is { } percentage ? $"下载 {percentage}%" : "下载中"
+                };
                 ApplicationUpdateStatusText = $"　v{target.Version} {progressText.Trim()}";
-                StatusText = $"正在下载肝肾大圣 v{target.Version} · {snapshot.DisplayText}";
+                StatusText = $"肝肾大圣 v{target.Version} · {snapshot.DisplayText}";
             });
-            await _applicationUpdateService.DownloadAsync(target, operation, progress);
+            await _applicationUpdateService.DownloadAsync(target, operation, download, download.Token);
             _applicationUpdateDownloaded = true;
             ApplicationUpdateStatusText = $"　v{target.Version} 已下载";
             StatusText = $"已下载并校验 v{target.Version}，可立即重启或下次启动时{(operation == ApplicationUpdateOperation.Update ? "更新" : "回退")}";
             return true;
+        }
+        catch (OperationCanceledException) when (download?.IsCanceled == true)
+        {
+            ApplicationUpdateStatusText = $"　v{target.Version} 已取消";
+            StatusText = "已取消下载，本地主程序版本未改变。";
+            return false;
         }
         catch
         {
@@ -2242,6 +2319,7 @@ public sealed class MainViewModel : ObservableObject
         }
         finally
         {
+            if (download is not null) EndDownload(download);
             _isApplicationUpdateBusy = false;
             NotifyApplicationUpdateState();
         }
@@ -2288,7 +2366,9 @@ public sealed class MainViewModel : ObservableObject
         _moduleCheckResult = null;
         var moduleId = ResolveActiveModuleId();
         var installed = string.IsNullOrWhiteSpace(moduleId) ? null : _moduleCatalogService.FindInstalled(moduleId);
-        ModuleStatusText = _adapterRegistry.IsRestartRequired(moduleId)
+        ModuleStatusText = _moduleCatalogService.StorageErrors.Count > 0
+            ? "模块资料无法安全读取或安装恢复未完成，请打开“诊断”；原资料已保留"
+            : _adapterRegistry.IsRestartRequired(moduleId)
             ? "该模块已停用，请手动重启主程序后启用"
             : _activeAdapter is not null
             ? $"本地已装配：{_activeAdapter.DisplayName}（尚未检查更新）"
@@ -2492,6 +2572,7 @@ public sealed class MainViewModel : ObservableObject
 
     private void NotifyModuleControls()
     {
+        OnPropertyChanged(nameof(CanRemoveCurrentGame));
         OnPropertyChanged(nameof(CanCheckGameModules));
         OnPropertyChanged(nameof(CanInstallGameModule));
         OnPropertyChanged(nameof(ModuleInstallActionText));
@@ -2544,7 +2625,7 @@ public sealed class MainViewModel : ObservableObject
         return adapter;
     }
 
-    private static bool TryResolveAddress(ProcessMemoryAccessor memory, ProcessItem process, SavedField field, out ulong address)
+    private static bool TryResolveAddress(IMemoryWriteAccess memory, ProcessItem process, SavedField field, out ulong address)
     {
         if (field.LocatorKind == "ModuleOffset" && memory.TryGetModuleBase(field.ModuleName, out var moduleBase))
         {
@@ -2869,16 +2950,25 @@ public sealed class MainViewModel : ObservableObject
     {
         var changed = false;
         var installedManifests = _moduleCatalogService.GetInstalledManifests();
+        if (_moduleCatalogService.StorageErrors.Count > 0)
+        {
+            foreach (var game in Games) { game.IsModuleInstalled = false; game.IsModuleLoaded = false; }
+            return false; // Do not erase semantic module identities because registration is unreadable.
+        }
         var installedIds = installedManifests.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
         foreach (var game in Games) game.IsModuleInstalled = false;
 
         foreach (var manifest in installedManifests)
         {
             var game = Games.FirstOrDefault(item => string.Equals(item.ModuleId, manifest.Id, StringComparison.Ordinal))
-                       ?? Games.FirstOrDefault(item => manifest.ProcessNames.Any(name =>
-                           string.Equals(name, item.ProcessName, StringComparison.OrdinalIgnoreCase)))
-                       ?? Games.FirstOrDefault(item => item.Versions.Any(version =>
-                           manifest.CompatibleBuilds.Any(build => InstalledBuildMatches(build, version))));
+                       ?? Games.FirstOrDefault(item => !string.IsNullOrWhiteSpace(item.ModuleId) &&
+                           string.Equals(_adapterRegistry.FindById(item.ModuleId)?.Id, manifest.Id, StringComparison.Ordinal));
+            if (game is null)
+            {
+                var matches = Games.Where(item => string.IsNullOrWhiteSpace(item.ModuleId) && item.Versions.Any(version =>
+                    manifest.CompatibleBuilds.Any(build => GameIdentityResolver.MatchesInstalledBuild(build, version)))).Take(2).ToArray();
+                if (matches.Length == 1) game = matches[0];
+            }
             if (game is null)
             {
                 game = new GameProfile
@@ -2906,35 +2996,34 @@ public sealed class MainViewModel : ObservableObject
         return changed;
     }
 
-    private static bool InstalledBuildMatches(GameModuleBuildMatch build, GameVersionProfile version) =>
-        MatchOptionalHash(build.BuildFingerprint, version.BuildFingerprint) &&
-        MatchOptionalHash(build.ExecutableSha256, version.ExecutableSha256) &&
-        MatchOptionalHash(build.GameAssemblySha256, version.GameAssemblySha256) &&
-        MatchOptionalHash(build.MetadataSha256, version.MetadataSha256);
-
-    private static bool MatchOptionalHash(string expected, string actual) =>
-        string.IsNullOrWhiteSpace(expected) || string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase);
-
     private bool IsGameVisible(GameProfile game) =>
         string.IsNullOrWhiteSpace(SearchText) ||
         game.Name.Contains(SearchText, StringComparison.CurrentCultureIgnoreCase) ||
         game.ProcessName.Contains(SearchText, StringComparison.OrdinalIgnoreCase);
 
-    private GameProfile? ResolveGameForProcess(ProcessItem process, GameProfile? preferredGame)
+    private GameProfile? ResolveGameForProcess(ProcessItem process, VersionFingerprint? fingerprint = null, IGameAdapter? adapter = null)
+        => GameIdentityResolver.Resolve(Games, process, fingerprint,
+            adapter is null ? null : new[] { adapter.Id }.Concat(adapter.LegacyIds).ToArray());
+
+    private void BindActiveSessionToGame(GameProfile game)
     {
-        if (preferredGame is not null && Games.Contains(preferredGame) &&
-            (PathsEqual(preferredGame.ExecutablePath, process.ExecutablePath) ||
-             string.Equals(preferredGame.ProcessName, process.ProcessName, StringComparison.OrdinalIgnoreCase)))
-            return preferredGame;
-
-        var pathMatch = Games.FirstOrDefault(game => PathsEqual(game.ExecutablePath, process.ExecutablePath));
-        if (pathMatch is not null) return pathMatch;
-
-        var processNameMatches = Games
-            .Where(game => string.Equals(game.ProcessName, process.ProcessName, StringComparison.OrdinalIgnoreCase))
-            .Take(2)
-            .ToList();
-        return processNameMatches.Count == 1 ? processNameMatches[0] : null;
+        var session = _activeSession;
+        if (session is not null)
+        {
+            if (_sessions.TryGetValue(game.Id, out var previous) && !ReferenceEquals(previous, session))
+                DisconnectSession(previous, false);
+            if (session.GameId is Guid oldId && oldId != game.Id &&
+                _sessions.TryGetValue(oldId, out var old) && ReferenceEquals(old, session))
+            {
+                _sessions.Remove(oldId);
+                var oldGame = Games.FirstOrDefault(item => item.Id == oldId);
+                if (oldGame is not null) oldGame.IsConnected = false;
+            }
+            session.GameId = game.Id;
+            _sessions[game.Id] = session;
+            game.IsConnected = true;
+        }
+        _attachedGameId = game.Id;
     }
 
     private async Task<bool> UpgradeLegacyVersionFingerprintsAsync(GameProfile game)
@@ -2945,8 +3034,7 @@ public sealed class MainViewModel : ObservableObject
         {
             var savedBuild = await _fingerprintService.CreateAsync(game.ExecutablePath);
             var changed = false;
-            foreach (var version in legacyVersions.Where(version =>
-                         string.Equals(version.ExecutableSha256, savedBuild.Sha256, StringComparison.OrdinalIgnoreCase)))
+            foreach (var version in legacyVersions.Where(version => GameIdentityResolver.MatchesVersion(version, savedBuild)))
             {
                 ApplyFingerprint(version, savedBuild);
                 changed = true;
@@ -2964,16 +3052,7 @@ public sealed class MainViewModel : ObservableObject
         game.Versions.FirstOrDefault(version => VersionMatches(version, fingerprint));
 
     private static bool VersionMatches(GameVersionProfile version, VersionFingerprint fingerprint)
-    {
-        if (!string.IsNullOrWhiteSpace(version.BuildFingerprint))
-            return string.Equals(version.BuildFingerprint, fingerprint.BuildSha256, StringComparison.OrdinalIgnoreCase);
-
-        // Legacy libraries only knew the EXE hash. That is sufficient for ordinary native games, but not for
-        // IL2CPP games whose executable can stay unchanged while GameAssembly and metadata are replaced.
-        return string.IsNullOrWhiteSpace(fingerprint.GameAssemblySha256) &&
-               string.IsNullOrWhiteSpace(fingerprint.MetadataSha256) &&
-               string.Equals(version.ExecutableSha256, fingerprint.Sha256, StringComparison.OrdinalIgnoreCase);
-    }
+        => GameIdentityResolver.MatchesVersion(version, fingerprint);
 
     private static GameVersionProfile CreateVersionProfile(VersionFingerprint fingerprint)
     {
@@ -3157,8 +3236,11 @@ public sealed class MainViewModel : ObservableObject
                     foreach (var candidate in candidates)
                     {
                         cancellation.Token.ThrowIfCancellationRequested();
-                        if (!memory.TryRead(candidate.Address, candidate.ValueType.Size(), out var bytes)) continue;
-                        await RunOnUiAsync(() => candidate.CurrentBytes = bytes);
+                        if (!memory.TryRead(candidate.Address, candidate.ValueType.Size(), out var bytes)) bytes = [];
+                        await RunOnUiAsync(() =>
+                        {
+                            if (!cancellation.IsCancellationRequested) candidate.CurrentBytes = bytes;
+                        });
                     }
                     await Task.Delay(500, cancellation.Token);
                 }
@@ -3245,26 +3327,38 @@ public sealed class MainViewModel : ObservableObject
                             continue;
                         }
 
-                        if (!MemoryValueCodec.TryParseEncoded(field.LockedValue, field.ValueType, field.ScaleMultiplier, out var expected))
+                        var lockedValue = field.LockedValue;
+                        if (!MemoryValueCodec.TryParseEncoded(lockedValue, field.ValueType, field.ScaleMultiplier, out var expected))
                             throw new InvalidOperationException("锁定目标值无效。");
-                        using var memory = new ProcessMemoryAccessor(process.ProcessId);
+                        using var memory = MemoryWriteAccessFactory(process.ProcessId);
                         memory.EnsureInstance(process.ProcessId, process.StartTimeUtc);
                         if (!TryResolveAddress(memory, process, field, out var address))
                             throw new InvalidOperationException("动态地址需要重新定位。");
                         if (!memory.TryRead(address, expected.Length, out var currentBytes))
                             throw new InvalidOperationException("读取失败。");
-                        if (!currentBytes.AsSpan().SequenceEqual(expected) && !memory.TryWrite(address, expected, out var error))
-                            throw new InvalidOperationException($"写入失败：{error}");
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (!field.IsValueLocked || field.LockedValue != lockedValue) continue;
+                        var needsWrite = !currentBytes.AsSpan().SequenceEqual(expected);
+                        var result = !needsWrite
+                            ? new MemoryWriteResult(MemoryWriteState.ReadbackConfirmed, currentBytes)
+                            : MemoryWriteVerifier.Write(memory, address, expected);
                         await RunOnUiAsync(() =>
                         {
-                            field.CurrentValue = MemoryValueCodec.FormatDecoded(expected, field.ValueType, field.ScaleMultiplier);
-                            field.Status = "锁定中";
-                            field.LastVerifiedUtc = DateTime.UtcNow;
+                            if (cancellationToken.IsCancellationRequested || !field.IsValueLocked || field.LockedValue != lockedValue) return;
+                            field.CurrentValue = result.HasReadback
+                                ? MemoryValueCodec.FormatDecoded(result.CurrentBytes, field.ValueType, field.ScaleMultiplier) : "—";
+                            field.Status = $"锁定中 · {(needsWrite ? result.Description : "当前值与锁定目标一致")}";
+                            if (result.HasReadback) field.LastVerifiedUtc = DateTime.UtcNow;
                         });
                     }
                     catch (Exception exception)
                     {
-                        await RunOnUiAsync(() => field.Status = $"锁定失败：{exception.Message}");
+                        await RunOnUiAsync(() =>
+                        {
+                            if (cancellationToken.IsCancellationRequested || !field.IsValueLocked) return;
+                            field.CurrentValue = "—";
+                            field.Status = $"锁定失败：{exception.Message}";
+                        });
                     }
                 }
                 await Task.Delay(750, cancellationToken);
@@ -3331,12 +3425,13 @@ public sealed class MainViewModel : ObservableObject
             throw new InvalidOperationException("当前选择的游戏版本与已连接进程不匹配，请重新连接或选择匹配版本。");
     }
 
+    internal bool IsShutdownCommitted => _isShuttingDown;
+
     public void Shutdown()
     {
-        _isShuttingDown = true;
-        InvalidateGameOperations();
-        _scanCancellation?.Cancel();
-        StopLiveCandidateRefresh();
+        if (_isShuttingDown) return;
+        if (_speedOperationsInFlight > 0)
+            throw new InvalidOperationException("正在调整游戏倍速，请等待本次操作结束后再关闭。");
         CaptureActiveSession();
         var sessions = _sessions.Values
             .Append(_activeSession)
@@ -3346,23 +3441,47 @@ public sealed class MainViewModel : ObservableObject
             .ToList();
         foreach (var session in sessions)
         {
-            StopSessionLockMaintenance(session);
-            session.SpeedService.DetachSafely();
-            session.SpeedService.Dispose();
-            DisposeSessionScanState(session);
+            // This is still preparation: a normalization failure must leave operations,
+            // pages, scans, downloads and the connection monitor usable for a retry.
+            try { session.SpeedService.DetachSafely(); }
+            finally
+            {
+                if (!session.SpeedService.HasHooks || session.SpeedService.Multiplier == 1d)
+                {
+                    session.IsSpeedActive = false;
+                    if (ReferenceEquals(_activeSession, session)) IsSpeedActive = false;
+                }
+                if (ReferenceEquals(_activeSession, session)) OnPropertyChanged(nameof(SpeedStatusText));
+            }
+        }
+        _isShuttingDown = true;
+        _gameOperationGeneration++;
+        var errors = new List<Exception>();
+        void Cleanup(Action action)
+        {
+            try { action(); }
+            catch (Exception exception) { errors.Add(exception); Debug.WriteLine(exception); }
+        }
+        Cleanup(() => _downloadOperation?.Cancel());
+        Cleanup(() => _scanCancellation?.Cancel());
+        Cleanup(StopLiveCandidateRefresh);
+        foreach (var session in sessions)
+        {
+            Cleanup(() => StopSessionLockMaintenance(session));
+            Cleanup(session.SpeedService.Dispose);
+            Cleanup(() => DisposeSessionScanState(session));
         }
         _sessions.Clear();
         _activeAdapter = null;
-        DisposeEditorPages();
-        _adapterRegistry.Dispose();
-        _idleSpeedService.Dispose();
+        Cleanup(DisposeEditorPages);
+        Cleanup(_adapterRegistry.Dispose);
+        Cleanup(_idleSpeedService.Dispose);
+        if (errors.Count > 0)
+            throw new AggregateException("退出已开始，但部分临时资源清理失败。窗口将继续关闭，不会停留在半退出状态。", errors);
     }
 
     private static bool PathsEqual(string left, string right)
-    {
-        try { return string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), StringComparison.OrdinalIgnoreCase); }
-        catch { return string.Equals(left, right, StringComparison.OrdinalIgnoreCase); }
-    }
+        => GameIdentityResolver.PathsEqual(left, right);
 
 }
 

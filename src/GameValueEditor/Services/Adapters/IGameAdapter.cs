@@ -34,14 +34,13 @@ public sealed class GameAdapterRegistry : IDisposable
     public void Reload()
     {
         _loadErrors.Clear();
-        var installedPath = Path.Combine(_modulesDirectory, "installed.json");
         try
         {
-            var document = File.Exists(installedPath)
-                ? JsonSerializer.Deserialize<InstalledModuleDocument>(File.ReadAllText(installedPath),
-                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
-                : null;
-            var records = document?.Modules ?? [];
+            using var mutation = GameValueEditor.Updates.ModuleMutationLock.Acquire(_modulesDirectory);
+            var store = new ModuleStateStore(_modulesDirectory);
+            new ModuleInstallTransaction(store).RecoverAll();
+            var records = store.ReadInstalled().Modules;
+            store.ReadDeletions();
             foreach (var adapter in _adapters.ToArray())
             {
                 var record = records.FirstOrDefault(item => string.Equals(item.Id, adapter.Id, StringComparison.Ordinal));
@@ -58,7 +57,8 @@ public sealed class GameAdapterRegistry : IDisposable
         catch (Exception exception)
         {
             // A damaged optional module must never prevent the main application from starting.
-            _loadErrors.Add($"installed.json: {exception.Message}");
+            foreach (var adapter in _adapters.ToArray()) DeactivateUntilRestart(adapter.Id);
+            _loadErrors.Add($"模块资料: {exception.Message}");
         }
     }
 
@@ -90,14 +90,19 @@ public sealed class GameAdapterRegistry : IDisposable
     {
         if (_restartRequiredIds.Contains(id)) return;
         if (FindById(id) is not null) return;
-        var installedPath = Path.Combine(_modulesDirectory, "installed.json");
-        if (!File.Exists(installedPath)) throw new InvalidOperationException("模块安装记录不存在。");
-        var document = JsonSerializer.Deserialize<InstalledModuleDocument>(File.ReadAllText(installedPath),
-                           new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
-                       ?? throw new InvalidOperationException("模块安装记录无效。");
+        using var mutation = GameValueEditor.Updates.ModuleMutationLock.Acquire(_modulesDirectory);
+        var store = new ModuleStateStore(_modulesDirectory);
+        new ModuleInstallTransaction(store).EnsureNoTransactions();
+        store.ReadDeletions();
+        var document = store.ReadInstalled();
         var record = document.Modules.SingleOrDefault(item => string.Equals(item.Id, id, StringComparison.Ordinal))
                      ?? throw new InvalidOperationException("模块安装记录不存在。");
-        LoadModule(record);
+        try { LoadModule(record); }
+        catch (Exception exception)
+        {
+            _loadErrors.Add($"{record.Id} v{record.Version}: {exception.Message}");
+            throw;
+        }
     }
 
     public IReadOnlyList<string> LoadErrors => _loadErrors;
@@ -146,16 +151,21 @@ public sealed class GameAdapterRegistry : IDisposable
             DeactivateUntilRestart(record.Id);
             return;
         }
-        if (!IsSafePathSegment(record.Id) || !IsSafePathSegment(record.Version)) return;
+        if (!IsSafePathSegment(record.Id) || !IsSafePathSegment(record.Version))
+            throw new InvalidDataException("模块登记的身份或版本含不安全路径。");
         var packagesRoot = Path.GetFullPath(Path.Combine(_modulesDirectory, "packages")) + Path.DirectorySeparatorChar;
         var packageDirectory = Path.GetFullPath(Path.Combine(packagesRoot, record.Id, record.Version));
-        if (!packageDirectory.StartsWith(packagesRoot, StringComparison.OrdinalIgnoreCase)) return;
+        if (!packageDirectory.StartsWith(packagesRoot, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("模块包路径越界。");
+        var stateStore = new ModuleStateStore(_modulesDirectory);
         var manifestPath = Path.Combine(packageDirectory, "module.json");
-        if (!File.Exists(manifestPath)) return;
+        stateStore.EnsureNoLinks(manifestPath);
+        if (!File.Exists(manifestPath)) throw new FileNotFoundException("模块包缺少 module.json，不能加载。");
         var manifest = JsonSerializer.Deserialize<InstalledModuleManifest>(File.ReadAllText(manifestPath),
             new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
         if (manifest is null || !string.Equals(manifest.Id, record.Id, StringComparison.Ordinal) ||
-            !string.Equals(manifest.Version, record.Version, StringComparison.OrdinalIgnoreCase)) return;
+            !string.Equals(manifest.Version, record.Version, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("module.json 的模块身份/版本与登记不一致。");
         if (manifest.HostApiVersion is < 1 or > ModuleHostApi.CurrentVersion)
             throw new InvalidOperationException(
                 $"模块需要 Host API {manifest.HostApiVersion}，当前最高支持 {ModuleHostApi.CurrentVersion}。");
@@ -167,9 +177,12 @@ public sealed class GameAdapterRegistry : IDisposable
             ParseVersion(manifest.MaximumHostVersion, "模块最高主程序版本").CompareTo(hostVersion) < 0)
             throw new InvalidOperationException($"模块最高支持主程序 v{manifest.MaximumHostVersion}。");
         var packageRoot = Path.GetFullPath(packageDirectory) + Path.DirectorySeparatorChar;
+        if (string.IsNullOrWhiteSpace(manifest.AssemblyFile)) throw new InvalidDataException("module.json 没有声明程序集。");
         var packageAssemblyPath = Path.GetFullPath(Path.Combine(packageRoot, manifest.AssemblyFile));
-        if (!packageAssemblyPath.StartsWith(packageRoot, StringComparison.OrdinalIgnoreCase) ||
-            !File.Exists(packageAssemblyPath)) return;
+        if (!packageAssemblyPath.StartsWith(packageRoot, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("模块程序集路径越出模块包。");
+        stateStore.EnsureNoLinks(packageAssemblyPath);
+        if (!File.Exists(packageAssemblyPath)) throw new FileNotFoundException("模块包缺少声明的 DLL，不能加载。");
 
         var shadowDirectory = CreateShadowCopy(packageDirectory);
         var shadowRoot = Path.GetFullPath(shadowDirectory) + Path.DirectorySeparatorChar;
@@ -177,7 +190,7 @@ public sealed class GameAdapterRegistry : IDisposable
         if (!assemblyPath.StartsWith(shadowRoot, StringComparison.OrdinalIgnoreCase) || !File.Exists(assemblyPath))
         {
             TryDeleteDirectory(shadowDirectory);
-            return;
+            throw new InvalidDataException("模块影子副本缺少声明的程序集。");
         }
 
         ModuleLoadContext? context = null;

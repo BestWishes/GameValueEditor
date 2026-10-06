@@ -23,6 +23,39 @@ using GameValueEditor.Services;
 using GameValueEditor.Services.Adapters;
 using GameValueEditor.ViewModels;
 
+if (args.FirstOrDefault(arg => arg.StartsWith("--verify-offline-directory=", StringComparison.Ordinal)) is { } offlineArgument)
+{
+    Console.OutputEncoding = new UTF8Encoding(false);
+    try
+    {
+        var directory = Path.GetFullPath(offlineArgument["--verify-offline-directory=".Length..]);
+        var reportArgument = args.Single(arg => arg.StartsWith("--module-verification-report=", StringComparison.Ordinal));
+        var reportPath = Path.GetFullPath(reportArgument["--module-verification-report=".Length..]);
+        var moduleRoot = Path.Combine(directory, "data", "modules");
+        var installed = JsonSerializer.Deserialize<InstalledModuleDocument>(File.ReadAllText(Path.Combine(moduleRoot, "installed.json")))
+                        ?? throw new InvalidOperationException("Missing installed module records.");
+        var modules = new List<object>();
+        foreach (var record in installed.Modules)
+        {
+            using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(moduleRoot, "packages", record.Id, record.Version, "module.json")));
+            var root = manifest.RootElement;
+            Assert(root.GetProperty("id").GetString() == record.Id && root.GetProperty("version").GetString() == record.Version,
+                "Offline installed module identity differs from its manifest.");
+            var editors = root.GetProperty("editors").EnumerateArray().Select(editor => editor.GetProperty("id").GetString()!).ToArray();
+            LoadAndVerifyPackagedModule(moduleRoot, record.Id, root.GetProperty("hostApiVersion").GetInt32(), editors);
+            modules.Add(new { Id = record.Id, Version = record.Version, EditorIds = editors });
+        }
+        File.WriteAllText(reportPath, JsonSerializer.Serialize(new { SchemaVersion = 1,
+            ApplicationVersion = ApplicationVersion.Current, HostApiVersion = ModuleHostApi.CurrentVersion, Verified = true, Modules = modules }));
+        return 0;
+    }
+    catch (Exception exception)
+    {
+        Console.Error.WriteLine(exception);
+        return 1;
+    }
+}
+
 if (args.Contains("--speed-target", StringComparer.OrdinalIgnoreCase))
 {
     var targetClock = Stopwatch.StartNew();
@@ -43,6 +76,28 @@ if (args.FirstOrDefault(arg => arg.StartsWith("--profile-save-target=", StringCo
     Console.WriteLine("READY");
     await new ProfileStore(profileArgument["--profile-save-target=".Length..]).SaveAsync(
         new LibraryDocument { Games = [new GameProfile { Name = "child-process" }] });
+    return 0;
+}
+
+if (args.FirstOrDefault(arg => arg.StartsWith("--module-interruption-target=", StringComparison.Ordinal)) is { } interruptionArgument)
+{
+    ModuleReliabilityRegressionTests.InterruptTarget(interruptionArgument["--module-interruption-target=".Length..],
+        args.Single(arg => arg.StartsWith("--checkpoint=", StringComparison.Ordinal))["--checkpoint=".Length..]);
+    return 0;
+}
+
+if (args.FirstOrDefault(arg => arg.StartsWith("--instance-lease-target=", StringComparison.Ordinal)) is { } instanceArgument)
+{
+    if (!ApplicationInstanceLease.TryAcquire(instanceArgument["--instance-lease-target=".Length..], out var lease, out _))
+    { Console.WriteLine("BUSY"); return 11; }
+    using (lease) { Console.WriteLine("ACQUIRED"); Console.Out.Flush(); Console.ReadLine(); }
+    return 0;
+}
+
+if (args.Contains("--module-reliability-only", StringComparer.Ordinal) || args.Contains("--safety-boundaries-only", StringComparer.Ordinal) ||
+    args.Contains("--game-lifecycle-only", StringComparer.Ordinal))
+{
+    await ModuleLifecycleRegressionTests.RunAsync(args);
     return 0;
 }
 
@@ -93,9 +148,10 @@ try
             CancellationToken.None);
         using var markerCandidates = scanResult.Candidates;
         var markerPreview = markerCandidates.ReadCandidates(10_000);
-        Assert(markerPreview.Any(candidate => candidate.Address == expectedAddress), "Pinned marker was not found by memory scan");
-        var markerCandidate = markerPreview.First(candidate => candidate.Address == expectedAddress);
-        Assert(markerCandidate.FirstBytes.SequenceEqual(BitConverter.GetBytes(marker)), "Initial scan value was not preserved");
+        var markerCandidate = markerPreview.FirstOrDefault(candidate => candidate.Address == expectedAddress)
+                              ?? FindStoredCandidate(markerCandidates, expectedAddress);
+        Assert(markerCandidate is not null, $"Pinned marker was not found in complete memory scan (total={markerCandidates.Count}, preview={markerPreview.Count})");
+        Assert(markerCandidate!.FirstBytes.SequenceEqual(BitConverter.GetBytes(marker)), "Initial scan value was not preserved");
         Assert(markerCandidate.FirstDisplay == marker.ToString(), "Initial scan display value is invalid");
 
         using var memory = new ProcessMemoryAccessor(Environment.ProcessId);
@@ -508,7 +564,15 @@ try
             ExecutablePath = executable!,
             StartTimeUtc = currentProcess.StartTime.ToUniversalTime().AddSeconds(1)
         };
-        livenessViewModel.Attach(staleProcess);
+        try { livenessViewModel.Attach(staleProcess); throw new InvalidOperationException("A stale process was accepted at attachment."); }
+        catch (InvalidOperationException exception) when (exception.Message.Contains("进程", StringComparison.Ordinal) && !exception.Message.Contains("accepted", StringComparison.Ordinal)) { }
+        var liveProcess = new ProcessItem { ProcessId = currentProcess.Id, ProcessName = currentProcess.ProcessName,
+            ExecutablePath = executable!, StartTimeUtc = currentProcess.StartTime.ToUniversalTime() };
+        livenessViewModel.Attach(liveProcess);
+        var staleSession = (GameConnectionSession)typeof(MainViewModel).GetField("_activeSession", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(livenessViewModel)!;
+        staleSession.Process = staleProcess;
+        staleSession.ProcessGroup = new LogicalGameProcessGroup { SeedProcess = staleProcess, RootProcess = staleProcess,
+            DataProcess = staleProcess, Members = [staleProcess], RuntimeKind = GameRuntimeKind.Native };
         Assert(livenessViewModel.AttachedProcess is not null &&
                livenessViewModel.ConnectionText.StartsWith("已连接", StringComparison.Ordinal),
             "Liveness test could not create an attached session");
@@ -1224,6 +1288,7 @@ try
             }
 
             LayoutRegressionTests.CheckLayout(args);
+            GameLifecycleRegressionTests.CheckWindowShutdown();
 
             if (args.Contains("--render-ui", StringComparer.OrdinalIgnoreCase))
             {
@@ -1494,6 +1559,29 @@ static GameAdapterRegistry LoadAndVerifyInstalledModule(string modulesDirectory)
     return installedRegistry;
 }
 
+static ScanCandidate? FindStoredCandidate(ScanCandidateStore store, ulong expectedAddress)
+{
+    // A bounded UI preview is not proof that a target is absent from the full scan.
+    // Stream the already-produced test partitions; do not repeat or expand the memory scan.
+    using var lease = store.AcquireReadLease();
+    foreach (var partition in store.Partitions)
+    {
+        using var reader = new BinaryReader(File.OpenRead(partition.FilePath));
+        while (reader.BaseStream.Position < reader.BaseStream.Length)
+        {
+            var address = reader.ReadUInt64();
+            var previous = reader.ReadBytes(partition.ValueType.Size());
+            var current = reader.ReadBytes(partition.ValueType.Size());
+            if (address != expectedAddress) continue;
+            Console.WriteLine($"Pinned marker found in complete scan: total={store.Count}; preview cap=10000.");
+            return new ScanCandidate { Address = address, ScanGenerationId = store.GenerationId, FirstBytes = partition.FirstBytes,
+                PreviousBytes = previous, CurrentBytes = current, ValueType = partition.ValueType,
+                SearchRoutineId = partition.SearchRoutineId, SearchRoutineName = partition.SearchRoutineName, ScaleMultiplier = partition.ScaleMultiplier };
+        }
+    }
+    return null;
+}
+
 static void VerifyPackagedModule(string archivePath)
 {
     var resolvedArchive = Path.GetFullPath(archivePath);
@@ -1688,10 +1776,14 @@ public sealed class SmokeTestModuleAdapter :
     IGameCompatibilityDiagnosticsProvider
 {
     public bool ThrowCompatibilityDiagnostics { get; init; }
-    public string Id => "game.test.multi-editor";
+    public bool IdentityOnly { get; init; }
+    public string? IdentityId { get; init; }
+    public IReadOnlyList<string> IdentityLegacyIds { get; init; } = [];
+    public string Id => IdentityId ?? "game.test.multi-editor";
+    public IReadOnlyList<string> LegacyIds => IdentityLegacyIds;
     public string DisplayName => "测试多编辑器游戏模块";
     public string Description => "仅用于宿主接口冒烟测试。";
-    public IReadOnlyList<GameEditorDescriptor> Editors =>
+    public IReadOnlyList<GameEditorDescriptor> Editors => IdentityOnly ? [] :
     [
         new("test.inventory", "背包物品", GameEditorKind.Collection, 100, "测试集合编辑器"),
         new("test.characters", "人物属性", GameEditorKind.MasterDetail, 200, "测试主从编辑器", true)
@@ -1701,7 +1793,7 @@ public sealed class SmokeTestModuleAdapter :
         new("test.inventory", GameEditorPageRole.Inventory),
         new("test.characters", GameEditorPageRole.CharacterAttributes)
     ];
-    public bool Supports(GameProcessContext process, GameBuildIdentity fingerprint) => true;
+    public bool Supports(GameProcessContext process, GameBuildIdentity fingerprint) => !IdentityOnly || process.ProcessId == Environment.ProcessId;
     public IReadOnlyList<GameCompatibilityDiagnostic> GetCompatibilityDiagnostics(
         GameProcessContext process,
         GameBuildIdentity fingerprint)
@@ -1715,8 +1807,10 @@ public sealed class SmokeTestModuleAdapter :
                 $"{process.ExecutablePath} PID={process.ProcessId} 0x1234")
         ];
     }
-    public AdapterFieldValue ReadField(GameProcessContext process, string fieldKey) => new(fieldKey, "1", "测试");
-    public AdapterFieldValue WriteField(GameProcessContext process, string fieldKey, string displayValue) => new(fieldKey, displayValue, "测试");
+    public AdapterFieldValue ReadField(GameProcessContext process, string fieldKey) => IdentityOnly
+        ? throw new InvalidOperationException("Identity tests must not read fields.") : new(fieldKey, "1", "测试");
+    public AdapterFieldValue WriteField(GameProcessContext process, string fieldKey, string displayValue) => IdentityOnly
+        ? throw new InvalidOperationException("Identity tests must not write game data.") : new(fieldKey, displayValue, "测试");
     public IReadOnlyList<AdapterInventoryItem> ReadInventory(GameProcessContext process) => [new("test", "测试物品", 1)];
     public bool SupportsCharacterAttributes(GameProcessContext process) => true;
     public IReadOnlyList<AdapterCharacterItem> ReadCharacters(GameProcessContext process) =>

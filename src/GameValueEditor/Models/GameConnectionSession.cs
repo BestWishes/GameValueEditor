@@ -15,6 +15,7 @@ internal sealed class GameConnectionSession(LogicalGameProcessGroup processGroup
     public IGameAdapter? Adapter { get; set; }
     public ProcessSpeedService SpeedService { get; set; } = new();
     public bool IsSpeedActive { get; set; }
+    public bool IsSpeedOperationRunning { get; set; }
     public string SpeedMultiplierInput { get; set; } = "2";
     public ScanCandidateStore? ScanCandidates { get; set; }
     public Stack<ScanCandidateStore> ScanHistory { get; set; } = new();

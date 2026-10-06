@@ -56,7 +56,7 @@ public sealed class VersionFingerprintService
             platform.DisplayName);
     }
 
-    private static string CreateBuildFingerprint(string executableHash, string gameAssemblyHash, string metadataHash)
+    internal static string CreateBuildFingerprint(string executableHash, string gameAssemblyHash, string metadataHash)
     {
         if (string.IsNullOrWhiteSpace(gameAssemblyHash) && string.IsNullOrWhiteSpace(metadataHash))
             return executableHash;

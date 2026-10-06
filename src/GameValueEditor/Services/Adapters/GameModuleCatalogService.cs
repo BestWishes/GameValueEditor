@@ -19,6 +19,9 @@ public sealed class GameModuleCatalogService
     private readonly HttpClient _httpClient;
     private readonly DownloadTimeoutPolicy _downloadTimeoutPolicy;
     private readonly string _currentHostVersion;
+    private readonly ModuleStateStore _stateStore;
+    private readonly ModuleInstallTransaction _transactions;
+    private readonly string? _initializationError;
     private readonly JsonSerializerOptions _jsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -31,7 +34,9 @@ public sealed class GameModuleCatalogService
         DownloadTimeoutPolicy? downloadTimeoutPolicy = null,
         string? currentHostVersion = null)
     {
-        _modulesDirectory = modulesDirectory;
+        _modulesDirectory = Path.GetFullPath(modulesDirectory);
+        _stateStore = new ModuleStateStore(_modulesDirectory);
+        _transactions = new ModuleInstallTransaction(_stateStore);
         _httpClient = httpClient ?? new HttpClient();
         _downloadTimeoutPolicy = downloadTimeoutPolicy ?? DownloadTimeoutPolicy.Default;
         _currentHostVersion = currentHostVersion ?? ApplicationVersion.Current;
@@ -40,8 +45,43 @@ public sealed class GameModuleCatalogService
             _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("GameValueEditor-Modules/1.0");
             _httpClient.Timeout = TimeSpan.FromSeconds(30);
         }
-        CleanupPendingDeletions();
+        try
+        {
+            using (ModuleMutationLock.Acquire(_modulesDirectory)) _transactions.RecoverAll();
+            CleanupPendingDeletions();
+        }
+        catch (Exception exception) when (IsStorageFailure(exception))
+        {
+            _initializationError = $"模块资料/安装恢复：{exception.Message}";
+        }
     }
+
+    public IReadOnlyList<string> StorageErrors
+    {
+        get
+        {
+            var errors = new List<string>();
+            if (_initializationError is not null) errors.Add(_initializationError);
+            try { _stateStore.ReadInstalled(); }
+            catch (Exception exception) when (IsStorageFailure(exception)) { errors.Add($"installed.json: {exception.Message}"); }
+            try { _stateStore.ReadDeletions(); }
+            catch (Exception exception) when (IsStorageFailure(exception)) { errors.Add($"pending-deletions.json: {exception.Message}"); }
+            try { _transactions.EnsureNoTransactions(); }
+            catch (Exception exception) when (IsStorageFailure(exception)) { errors.Add($"模块安装事务：{exception.Message}"); }
+            return errors.Distinct(StringComparer.Ordinal).ToArray();
+        }
+    }
+
+    private void EnsureStorageSafe()
+    {
+        if (_initializationError is not null) throw new InvalidOperationException(_initializationError);
+        _stateStore.ReadInstalled();
+        _stateStore.ReadDeletions();
+        _transactions.EnsureNoTransactions();
+    }
+
+    private static bool IsStorageFailure(Exception exception) =>
+        exception is IOException or InvalidDataException or JsonException or NotSupportedException or UnauthorizedAccessException or InvalidOperationException;
 
     public InstalledModuleRecord? FindInstalled(string moduleId) =>
         LoadInstalled().Modules.FirstOrDefault(item => string.Equals(item.Id, moduleId, StringComparison.Ordinal));
@@ -54,7 +94,12 @@ public sealed class GameModuleCatalogService
         if (record is null || !IsSafePathSegment(record.Id) || !IsSafePathSegment(record.Version)) return null;
         var path = Path.Combine(_modulesDirectory, "packages", record.Id, record.Version, "module.json");
         if (!File.Exists(path)) return null;
-        try { return JsonSerializer.Deserialize<InstalledModuleManifest>(File.ReadAllText(path), _jsonOptions); }
+        try
+        {
+            _stateStore.EnsureNoLinks(path);
+            var manifest = JsonSerializer.Deserialize<InstalledModuleManifest>(File.ReadAllText(path), _jsonOptions);
+            return manifest?.Id == record.Id && manifest.Version == record.Version ? manifest : null;
+        }
         catch { return null; }
     }
 
@@ -165,6 +210,7 @@ public sealed class GameModuleCatalogService
         IProgress<DownloadProgressSnapshot>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        EnsureStorageSafe();
         EnsureSafePathSegment(module.Id, "模块 ID");
         EnsureSafePathSegment(module.Version, "模块版本");
         if (!IsHostCompatible(module))
@@ -191,35 +237,27 @@ public sealed class GameModuleCatalogService
             if (!hash.Equals(module.Sha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("专属模块 SHA-256 校验失败，已拒绝安装。");
 
+            progress?.Report(new DownloadProgressSnapshot(module.SizeBytes, module.SizeBytes) { Phase = DownloadPhase.Installing });
             using var mutation = await ModuleMutationLock.AcquireAsync(_modulesDirectory, cancellationToken);
-
-            var packagesRoot = Path.GetFullPath(Path.Combine(_modulesDirectory, "packages")) + Path.DirectorySeparatorChar;
-            var packageRoot = Path.GetFullPath(Path.Combine(packagesRoot, module.Id));
-            var finalDirectory = Path.GetFullPath(Path.Combine(packageRoot, module.Version));
-            if (!packageRoot.StartsWith(packagesRoot, StringComparison.OrdinalIgnoreCase) ||
-                !finalDirectory.StartsWith(packageRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("模块安装路径无效。");
-            var temporaryDirectory = finalDirectory + $".tmp-{Guid.NewGuid():N}";
+            EnsureStorageSafe();
+            var document = _stateStore.ReadInstalled();
+            var targetDocument = new InstalledModuleDocument { Modules = document.Modules
+                .Where(item => item.Id != module.Id && !module.LegacyIds.Contains(item.Id, StringComparer.Ordinal)).ToList() };
+            targetDocument.Modules.Add(new InstalledModuleRecord(module.Id, module.Version, DateTime.UtcNow));
+            ModuleStateStore.ValidateInstalled(targetDocument);
+            var transactionDirectory = _transactions.CreateDirectory();
+            var temporaryDirectory = Path.Combine(transactionDirectory, "staged");
             Directory.CreateDirectory(temporaryDirectory);
             try
             {
                 ExtractSafely(temporaryArchive, temporaryDirectory);
                 ValidatePackage(temporaryDirectory, module);
-                Directory.CreateDirectory(packageRoot);
-                if (Directory.Exists(finalDirectory)) Directory.Delete(finalDirectory, true);
-                Directory.Move(temporaryDirectory, finalDirectory);
+                _transactions.Commit(transactionDirectory, module.Id, module.Version, document, targetDocument, legacyIds: module.LegacyIds);
             }
             finally
             {
-                if (Directory.Exists(temporaryDirectory)) Directory.Delete(temporaryDirectory, true);
+                if (Directory.Exists(transactionDirectory)) _transactions.DiscardUnprepared(transactionDirectory);
             }
-
-            var document = LoadInstalled();
-            document.Modules.RemoveAll(item => string.Equals(item.Id, module.Id, StringComparison.Ordinal));
-            foreach (var legacyId in module.LegacyIds)
-                document.Modules.RemoveAll(item => string.Equals(item.Id, legacyId, StringComparison.Ordinal));
-            document.Modules.Add(new InstalledModuleRecord(module.Id, module.Version, DateTime.UtcNow));
-            SaveInstalled(document);
         }
         finally
         {
@@ -233,7 +271,8 @@ public sealed class GameModuleCatalogService
     public InstalledModuleRecord? Unregister(string moduleId)
     {
         using var mutation = ModuleMutationLock.Acquire(_modulesDirectory);
-        var document = LoadInstalled();
+        EnsureStorageSafe();
+        var document = _stateStore.ReadInstalled();
         var record = document.Modules.FirstOrDefault(item => string.Equals(item.Id, moduleId, StringComparison.Ordinal));
         if (record is null) return null;
         document.Modules.Remove(record);
@@ -244,7 +283,8 @@ public sealed class GameModuleCatalogService
     public void RestoreRegistration(InstalledModuleRecord record)
     {
         using var mutation = ModuleMutationLock.Acquire(_modulesDirectory);
-        var document = LoadInstalled();
+        EnsureStorageSafe();
+        var document = _stateStore.ReadInstalled();
         document.Modules.RemoveAll(item => string.Equals(item.Id, record.Id, StringComparison.Ordinal));
         document.Modules.Add(record);
         SaveInstalled(document);
@@ -253,6 +293,7 @@ public sealed class GameModuleCatalogService
     public async Task<bool> DeletePackageAsync(string moduleId, CancellationToken cancellationToken = default)
     {
         using var mutation = await ModuleMutationLock.AcquireAsync(_modulesDirectory, cancellationToken);
+        EnsureStorageSafe();
         EnsureSafePathSegment(moduleId, "模块 ID");
         AddPendingDeletion(moduleId);
         for (var attempt = 0; attempt < 6; attempt++)
@@ -276,12 +317,14 @@ public sealed class GameModuleCatalogService
     public bool HasPendingDeletion(string moduleId) =>
         LoadPendingDeletions().ModuleIds.Contains(moduleId, StringComparer.Ordinal);
 
-    private string PendingDeletionsPath => Path.Combine(_modulesDirectory, "pending-deletions.json");
-
     private void CleanupPendingDeletions()
     {
         using var mutation = ModuleMutationLock.Acquire(_modulesDirectory);
+        EnsureStorageSafe();
         var document = LoadPendingDeletions();
+        if (document.ModuleIds.Count == 0) return;
+        if (document.ModuleIds.Any(id => _stateStore.ReadInstalled().Modules.Any(item => item.Id == id)))
+            throw new InvalidDataException("待删除任务与已安装模块冲突，已停止清理并保留资料。");
         var remaining = new List<string>();
         foreach (var moduleId in document.ModuleIds.Distinct(StringComparer.Ordinal))
         {
@@ -298,27 +341,12 @@ public sealed class GameModuleCatalogService
     private void DeletePackageOnce(string moduleId)
     {
         EnsureSafePathSegment(moduleId, "模块 ID");
-        var packagesRoot = Path.GetFullPath(Path.Combine(_modulesDirectory, "packages")) + Path.DirectorySeparatorChar;
-        var packageRoot = Path.GetFullPath(Path.Combine(packagesRoot, moduleId));
-        if (!packageRoot.StartsWith(packagesRoot, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("模块卸载路径无效。");
-        if (Directory.Exists(packageRoot)) Directory.Delete(packageRoot, true);
+        var packageRoot = _stateStore.Resolve(Path.Combine("packages", moduleId));
+        if (Directory.Exists(packageRoot)) { _stateStore.HashPackage(packageRoot); Directory.Delete(packageRoot, true); }
     }
 
     private PendingModuleDeletionDocument LoadPendingDeletions()
-    {
-        if (!File.Exists(PendingDeletionsPath)) return new PendingModuleDeletionDocument();
-        try
-        {
-            return JsonSerializer.Deserialize<PendingModuleDeletionDocument>(
-                       File.ReadAllText(PendingDeletionsPath), _jsonOptions)
-                   ?? new PendingModuleDeletionDocument();
-        }
-        catch
-        {
-            return new PendingModuleDeletionDocument();
-        }
-    }
+        => _stateStore.ReadDeletions();
 
     private void AddPendingDeletion(string moduleId)
     {
@@ -335,41 +363,16 @@ public sealed class GameModuleCatalogService
     }
 
     private void SavePendingDeletions(PendingModuleDeletionDocument document)
-    {
-        if (document.ModuleIds.Count == 0)
-        {
-            if (File.Exists(PendingDeletionsPath)) File.Delete(PendingDeletionsPath);
-            return;
-        }
-        Directory.CreateDirectory(_modulesDirectory);
-        var temporary = PendingDeletionsPath + ".tmp";
-        File.WriteAllText(temporary, JsonSerializer.Serialize(document, _jsonOptions));
-        File.Move(temporary, PendingDeletionsPath, true);
-    }
+        => _stateStore.SaveDeletions(document);
 
     private InstalledModuleDocument LoadInstalled()
     {
-        var path = Path.Combine(_modulesDirectory, "installed.json");
-        if (!File.Exists(path)) return new InstalledModuleDocument();
-        try
-        {
-            return JsonSerializer.Deserialize<InstalledModuleDocument>(File.ReadAllText(path), _jsonOptions)
-                   ?? new InstalledModuleDocument();
-        }
-        catch
-        {
-            return new InstalledModuleDocument();
-        }
+        try { return _stateStore.ReadInstalled(); }
+        catch (Exception exception) when (IsStorageFailure(exception)) { return new InstalledModuleDocument(); }
     }
 
     private void SaveInstalled(InstalledModuleDocument document)
-    {
-        Directory.CreateDirectory(_modulesDirectory);
-        var path = Path.Combine(_modulesDirectory, "installed.json");
-        var temporary = path + ".tmp";
-        File.WriteAllText(temporary, JsonSerializer.Serialize(document, _jsonOptions));
-        File.Move(temporary, path, true);
-    }
+        => _stateStore.SaveInstalled(document);
 
     private void ValidatePackage(string directory, GameModuleCatalogEntry catalogEntry)
     {

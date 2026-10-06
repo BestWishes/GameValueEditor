@@ -1,5 +1,4 @@
 using System.IO;
-using System.Text;
 using System.Windows;
 using System.Windows.Threading;
 using GameValueEditor.Dialogs;
@@ -12,8 +11,29 @@ namespace GameValueEditor;
 /// </summary>
 public partial class App : Application
 {
+    private ApplicationInstanceLease? _instanceLease;
+    private static readonly CrashLogService CrashLogger = new(ProfileStore.DefaultRoot);
+
     protected override void OnStartup(StartupEventArgs e)
     {
+        try
+        {
+            if (!ApplicationInstanceLease.TryAcquire(ProfileStore.DefaultRoot, out _instanceLease, out var owner))
+            {
+                if (!ApplicationInstanceLease.TryActivate(owner))
+                    MessageBox.Show("同一数据目录的肝肾大圣已经在运行或正在启动，请使用原窗口。", "肝肾大圣",
+                        MessageBoxButton.OK, MessageBoxImage.Information);
+                Shutdown();
+                return;
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show("无法取得数据目录的独占访问权限，已停止启动以保护资料。\n\n" + exception.Message,
+                "肝肾大圣 · 启动失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Shutdown();
+            return;
+        }
         try
         {
             if (ApplicationUpdateService.TryLaunchPendingAtStartup())
@@ -48,36 +68,26 @@ public partial class App : Application
         base.OnStartup(e);
     }
 
+    protected override void OnExit(ExitEventArgs e)
+    {
+        try { base.OnExit(e); }
+        finally { _instanceLease?.Dispose(); }
+    }
+
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
+        e.Handled = true;
         var logPath = WriteCrashLog(e.Exception);
         if (MainWindow is { } owner)
-            MessageDialog.ShowInfo(owner, "程序发生错误", $"操作没有完成，错误已经记录到：\n{logPath}\n\n{e.Exception.Message}");
-        e.Handled = true;
+            MessageDialog.ShowInfo(owner, "程序发生错误", FormatCrashMessage(e.Exception, logPath));
     }
 
-    private static string WriteCrashLog(Exception exception)
+    internal static string FormatCrashMessage(Exception exception, string? logPath)
     {
-        string directory;
-        try
-        {
-            directory = ProfileStore.DefaultRoot;
-            Directory.CreateDirectory(directory);
-        }
-        catch
-        {
-            directory = Path.Combine(Path.GetTempPath(), "GameValueEditor");
-            Directory.CreateDirectory(directory);
-        }
-
-        var path = Path.Combine(directory, "crash.log");
-        var text = new StringBuilder()
-            .AppendLine($"[{DateTimeOffset.Now:O}]")
-            .AppendLine(exception.ToString())
-            .AppendLine(new string('-', 80))
-            .ToString();
-        File.AppendAllText(path, text, Encoding.UTF8);
-        return path;
+        var logDescription = logPath is null ? "日志无法写入；原错误如下：" : $"错误已经记录到：\n{logPath}";
+        return $"操作没有完成，{logDescription}\n\n{exception.Message}";
     }
+
+    private static string? WriteCrashLog(Exception exception) => CrashLogger.TryWrite(exception);
 }
 

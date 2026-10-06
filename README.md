@@ -22,7 +22,7 @@
 
 一个面向 Windows 离线单机游戏的本地数值扫描与管理工具。它不仅保存临时地址，还把玩家确认过的字段整理到按游戏、按版本隔离的本地游戏库中。
 
-> 最新版本：`v0.4.9`。项目只发布正式版本，不再设置预览版更新通道。
+> 最新版本：`v0.5.0`。项目只发布正式版本，不再设置预览版更新通道。
 
 ## 主要功能
 
@@ -36,7 +36,7 @@
 - 扫描结果支持 `Ctrl`、`Shift` 和 `Ctrl+A` 标准多选，可把所选地址批量修改为同一个界面值；保存字段仍要求单选。
 - 双击候选地址即可先试改，不需要先保存字段。
 - 玩家在保存字段时手动填写备注名称；程序不会猜测字段含义。
-- 左侧游戏库支持搜索、清空搜索、置顶、锁定、重命名、连接、断开连接和从库移出；搜索无结果不会清空右侧正在使用的游戏。顶部“连接”连接进程下拉框当前选择的进程，编辑区“连接/断开”只操作右侧当前游戏库条目，两组操作不会串用选择目标。若条目已安装专属模块，“从库移出”会同时卸载模块；已连接进程仍保留为可继续通用扫描的临时会话。
+- 左侧游戏库支持搜索、清空搜索、置顶、锁定、重命名、连接、断开连接和从库移出；搜索无结果不会清空右侧正在使用的游戏。顶部“连接”连接进程下拉框当前选择的进程，编辑区“连接/断开”只操作右侧当前游戏库条目，两组操作不会串用选择目标。若条目已安装专属模块，“从库移出”会同时卸载模块；仍在展示该游戏时保留可继续通用扫描的临时连接，移出期间已切换到另一个游戏时则安全断开原游戏，不改当前游戏。
 - 游戏库条目单行显示头像、名称和右侧固定位置的锁定、置顶、本地模块已加载、已连接四个主题图标；未生效的图标留空，连接图标稍大，图标和完整名称可悬停查看含义，头像没有悬停提示。列表不再显示版本数和字段数，但数据仍保留。模块加载标记不代表当前游戏构建已兼容；已安装但加载失败或等待重启时不显示。可按连接状态、名称或本地模块排序，并可同时连接多个游戏，在左侧切换各自的扫描、加速和锁定会话。游戏主进程退出或 PID 被复用时会在约一秒内自动断开并同步状态；多进程游戏的数据进程单独重建时会自动重新定位，并清空已经失效的临时扫描结果。
 - 置顶或锁定的游戏条目不能删除；锁定不影响扫描、修改数值、保存字段或其他正常功能。
 - 根据游戏平台 Build ID、游戏自身声明版本、引擎文件版本、架构以及 EXE/关键运行时文件的组合指纹保存独立版本档案；下拉框用“当前运行版本/历史版本 + 日期 + 字段数”帮助选择，技术身份彼此分栏展示。
@@ -59,6 +59,10 @@
 - 安装失败恢复若也遇文件锁，完整备份和恢复记录会保留，不启动混合版本、不允许新更新；释放占用后可显式重试，见[恢复说明](docs/RELEASE.md)。这属于安装失败恢复，不是自动版本回退。
 - 切换游戏、版本或断开连接后，旧入库、扫描和页面读写的迟到结果不会覆盖新页面；扫描候选绑定进程启动实例和扫描代。整数编码保持 Int64 精度，拒绝越界、无法整除的比例目标及 NaN/Infinity。
 - 游戏库按调用时快照串行保存，缺失或损坏的主文件可使用有效备份；双份损坏、未来数据格式会明确拒绝覆盖。更新替换前再次核对当前安装模块；中断事务在正常界面加载前被拦截。
+
+- v0.5.0 新增模块资料保护、可恢复安装事务和同数据目录单实例：损坏登记不再当作空记录覆盖；模块缺文件会说明具体原因；未完成安装恢复到操作前状态，成功安装不自动降级。主程序启动先取得独占租约，避免多开覆盖资料。详见[设计与验收记录](docs/MODULE_STATE_AND_INSTANCE_RELIABILITY_DESIGN.md)。
+- v0.5.0 补充三项安全边界：游戏库缺少必要列表时按损坏处理，不默认为空库；通用写入区分写入失败、回读失败、不一致和一致，不用目标值冒充实际值；错误日志限量轮换并安全兜底。回读一致不代表游戏效果已生效。不确定的手动写入会暂停该字段原有数值锁定并说明原因。详见[方案与验收记录](docs/PROFILE_WRITE_AND_LOG_SAFETY_DESIGN.md)。
+- v0.5.0 修复游戏身份和会话边界：同名进程不再自动合并档案；移出 A 期间切到 B，不改 B 的会话，A 安全回正并断开；仍在展示 A 时保留完整临时连接。关闭时先安全回正，再提交退出；准备失败保留操作和连接监测，允许重试，不自动重新加速。详见[详细方案与三遍检查](docs/GAME_IDENTITY_AND_SESSION_LIFECYCLE_DESIGN.md)。
 - 右下角“官网”按钮可打开本项目 GitHub 主页，并带有两秒防重复点击冷却。
 
 ## 下载与运行
@@ -85,6 +89,8 @@ GameValueEditor.exe
 ## 游戏版本规则
 
 同一个游戏可以保存多个版本档案。普通游戏使用 EXE 的 SHA-256；Unity IL2CPP 游戏还会组合 `GameAssembly.dll` 与 `global-metadata.dat` 的 SHA-256。游戏平台 Build ID、游戏自身声明版本和引擎文件版本会分开显示，方便玩家辨认，但不会代替安全构建指纹。游戏换安装目录或 Steam 库后，重新连接会刷新路径与平台信息，不会因此失去游戏库身份。
+
+身份修复只在唯一已知构建或已验证模块身份确认是同一游戏时刷新搬迁路径。仅进程名相同不能证明身份；无法确认的库内连接会提示使用顶部实际进程连接，通用连接和另存新条目仍可用。存在多个候选安装路径时不自动猜选。
 
 ```text
 游戏
@@ -115,6 +121,8 @@ data\library.backup.json
 data\crash.log
 ```
 
+日志连同 `crash.1.log`、`crash.2.log` 最多保留三份，每份上限 1 MiB；超长详情会注明截断。正常目录不可写时，尝试 `%TEMP%\GameValueEditor\crash-logs\<目录身份>`；两处都失败仍提示原错误，不会声称日志已保存。日志只在本机留存，不自动上传。
+
 游戏图标、可选模块和待安装更新分别保存在 `data\icons`、`data\modules` 和 `data\updates`。应用更新不会覆盖整个 `data` 目录。
 
 ## 从源码构建
@@ -134,10 +142,12 @@ dotnet run --project tests/GameValueEditor.SmokeTests/GameValueEditor.SmokeTests
 
 输出位于 `dist/`。
 
+正式打包不会提前删旧包，候选包启动/更新器测试通过后才落盘，同版本已有包不可覆盖。仅验证未提交的本地改动时，使用 `./scripts/build-local-review-package.ps1`，生成独立的未发布 review 包，不改版本或正式资产。
+
 验证最终 ZIP 中的程序能够正常启动：
 
 ```powershell
-./scripts/test-package-startup.ps1 -ArchivePath ./dist/GameValueEditor-v0.4.9-win-x64.zip
+./scripts/test-package-startup.ps1 -ArchivePath ./dist/GameValueEditor-v0.5.0-win-x64.zip
 ```
 
 官方游戏模块已迁移到独立仓库。在相邻目录克隆模块中心后，可按游戏目录名构建任意模块：
@@ -147,18 +157,26 @@ cd ../GameValueEditor-Modules
 ./scripts/Publish-GameModule.ps1 -Game fzzml -SkipCatalog
 ```
 
-模块仓库已生成与公开目录哈希一致的模块 ZIP 后，可创建包含全部模块或指定模块的本地完整包：
+模块仓库已生成与目录大小/哈希一致的本地模块 ZIP 后，在主程序仓库根目录创建离线包（PowerShell 7.4+）。先运行 Release 构建准备模块页面核验器；工具读取已验证的标准主程序 ZIP，自动选择每个模块与宿主兼容的最新保留版本，不隐式下载：
 
 ```powershell
-./scripts/create-local-complete-package.ps1
-# 或仅打入指定模块：
-./scripts/create-local-complete-package.ps1 -ModuleIds game.fzzml,game.worldapart
+./scripts/build-complete-offline-bundle.ps1
+# 指定模块子集（输出名称为 selected-offline）：
+./scripts/build-complete-offline-bundle.ps1 -ModuleIds game.fzzml,game.worldapart
+# 验证已有完整包，包括实际模块加载/页面创建与隔离启动：
+./scripts/build-complete-offline-bundle.ps1 -VerifyOnly
+# 离线工具回归测试（无需下载、构建或发布）：
+./scripts/test-offline-bundle.ps1
 ```
+
+模块预装至真实的 `data/modules/packages/{id}/{version}`，不包含个人数据。内容一致的已有包自动核验复用；不同内容默认拒绝覆盖，需指定另一个 `OutputPath` 或显式 `-Force`，新包校验和启动成功后才替换。旧 `create-local-complete-package.ps1` 命令仍可用，但仅转交同一实现。完整/子集离线包只供本地或 QQ 分发，不上传 GitHub；详见[离线打包设计与验收](docs/COMPLETE_OFFLINE_BUNDLE_DESIGN.md)和[本地发布流程](docs/RELEASE.md)。
+
+核验记录位于 `artifacts/offline-bundle-receipts/<SHA256>.json`，应和包单独保留。`VerifyOnly` 将包的完整性与目录下是否最新分别报告；有更新不代表旧包损坏，目录不可用只让新旧状态变为未知。记录存在时无需原始模块 ZIP；无记录则需要包内对应版本的原输入证据。下载支持用户取消、平均速率和等待提示，原有超时保护保持不变，校验/安装阶段不可取消。
 
 完整的正式版验证使用本地脚本执行，不依赖 GitHub Actions：
 
 ```powershell
-./scripts/verify-release.ps1 -Version 0.4.9
+./scripts/verify-release.ps1 -Version 0.5.0
 ```
 
 该脚本依次执行 Release 构建、烟雾测试、自包含打包、发布包启动验证和更新器回滚验证。验证完成后使用 `scripts/publish-github-release.ps1` 推送标签、创建或恢复 GitHub Release、显示资产上传进度并校验线上 SHA-256；脚本支持显式代理、环境变量代理和 Windows 系统代理，具体见 [本地发布流程](docs/RELEASE.md)。

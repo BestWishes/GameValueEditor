@@ -5,8 +5,13 @@ using System.Net.Http;
 
 namespace GameValueEditor.Services;
 
+public enum DownloadPhase { Connecting, Downloading, Waiting, Verifying, Installing }
+
 public sealed record DownloadProgressSnapshot(long BytesReceived, long? TotalBytes)
 {
+    public DownloadPhase Phase { get; init; } = DownloadPhase.Downloading;
+    public double? BytesPerSecond { get; init; }
+    public int WaitingSeconds { get; init; }
     public int? Percentage => TotalBytes is > 0
         ? (int)Math.Clamp(BytesReceived * 100L / TotalBytes.Value, 0, 100)
         : null;
@@ -16,8 +21,14 @@ public sealed record DownloadProgressSnapshot(long BytesReceived, long? TotalByt
         get
         {
             var received = FormatMegabytes(BytesReceived);
-            if (TotalBytes is not > 0) return $"已下载 {received} MB";
-            return $"{Percentage}% · {received} / {FormatMegabytes(TotalBytes.Value)} MB";
+            if (Phase == DownloadPhase.Connecting) return $"正在连接服务器 · 已等待 {WaitingSeconds} 秒";
+            if (Phase == DownloadPhase.Verifying) return "下载完成 · 正在校验";
+            if (Phase == DownloadPhase.Installing) return "校验通过 · 正在准备安装";
+            var amount = TotalBytes is > 0
+                ? $"{Percentage}% · {received} / {FormatMegabytes(TotalBytes.Value)} MB"
+                : $"已下载 {received} MB";
+            if (Phase == DownloadPhase.Waiting) return $"{amount} · 等待数据 {WaitingSeconds} 秒";
+            return BytesPerSecond is { } speed ? $"{amount} · {speed / 1024:0.0} KB/s" : amount;
         }
     }
 
@@ -59,7 +70,13 @@ public static class HttpDownloadService
         var completed = false;
         try
         {
-            using var response = await httpClient.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead,
+            var connectionClock = Stopwatch.StartNew();
+            progress?.Report(new DownloadProgressSnapshot(0, expectedLength > 0 ? expectedLength : null)
+                { Phase = DownloadPhase.Connecting });
+            using var response = await AwaitWithFeedbackAsync(
+                httpClient.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, totalTimeout.Token),
+                () => progress?.Report(new DownloadProgressSnapshot(0, expectedLength > 0 ? expectedLength : null)
+                    { Phase = DownloadPhase.Connecting, WaitingSeconds = (int)connectionClock.Elapsed.TotalSeconds }),
                 totalTimeout.Token);
             response.EnsureSuccessStatusCode();
             var responseLength = response.Content.Headers.ContentLength;
@@ -76,6 +93,7 @@ public static class HttpDownloadService
             var received = 0L;
             var lastReportedBytes = 0L;
             var reportClock = Stopwatch.StartNew();
+            var transferClock = Stopwatch.StartNew();
             while (true)
             {
                 int count;
@@ -84,7 +102,11 @@ public static class HttpDownloadService
                     inactivityTimeout.CancelAfter(policy.InactivityTimeout);
                     try
                     {
-                        count = await source.ReadAsync(buffer.AsMemory(), inactivityTimeout.Token);
+                        var waitClock = Stopwatch.StartNew();
+                        count = await AwaitWithFeedbackAsync(source.ReadAsync(buffer.AsMemory(), inactivityTimeout.Token).AsTask(),
+                            () => progress?.Report(new DownloadProgressSnapshot(received, totalLength)
+                                { Phase = DownloadPhase.Waiting, WaitingSeconds = (int)waitClock.Elapsed.TotalSeconds,
+                                    BytesPerSecond = 0 }), inactivityTimeout.Token);
                     }
                     catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested &&
                                                              !totalTimeout.IsCancellationRequested)
@@ -99,7 +121,8 @@ public static class HttpDownloadService
                 if (received - lastReportedBytes >= MinimumReportBytes ||
                     reportClock.Elapsed >= MinimumReportInterval)
                 {
-                    progress?.Report(new DownloadProgressSnapshot(received, totalLength));
+                    progress?.Report(new DownloadProgressSnapshot(received, totalLength)
+                        { BytesPerSecond = received / Math.Max(transferClock.Elapsed.TotalSeconds, 0.001) });
                     lastReportedBytes = received;
                     reportClock.Restart();
                 }
@@ -108,7 +131,9 @@ public static class HttpDownloadService
             await target.FlushAsync(totalTimeout.Token);
             if (expectedLength > 0 && received != expectedLength)
                 throw new InvalidOperationException("下载文件大小与发布记录不一致。");
-            progress?.Report(new DownloadProgressSnapshot(received, totalLength ?? received));
+            cancellationToken.ThrowIfCancellationRequested();
+            // Report synchronously before any hash/install work so UI cancellation can close its gate.
+            progress?.Report(new DownloadProgressSnapshot(received, totalLength ?? received) { Phase = DownloadPhase.Verifying });
             completed = true;
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested &&
@@ -124,5 +149,20 @@ public static class HttpDownloadService
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
             }
         }
+    }
+
+    private static async Task<T> AwaitWithFeedbackAsync<T>(Task<T> operation, Action feedback, CancellationToken token)
+    {
+        while (!operation.IsCompleted)
+        {
+            using var tick = CancellationTokenSource.CreateLinkedTokenSource(token);
+            var delay = Task.Delay(TimeSpan.FromSeconds(1), tick.Token);
+            var winner = await Task.WhenAny(operation, delay);
+            tick.Cancel();
+            // Await the actual operation on cancellation too: do not leave a read using a disposed stream.
+            if (winner == operation || token.IsCancellationRequested) break;
+            feedback();
+        }
+        return await operation;
     }
 }

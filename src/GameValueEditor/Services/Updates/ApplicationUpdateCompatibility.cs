@@ -43,8 +43,29 @@ internal static class ApplicationUpdateCompatibilityValidator
             throw new InvalidOperationException("待安装记录缺少有效的目标兼容信息，请重新下载更新或回退包。");
         var target = ParseVersion(targetVersion);
         var root = Path.Combine(Path.GetFullPath(applicationDirectory), "data", "modules");
+        EnsureNoLinks(root, root);
+        if (Directory.Exists(root) && Directory.EnumerateDirectories(root, ".install-transaction-*", SearchOption.TopDirectoryOnly).Any())
+            throw new InvalidOperationException("模块安装事务尚未收尾，已停止主程序替换。请先重启恢复模块安装。");
+        var deletionPath = Path.Combine(root, "pending-deletions.json");
+        EnsureNoLinks(deletionPath, root);
+        if (!File.Exists(deletionPath) && File.Exists(deletionPath + ".backup"))
+            throw new InvalidDataException("模块待删除主记录缺失但备份存在，已停止主程序替换。");
+        if (File.Exists(deletionPath))
+        {
+            var deletion = JsonSerializer.Deserialize<DeletionDocument>(File.ReadAllText(deletionPath), JsonOptions);
+            var deletionIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (deletion is null || deletion.SchemaVersion != 1 || deletion.ModuleIds is null ||
+                deletion.ModuleIds.Any(id => !IsSegment(id) || !deletionIds.Add(id)))
+                throw new InvalidDataException("模块待删除记录损坏或格式不受支持，已停止主程序替换。");
+            if (deletion.ModuleIds.Count > 0)
+                throw new InvalidOperationException("模块卸载尚未完成，请先重启完成清理，再替换主程序。");
+        }
         var installedPath = Path.Combine(root, "installed.json");
-        if (!File.Exists(installedPath)) return;
+        if (!File.Exists(installedPath))
+        {
+            if (File.Exists(installedPath + ".backup")) throw new InvalidDataException("模块主登记缺失但备份存在，已停止主程序替换。");
+            return;
+        }
         EnsureNoLinks(installedPath, root);
         var document = JsonSerializer.Deserialize<ModuleDocument>(File.ReadAllText(installedPath), JsonOptions)
                        ?? throw new InvalidDataException("模块安装记录无效，已停止应用版本替换。");
@@ -91,6 +112,7 @@ internal static class ApplicationUpdateCompatibilityValidator
     }
 
     private sealed class ModuleDocument { public int SchemaVersion { get; set; } public List<ModuleRecord>? Modules { get; set; } }
+    private sealed class DeletionDocument { public int SchemaVersion { get; set; } public List<string>? ModuleIds { get; set; } }
     private sealed class ModuleRecord { public string Id { get; set; } = ""; public string Version { get; set; } = ""; }
     private sealed class ModuleManifest
     {

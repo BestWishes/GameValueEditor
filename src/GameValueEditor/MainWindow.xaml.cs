@@ -61,15 +61,25 @@ public partial class MainWindow : Window
 
     private void MainWindow_OnClosing(object? sender, CancelEventArgs e)
     {
-        _connectionMonitorTimer.Stop();
+        e.Cancel = !TryShutdown(out var error);
+        if (error is not null) ShowError(error);
+    }
+
+    internal bool TryShutdown(out Exception? error)
+    {
+        error = null;
         try
         {
             _viewModel.Shutdown();
+            _connectionMonitorTimer.Stop();
+            return true;
         }
         catch (Exception exception)
         {
-            e.Cancel = true;
-            ShowError(exception);
+            error = exception;
+            if (!_viewModel.IsShutdownCommitted) return false;
+            _connectionMonitorTimer.Stop();
+            return true;
         }
     }
 
@@ -158,6 +168,8 @@ public partial class MainWindow : Window
     private async void RestoreGameSpeed_OnClick(object sender, RoutedEventArgs e) =>
         await RunGuardedAsync(_viewModel.RestoreGameSpeedAsync);
 
+    private void CancelDownload_OnClick(object sender, RoutedEventArgs e) => _viewModel.CancelDownload();
+
     private async void CheckGameModules_OnClick(object sender, RoutedEventArgs e) =>
         await RunGuardedAsync(_viewModel.CheckGameModuleUpdatesAsync);
 
@@ -165,8 +177,7 @@ public partial class MainWindow : Window
     {
         await RunGuardedAsync(async () =>
         {
-            await _viewModel.InstallAvailableGameModuleAsync();
-            PromptForModuleRestart();
+            if (await _viewModel.InstallAvailableGameModuleAsync()) PromptForModuleRestart();
         });
     }
 
@@ -176,8 +187,7 @@ public partial class MainWindow : Window
                 $"确定{_viewModel.ModuleRollbackActionText}吗？\n\n回退完成后，该模块会停用，直到你重启肝肾大圣。其他模块不会被改变。")) return;
         await RunGuardedAsync(async () =>
         {
-            await _viewModel.RollbackCurrentGameModuleAsync();
-            PromptForModuleRestart();
+            if (await _viewModel.RollbackCurrentGameModuleAsync()) PromptForModuleRestart();
         });
     }
 

@@ -5,17 +5,23 @@ GitHub Actions 不是发布前提。正式版本先完成源码级构建与测�
 ## 1. 验证标准包
 
 ```powershell
-./scripts/verify-release.ps1 -Version 0.4.9
+./scripts/verify-release.ps1 -Version 0.5.0
 ```
 
 记录脚本输出的标准 ZIP 路径与 SHA-256。正式发布版本是独立的十进制计数器：每次只加 `0.0.1`，`0.4.9` 的下一版是 `0.5.0`，`0.9.9` 的下一版是 `1.0.0`。发布脚本从最新正式标签计算唯一下一版本并拒绝跳号；预览标签和 `complete-offline` 完整离线包均不能上传 GitHub Release，完整离线包只供本地或 QQ 分发。Host API 与 Schema 是独立整数协议号，不参与此进位。
+
+`publish.ps1` 要求 PowerShell 7.4+，调用共享 `application-package.ps1` 在独立工作目录生成候选包，严格验证六个标准文件、二进制版本/提交、真实启动和候选更新器后才原子提升。已有同名 ZIP 不覆盖；构建或验证失败不删除任何旧包，成功也不顺手删除其他本地 ZIP。服务器三个版本的保留策略仍由后续保留脚本执行。`test-application-package.ps1` 覆盖这些失败边界并已接入正式验证入口。
+
+尚未提交的本地代码用 `./scripts/build-local-review-package.ps1` 验证，输出到唯一的 `artifacts/local-review-*` 目录，并在目录旁明确标注“未发布、含未提交改动”。此命令不改版本、不生成正式 dist 资产、不提交或联网发布；不得把同版本 review 包上传覆盖正式资产。二进制提交号仅代表基线提交，不代表其工作树已经提交。
+
+v0.5.0 汇总此前本地工作树的离线打包、下载反馈、模块资料/安装事务、单实例、游戏库结构、通用写入回读、日志及会话生命周期修复，见 [集成复核与发布记录](RELEASE_0_5_0_INTEGRATION_REVIEW.md)。历史设计文档保留当时的本地交付范围与验证记录；本次在用户授权后统一发布。日志失败不绕过更新恢复门禁；配置格式仍为 7，Host API 仍为 7，不要求模块联动升版。
 
 ## 2. 提交并创建标签
 
 确认工作树、差异和远端状态后提交，在已验证的提交上创建带注释标签：
 
 ```powershell
-git tag -a v0.4.9 -m "GameValueEditor v0.4.9"
+git tag -a v0.5.0 -m "GameValueEditor v0.5.0"
 ```
 
 发布脚本从 `origin`（或 `-RemoteName` 指定的远端）解析 GitHub 仓库，避免手工填写错误的所有者或仓库名。可用 `-PushRefs` 同时推送当前分支和标签；脚本先使用配置的 Git 远端，HTTPS 失败时自动通过 GitHub SSH 443 重试。
@@ -24,9 +30,9 @@ git tag -a v0.4.9 -m "GameValueEditor v0.4.9"
 
 ```powershell
 ./scripts/publish-github-release.ps1 `
-  -Tag v0.4.9 `
-  -ReleaseName "肝肾大圣 v0.4.9" `
-  -AssetPath ./dist/GameValueEditor-v0.4.9-win-x64.zip `
+  -Tag v0.5.0 `
+  -ReleaseName "肝肾大圣 v0.5.0" `
+  -AssetPath ./dist/GameValueEditor-v0.5.0-win-x64.zip `
   -PushRefs
 ```
 
@@ -48,9 +54,9 @@ git tag -a v0.4.9 -m "GameValueEditor v0.4.9"
 
 ```powershell
 ./scripts/publish-github-release.ps1 `
-  -Tag v0.4.9 `
-  -ReleaseName "肝肾大圣 v0.4.9" `
-  -AssetPath ./dist/GameValueEditor-v0.4.9-win-x64.zip `
+  -Tag v0.5.0 `
+  -ReleaseName "肝肾大圣 v0.5.0" `
+  -AssetPath ./dist/GameValueEditor-v0.5.0-win-x64.zip `
   -VerifyOnly
 ```
 
@@ -62,6 +68,47 @@ git tag -a v0.4.9 -m "GameValueEditor v0.4.9"
 
 主程序和各模块的版本号独立；兼容关系不靠版本号相等，而由主程序索引中的 Host API 范围，以及模块发布快照中的 `hostApiVersion`、`minimumHostVersion`、`maximumHostVersion` 共同确定。应用中的“回退”始终由用户显式确认；保留脚本和检查版本流程都不得触发自动回退。
 
+## 本地完整离线包（不要求提交或发布）
+
+这是组合已有已验证产物的独立流程，不重新编译应用、不提升版本、不提交、推送、打标签、上传或清理 GitHub。要求 PowerShell 7.4+，首次组包需要主程序仓库 `dist` 中已有标准 ZIP，相邻模块仓库包含当前 Schema 5 目录、本地 JSON Schema 和目录引用的模块 ZIP。先用 `dotnet build GameValueEditor.sln -c Release` 准备与目标宿主语义版本一致的模块页面核验器；组合命令本身不会隐式构建或下载依赖。
+
+```powershell
+./scripts/build-complete-offline-bundle.ps1
+# 版本默认读取宿主项目，也可显式指定；模块仓库可以在别的位置：
+./scripts/build-complete-offline-bundle.ps1 -ApplicationVersion 0.5.0 `
+  -ModuleRepository D:/MyOtherProjects/GameValueEditor-Modules
+./scripts/build-complete-offline-bundle.ps1 -VerifyOnly
+./scripts/test-offline-bundle.ps1
+```
+
+主程序输入固定为 `dist/GameValueEditor-v{version}-win-x64.zip`，必须与本地发布索引的大小/SHA-256、二进制版本/源码提交和能力声明一致。尚未进入索引的独立验证标准 ZIP 可显式提供 `-ExpectedHostSha256`；不能用它绕过已存在的索引记录。不得从正在使用的应用目录或 `artifacts/package` 直接组包，不能复制个人游戏库、存档、缓存或更新事务。
+
+默认包含每个模块版本列表中与宿主 API 范围和主程序版本边界兼容的最新快照；没有兼容项、缺少本地 ZIP、清单/目录不一致或哈希错误时停止，不能静默漏装。未知目录协议也停止，不自动放宽兼容边界。工具不连接 GitHub；先准备所需模块原始 ZIP，不用应用下载缓存代替。
+
+默认输出为 `dist/GameValueEditor-v{version}-complete-offline-win-x64.zip`。`-ModuleIds` 指定子集时默认名称为 `selected-offline`；`-OutputPath` 只能指向宿主 `dist` 内的非标准 ZIP。已有内容一致的包重新核验并启动后复用，包字节不变；不同内容默认报错，可选择新文件名或显式 `-Force`。新包在独立暂存目录中生成，逐项散列核验并隔离启动，通过后才原子替换；失败保留原包。`-VerifyOnly` 必须已有输出且不能与 `-Force` 同用，不改变包，但会短暂创建并清理隔离验证目录。
+
+核验不再仅检查 EXE 存活：隔离模式实际加载包内 DLL，核对安装身份、编辑器注册，并创建和释放模块自有页面。它使用当前源码构建的同语义版本宿主实现，再独立启动包内 EXE；不宣称证明历史宿主二进制的全部行为或游戏内读写效果。核验器缺失、版本不同、模块加载/页面创建失败都会明确停止。
+
+成功组包或复用后，在 ZIP 外保存 `artifacts/offline-bundle-receipts/<SHA256>.json` 本地核验记录，冻结宿主来源、模块版本和全部文件散列。`VerifyOnly` 优先使用记录，原始模块/宿主 ZIP 删除、目录升级或目录不可用不会因此把原包误判损坏。无记录时，按包内安装版本匹配目录保留快照和原 ZIP，不按最新版本；缺证据时明确要求恢复核验记录或原输入。记录需要保留或单独备份，是本机可信工作流证据而非数字签名；同时篡改包及本机记录不在其安全承诺内。`VerifyOnly` 不创建或修复记录。
+
+返回结果含 `IntegrityVerified`、`ModulesVerified`、`StartupVerified`、`Reused`、SHA-256、大小、源码提交、模块版本/源哈希和 `ReceiptPath`。`IsLatest` / `LatestStatus` 独立描述当前本地目录下的组合新旧程度：`Current`、`NewerRecipeAvailable` 或目录不可用时的 `Unknown`（`IsLatest=null`）。目录与包不同不等于包损坏，新旧检查不联网。解压整个包后运行 EXE；预装模块仍受游戏构建检查约束，未来查新/更新可能需要联网。归档时间、安装时间与说明改变时新 ZIP 的哈希可能不同，不能把离线组合包当作标准应用更新资产。
+
+旧仓库 `create-local-complete-package.ps1` 及发布技能的同名离线脚本都只调用仓库正式入口。离线回归测试已接入 `verify-release.ps1`，但单独组离线包无需运行该正式发布流程。详见[原离线打包设计](COMPLETE_OFFLINE_BUNDLE_DESIGN.md)和[本地可靠性改进及检查记录](LOCAL_RELIABILITY_DESIGN.md)。
+
+## 下载状态与取消
+
+### v0.5.0 游戏身份与退出修复
+
+同名进程现在只用于发现候选，不合并游戏档案。唯一安装路径、已验证模块身份或已保存构建才能确认游戏；换目录后仍可关联已确认的档案，未知/多义候选使用顶部实际进程连接。移出时若已切到另一个游戏，原目标安全回正并断开，不改当前游戏；仍在原目标时保留其完整临时连接。模块已卸载但回正失败时保留档案、如实更新模块状态，让用户可以重试。
+
+关闭时只有安全回正全部成功才取消任务和正式退出。回正失败或实际倍速任务仍在执行时，保留窗口、操作与连接监测；已回正的游戏保持正常速度，不自动再加速。正式清理已开始后的资源错误不会把窗口留在半销毁状态。这不是自动版本回退，主程序/模块手动回退策略不变。
+
+定向回归可运行 `GameValueEditor.SmokeTests.exe --game-lifecycle-only`，窗口关闭协调随完整冒烟测试执行。详细规则与三遍检查记录见[设计文档](GAME_IDENTITY_AND_SESSION_LIFECYCLE_DESIGN.md)；历史本地实现记录与本次 v0.5.0 发布记录分开保留，旧版本资产不覆盖。
+
+### 传输状态
+
+主程序更新/手动回退和模块安装/手动回退共用单个下载会话。网络连接和等待数据期间每秒反馈，传输显示累计大小与平均速率；保留总计 20 分钟、连续无数据 60 秒的超时边界，不做自动回退或自动重试。底部固定槽位的“取消”只在传输阶段可点，开始校验/安装前同步关闭，安装事务不能被 UI 取消。用户取消清理临时下载，不改本地版本、不生成待安装记录、不弹错误或重启提示。取消按钮空闲 Hidden，右侧原有四个按钮的位置及 12 DIP 间距不随状态变化。
+
 ## 中断恢复
 
 - 标签已存在但 Release 不存在：使用同一参数重新运行脚本。
@@ -71,6 +118,18 @@ git tag -a v0.4.9 -m "GameValueEditor v0.4.9"
 - 同名资产已经上传但哈希不同：停止，提升版本；不得删除或替换不可变资产。
 
 ## 本机安装失败恢复
+
+### v0.5.0 模块与多开保护
+
+主程序在处理待更新、读取资料和清理临时文件前取得 `data/.application-instance.lock` 文件租约。同一目录的第二实例不处理任何资料或更新，只前置原窗口或提示退出；独立目录不受影响。正常退出或进程崩溃都会释放句柄，不要用删除锁文件的方式绕过独占保护。
+
+模块记录 `data/modules/installed.json` 和 `pending-deletions.json` 的 `.backup` 为上一份有效资料，不能自动解释为回退指令。损坏、未来 Schema 或主文件缺失但备份存在会保留现场并阻止模块变更。先退出主程序，保留损坏主文件和备份的副本，再由维护者核对登记及对应包是否完整，明确恢复正确的主记录后重启；不得只删除损坏记录重新安装，也不能直接重放旧的待删除列表。
+
+模块安装记录位于 `data/modules/.install-transaction-<GUID>/transaction.json`。未提交事务在启动时尝试恢复本次操作前的包与登记；仅有已知准备文件、尚未开始替换的中断可以安全清理。恢复失败时保留事务与原包备份，停止模块变更/不确定模块加载；解除占用或权限问题后重启重试。未知/损坏记录、链接、外部资料冲突须先由维护者检查，不能删除事务目录绕过检查。成功提交的事务只清理，不会改回旧版本。主程序更新器也拒绝尚未完成的模块事务、卸载或损坏记录。
+
+以上是未完成安装的故障恢复，主程序和模块的版本回退仍是用户主动确认的操作。详见[设计及三遍检查记录](MODULE_STATE_AND_INSTANCE_RELIABILITY_DESIGN.md)。
+
+### 已发布的主程序安装恢复
 
 0.4.7 标准包新增 release-compatibility.json；其版本、API 范围与目录 Schema 上限须与发布索引一致，索引脚本会核对。旧宿主生成的 pending 没有这些字段时，只有通过既有 SHA-256 校验的新包清单可以补足；不能猜测旧包兼容信息。
 

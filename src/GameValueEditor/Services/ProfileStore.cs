@@ -61,7 +61,7 @@ public sealed class ProfileStore
     {
         // Capture on the caller's thread before yielding: UI collections remain mutable.
         var snapshot = JsonSerializer.SerializeToUtf8Bytes(document, _jsonOptions);
-        Validate(JsonSerializer.Deserialize<LibraryDocument>(snapshot, _jsonOptions));
+        ReadDocument(snapshot);
         return SaveSnapshotAsync(snapshot);
     }
 
@@ -96,8 +96,48 @@ public sealed class ProfileStore
         finally { TryDelete(tempPath); }
     }
 
-    private LibraryDocument ReadValidated(string path) =>
-        Upgrade(Validate(JsonSerializer.Deserialize<LibraryDocument>(File.ReadAllBytes(path), _jsonOptions)));
+    private LibraryDocument ReadValidated(string path) => ReadDocument(File.ReadAllBytes(path));
+
+    private LibraryDocument ReadDocument(byte[] bytes)
+    {
+        using var json = JsonDocument.Parse(bytes);
+        var root = RequireObject(json.RootElement, "游戏库");
+        var schema = 1; // A structurally complete legacy document may omit the format declaration.
+        if (root.TryGetValue("SchemaVersion", out var declaration))
+        {
+            if (declaration.ValueKind != JsonValueKind.Number || !declaration.TryGetInt64(out var value) || value < 1)
+                throw new InvalidDataException("游戏库格式编号必须是正整数。");
+            if (value > SupportedSchema)
+                throw new NotSupportedException($"游戏库格式 {value} 高于本程序支持的 {SupportedSchema}，请使用较新主程序，不能覆盖现有资料。");
+            schema = (int)value;
+        }
+        foreach (var game in RequireArray(root, "Games", "游戏库").EnumerateArray())
+        foreach (var version in RequireArray(RequireObject(game, "游戏条目"), "Versions", "游戏条目").EnumerateArray())
+        foreach (var field in RequireArray(RequireObject(version, "游戏版本"), "Fields", "游戏版本").EnumerateArray())
+            RequireObject(field, "保存字段");
+
+        var document = Validate(JsonSerializer.Deserialize<LibraryDocument>(bytes, _jsonOptions));
+        document.SchemaVersion = schema;
+        return Upgrade(document);
+    }
+
+    private static Dictionary<string, JsonElement> RequireObject(JsonElement element, string context)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+            throw new InvalidDataException($"{context}必须是对象。");
+        var properties = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+        foreach (var property in element.EnumerateObject())
+            if (!properties.TryAdd(property.Name, property.Value))
+                throw new InvalidDataException($"{context}包含重复属性：{property.Name}。");
+        return properties;
+    }
+
+    private static JsonElement RequireArray(Dictionary<string, JsonElement> properties, string name, string context)
+    {
+        if (!properties.TryGetValue(name, out var element) || element.ValueKind != JsonValueKind.Array)
+            throw new InvalidDataException($"{context}缺少必要的数组 {name}。");
+        return element;
+    }
 
     private bool IsValidExisting(string path)
     {
