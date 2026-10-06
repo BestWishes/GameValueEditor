@@ -940,9 +940,12 @@ try
         Assert(stableUpdate.UpdateTarget!.AssetName == "GameValueEditor-v0.3.0-win-x64.zip",
             "Application updater selected the complete offline bundle instead of the standard host package");
         var availableUpdateViewModel = new MainViewModel(stableUpdateService);
+        Assert(availableUpdateViewModel.CanCheckApplicationUpdate && !availableUpdateViewModel.CanUseApplicationUpdate,
+            "Initial check and update actions are not independent");
         await availableUpdateViewModel.CheckApplicationUpdateAsync();
         Assert(availableUpdateViewModel.HasApplicationUpdateAvailable && availableUpdateViewModel.CanUseApplicationUpdate,
             "Newly available update remained disabled by the check-button cooldown");
+        Assert(!availableUpdateViewModel.CanCheckApplicationUpdate, "Check action did not honor its cooldown");
         availableUpdateViewModel.Shutdown();
         var currentUpdateService = new ApplicationUpdateService(
             Path.Combine(serviceTestRoot, "current-updates"), releasesClient, "0.3.0");
@@ -963,7 +966,7 @@ try
         {
         }
         Assert(failingUpdateViewModel.ApplicationUpdateStatusText == "　检查失败" &&
-               failingUpdateViewModel.ApplicationUpdateActionText == "检查更新",
+               !failingUpdateViewModel.CanUseApplicationUpdate && !failingUpdateViewModel.CanCheckApplicationUpdate,
             "Failed application update check left the footer in its in-progress state");
 
         var updateArchive = Encoding.UTF8.GetBytes("verified update archive");
@@ -1219,6 +1222,8 @@ try
                     themedDialog.Close();
                 }
             }
+
+            LayoutRegressionTests.CheckLayout(args);
 
             if (args.Contains("--render-ui", StringComparer.OrdinalIgnoreCase))
             {

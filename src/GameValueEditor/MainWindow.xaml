@@ -6,6 +6,24 @@
         Style="{StaticResource ThemedWindowStyle}"
         MinHeight="700" MinWidth="1080" WindowStartupLocation="CenterScreen">
     <Window.Resources>
+        <ImageBrush x:Key="DedicatedModuleIconMask"
+                    ImageSource="pack://application:,,,/GameValueEditor;component/Assets/GameValueEditorDedicatedModuleLoaded.png"
+                    Viewbox="0.264,0.377,0.472,0.265" ViewboxUnits="RelativeToBoundingBox" Stretch="Uniform"/>
+        <Style x:Key="ModuleActionButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Width" Value="64"/>
+            <Setter Property="Height" Value="32"/>
+            <Setter Property="Margin" Value="8,0,0,0"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="ToolTipService.ShowOnDisabled" Value="True"/>
+        </Style>
+        <Style x:Key="ApplicationActionButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Width" Value="52"/>
+            <Setter Property="Height" Value="24"/>
+            <Setter Property="Padding" Value="6,2"/>
+            <Setter Property="Margin" Value="8,0,0,0"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="ToolTipService.ShowOnDisabled" Value="True"/>
+        </Style>
         <DataTemplate DataType="{x:Type viewModels:AdapterModuleEditorPageState}">
             <ContentPresenter Content="{Binding Content}"/>
         </DataTemplate>
@@ -293,7 +311,7 @@
                         <ComboBox Grid.Column="1" ItemsSource="{Binding LibrarySortChoices}" SelectedItem="{Binding SelectedLibrarySort}"
                                   DisplayMemberPath="Display" Height="30"/>
                     </Grid>
-                    <ListBox Grid.Row="3" ItemsSource="{Binding GamesView}" SelectedItem="{Binding SelectedLibraryGame}">
+                    <ListBox x:Name="GameLibraryList" Grid.Row="3" ItemsSource="{Binding GamesView}" SelectedItem="{Binding SelectedLibraryGame}">
                         <ListBox.ItemTemplate>
                             <DataTemplate>
                                 <Grid>
@@ -311,7 +329,12 @@
                                         </TextBlock>
                                         <StackPanel Orientation="Horizontal">
                                             <TextBlock Text="{Binding Summary}" Foreground="{DynamicResource MutedTextBrush}" FontSize="11"/>
-                                            <TextBlock Text="{Binding ModuleDisplay}" Foreground="{DynamicResource AccentBrush}" FontSize="11" Margin="8,0,0,0"/>
+                                            <Rectangle x:Name="DedicatedModuleInstalledIcon" Width="20" Height="16" Margin="16,0,0,0"
+                                                       VerticalAlignment="Center" Fill="{DynamicResource AccentBrush}"
+                                                       OpacityMask="{StaticResource DedicatedModuleIconMask}"
+                                                       RenderOptions.BitmapScalingMode="HighQuality"
+                                                       Visibility="{Binding IsModuleInstalled, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                                       ToolTip="已装专属模块" AutomationProperties.Name="已装专属模块"/>
                                         </StackPanel>
                                     </StackPanel>
                                     <TextBlock Grid.Column="2" Text="{Binding ConnectionDisplay}" FontSize="17" FontWeight="SemiBold"
@@ -437,28 +460,32 @@
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*"/>
                                         <ColumnDefinition Width="Auto"/>
-                                        <ColumnDefinition Width="Auto"/>
-                                        <ColumnDefinition Width="Auto"/>
-                                        <ColumnDefinition Width="Auto"/>
-                                        <ColumnDefinition Width="Auto"/>
-                                        <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
                                     <StackPanel>
-                                        <TextBlock Text="{Binding ActiveAdapterText}" FontWeight="SemiBold"/>
-                                        <TextBlock Text="{Binding ModuleStatusText}" Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,10,0"/>
+                                        <TextBlock Text="{Binding ActiveAdapterText}" FontWeight="SemiBold"
+                                                   TextTrimming="CharacterEllipsis" ToolTip="{Binding ActiveAdapterText}" Margin="0,0,16,0"/>
+                                        <TextBlock Text="{Binding ModuleStatusText}" Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,16,0"
+                                                   TextTrimming="CharacterEllipsis" ToolTip="{Binding ModuleStatusText}"/>
                                     </StackPanel>
-                                    <Button Grid.Column="1" Content="检查新有" IsEnabled="{Binding CanCheckGameModules}"
-                                            Click="CheckGameModules_OnClick"/>
-                                    <Button Grid.Column="2" Content="{Binding ModuleInstallActionText}" IsEnabled="{Binding CanInstallGameModule}"
-                                            Click="InstallGameModule_OnClick"/>
-                                    <Button Grid.Column="3" Content="{Binding ModuleRollbackActionText}" IsEnabled="{Binding CanRollbackGameModule}"
-                                            Click="RollbackGameModule_OnClick" Margin="8,0,20,0"/>
-                                    <Button Grid.Column="4" Content="卸载" IsEnabled="{Binding CanUninstallGameModule}"
-                                            Click="UninstallGameModule_OnClick"/>
-                                    <Button x:Name="ModuleCompatibilityDiagnosticsButton" Grid.Column="5" Content="兼容性诊断" IsEnabled="{Binding CanViewModuleCompatibilityDiagnostics}"
-                                            Click="ShowModuleCompatibilityDiagnostics_OnClick" Margin="18,0,0,0"/>
-                                    <Button Grid.Column="6" Content="贡献者" IsEnabled="{Binding CanViewModuleContributors}"
-                                            Click="ShowModuleContributors_OnClick" Margin="8,0,0,0"/>
+                                    <StackPanel x:Name="ModuleActionButtons" Grid.Column="1" Orientation="Horizontal">
+                                        <Button x:Name="ModuleRollbackButton" Content="回退" IsEnabled="{Binding CanRollbackGameModule}"
+                                                Style="{StaticResource ModuleActionButtonStyle}" Margin="0" ToolTip="{Binding ModuleRollbackActionText}"
+                                                Click="RollbackGameModule_OnClick"/>
+                                        <Button x:Name="ModuleCheckButton" Content="查新" IsEnabled="{Binding CanCheckGameModules}"
+                                                Style="{StaticResource ModuleActionButtonStyle}" ToolTip="检查当前游戏可下载、更新及回退的专属模块"
+                                                Click="CheckGameModules_OnClick"/>
+                                        <Button x:Name="ModuleInstallButton" Content="{Binding ModuleInstallActionText}" IsEnabled="{Binding CanInstallGameModule}"
+                                                Style="{StaticResource ModuleActionButtonStyle}" ToolTip="{Binding ModuleInstallToolTip}"
+                                                Click="InstallGameModule_OnClick"/>
+                                        <Button x:Name="ModuleUninstallButton" Content="卸载" IsEnabled="{Binding CanUninstallGameModule}"
+                                                Style="{StaticResource ModuleActionButtonStyle}" Click="UninstallGameModule_OnClick"/>
+                                        <Button x:Name="ModuleCompatibilityDiagnosticsButton" Content="诊断" IsEnabled="{Binding CanViewModuleCompatibilityDiagnostics}"
+                                                Style="{StaticResource ModuleActionButtonStyle}" ToolTip="兼容性诊断"
+                                                Click="ShowModuleCompatibilityDiagnostics_OnClick"/>
+                                        <Button x:Name="ModuleContributorsButton" Content="献者" IsEnabled="{Binding CanViewModuleContributors}"
+                                                Style="{StaticResource ModuleActionButtonStyle}" ToolTip="查看贡献者"
+                                                Click="ShowModuleContributors_OnClick"/>
+                                    </StackPanel>
                                 </Grid>
                             </Border>
                             <Grid Grid.Row="1" Margin="0,12,0,0">
@@ -468,7 +495,7 @@
                                              IsReadOnly="True" IsReadOnlyCaretVisible="True" BorderThickness="0"
                                              Background="Transparent" FontSize="20" FontWeight="SemiBold"
                                              TextAlignment="Center" TextWrapping="Wrap" Cursor="IBeam"/>
-                                    <TextBox Text="请点击上方“检查新有”按钮。"
+                                    <TextBox Text="请点击上方“查新”按钮。"
                                              IsReadOnly="True" IsReadOnlyCaretVisible="True" BorderThickness="0"
                                              Background="Transparent" FontSize="17" Foreground="{DynamicResource MutedTextBrush}"
                                              Margin="0,14,0,0" TextAlignment="Center" TextWrapping="Wrap" Cursor="IBeam"/>
@@ -718,18 +745,31 @@
 
         <Border Grid.Row="2" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0">
             <Grid Margin="14,0">
-                <TextBlock Text="{Binding StatusText}" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                    <TextBlock Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center">
-                        <Run Text="仅用于离线单机游戏 · v"/><Run Text="{Binding CurrentApplicationVersion, Mode=OneWay}"/><Run Text="　　"/>
-                    </TextBlock>
-                    <Button Content="{Binding ApplicationUpdateActionText}" IsEnabled="{Binding CanUseApplicationUpdate}"
-                            Click="ApplicationUpdate_OnClick" Padding="6,1" Margin="0" MinHeight="22"/>
-                    <Button Content="{Binding ApplicationRollbackActionText}" IsEnabled="{Binding CanUseApplicationRollback}"
-                            Click="ApplicationRollback_OnClick" Padding="6,1" Margin="8,0,0,0" MinHeight="22"/>
-                    <TextBlock Text="{Binding ApplicationUpdateStatusText}" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
-                    <Button Content="官网" IsEnabled="{Binding CanOpenOfficialWebsite}"
-                            Click="OpenOfficialWebsite_OnClick" Padding="10,1" Margin="24,0,0,0" MinHeight="22"/>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="220"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding StatusText}" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis" ToolTip="{Binding StatusText}"/>
+                <TextBlock Grid.Column="1" Text="{Binding ApplicationUpdateStatusText}" Foreground="{DynamicResource MutedTextBrush}"
+                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding ApplicationUpdateStatusText}" Margin="12,0,0,0"/>
+                <TextBlock Grid.Column="2" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" Margin="12,0,16,0">
+                    <Run Text="仅用于离线单机游戏 · v"/><Run Text="{Binding CurrentApplicationVersion, Mode=OneWay}"/>
+                </TextBlock>
+                <StackPanel x:Name="ApplicationActionButtons" Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button x:Name="ApplicationRollbackButton" Content="回退" IsEnabled="{Binding CanUseApplicationRollback}"
+                            Style="{StaticResource ApplicationActionButtonStyle}" Margin="0" ToolTip="{Binding ApplicationRollbackActionText}"
+                            Click="ApplicationRollback_OnClick"/>
+                    <Button x:Name="ApplicationCheckButton" Content="查新" IsEnabled="{Binding CanCheckApplicationUpdate}"
+                            Style="{StaticResource ApplicationActionButtonStyle}" ToolTip="检查主程序可更新及可回退的版本"
+                            Click="ApplicationCheck_OnClick"/>
+                    <Button x:Name="ApplicationUpdateButton" Content="更新" IsEnabled="{Binding CanUseApplicationUpdate}"
+                            Style="{StaticResource ApplicationActionButtonStyle}" ToolTip="{Binding ApplicationUpdateStatusText}"
+                            Click="ApplicationUpdate_OnClick"/>
+                    <Button x:Name="OfficialWebsiteButton" Content="官网" IsEnabled="{Binding CanOpenOfficialWebsite}"
+                            Style="{StaticResource ApplicationActionButtonStyle}" Click="OpenOfficialWebsite_OnClick"/>
                 </StackPanel>
             </Grid>
         </Border>

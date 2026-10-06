@@ -28,6 +28,7 @@ internal static class ModuleLifecycleRegressionTests
                     await CheckStaleResultsAsync(root);
                     await CheckRecoveryMarkerAsync(root);
                     await StabilityRegressionTests.RunAsync(root, args);
+                    await LayoutRegressionTests.CheckUpdateStatesAsync(root);
                     var paths = args.Where(arg => arg.StartsWith("--verify-module-package=", StringComparison.Ordinal))
                         .Select(arg => arg["--verify-module-package=".Length..]).ToArray();
                     if (paths.Length >= 2) await CheckInstalledLifecycleAsync(root, paths);
@@ -47,7 +48,8 @@ internal static class ModuleLifecycleRegressionTests
         return completion.Task;
     }
 
-    internal static MainViewModel CreateViewModel(string root, GameModuleCatalogService catalog, GameAdapterRegistry registry)
+    internal static MainViewModel CreateViewModel(string root, GameModuleCatalogService catalog, GameAdapterRegistry registry,
+        ApplicationUpdateService? updater = null)
     {
         var store = new ProfileStore(root);
         var ctor = typeof(MainViewModelServices).GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic).Single();
@@ -55,7 +57,7 @@ internal static class ModuleLifecycleRegressionTests
         {
             store, new ProcessService(), new VersionFingerprintService(), new MemoryScanService(Path.Combine(root, "scan")),
             registry, new ThemeService(), new ProcessSpeedService(), new GameIconService(store.IconsDirectory), catalog,
-            new ApplicationUpdateService(store.UpdatesDirectory)
+            updater ?? new ApplicationUpdateService(store.UpdatesDirectory)
         });
         return new MainViewModel(services);
     }

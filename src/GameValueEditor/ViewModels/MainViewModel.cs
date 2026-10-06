@@ -110,7 +110,6 @@ public sealed class MainViewModel : ObservableObject
     private ModuleOperationContext? _moduleCheckContext;
     private bool _moduleRestartRequired;
     private string _applicationUpdateStatusText = string.Empty;
-    private string _applicationUpdateActionText = "检查更新";
     private bool _isApplicationUpdateBusy;
     private bool _isApplicationUpdateCheckCooldown;
     private ApplicationUpdateCheckResult? _applicationUpdateResult;
@@ -454,7 +453,8 @@ public sealed class MainViewModel : ObservableObject
          (SelectedGame is not null && SelectedVersion is not null));
     public bool CanInstallGameModule => !_isModuleControlBlocked && IsModuleContextCurrent(_moduleCheckContext) &&
         _moduleCheckResult?.Availability is GameModuleAvailability.Available or GameModuleAvailability.UpdateAvailable;
-    public string ModuleInstallActionText => _moduleCheckResult?.Availability == GameModuleAvailability.Available
+    public string ModuleInstallActionText => _moduleCheckResult?.Availability == GameModuleAvailability.Available ? "下载" : "更新";
+    public string ModuleInstallToolTip => _moduleCheckResult?.Availability == GameModuleAvailability.Available
         ? _moduleCheckResult.IsExactBuildMatch ? "可下载" : "下载后验证"
         : _moduleCheckResult?.IsExactBuildMatch == false ? "更新后验证" : "可更新";
     public bool CanRollbackGameModule => !_isModuleControlBlocked && IsModuleContextCurrent(_moduleCheckContext) &&
@@ -474,13 +474,8 @@ public sealed class MainViewModel : ObservableObject
         get => _applicationUpdateStatusText;
         private set => SetProperty(ref _applicationUpdateStatusText, value);
     }
-    public string ApplicationUpdateActionText
-    {
-        get => _applicationUpdateActionText;
-        private set => SetProperty(ref _applicationUpdateActionText, value);
-    }
-    public bool CanUseApplicationUpdate => !_isApplicationUpdateBusy && !_applicationUpdateDownloaded &&
-        (HasApplicationUpdateAvailable || !_isApplicationUpdateCheckCooldown);
+    public bool CanCheckApplicationUpdate => !_isApplicationUpdateBusy && !_applicationUpdateDownloaded && !_isApplicationUpdateCheckCooldown;
+    public bool CanUseApplicationUpdate => !_isApplicationUpdateBusy && HasApplicationUpdateAvailable;
     public bool HasApplicationUpdateAvailable => _applicationUpdateResult?.IsUpdateAvailable == true && !_applicationUpdateDownloaded;
     public bool CanUseApplicationRollback => !_isApplicationUpdateBusy && !_applicationUpdateDownloaded &&
         _applicationUpdateResult?.RollbackTarget is not null;
@@ -742,7 +737,7 @@ public sealed class MainViewModel : ObservableObject
             SelectedVersion = null;
             ResetModuleCheckState();
             StatusText = _activeAdapter is null
-                ? "这个游戏尚未进入游戏库；可使用通用扫描或点击“检查新有”"
+                ? "这个游戏尚未进入游戏库；可使用通用扫描或点击“查新”"
                 : $"已加载 {_activeAdapter.DisplayName}；下载模块后会自动保存入库";
             return;
         }
@@ -1839,7 +1834,7 @@ public sealed class MainViewModel : ObservableObject
     {
         var context = RequireModuleCheckContext();
         var module = _moduleCheckResult?.RemoteModule
-                     ?? throw new InvalidOperationException("请先点击“检查新有”。");
+                     ?? throw new InvalidOperationException("请先点击“查新”。");
         var game = SelectedGame;
         var version = SelectedVersion;
         var process = AttachedProcess;
@@ -2164,7 +2159,6 @@ public sealed class MainViewModel : ObservableObject
             if (_applicationUpdateResult.UpdateTarget is { } updateTarget)
             {
                 ApplicationUpdateStatusText = $"　v{updateTarget.Version}";
-                ApplicationUpdateActionText = "更新";
                 StatusText = $"发现肝肾大圣新版本 v{updateTarget.Version}";
             }
             else
@@ -2172,7 +2166,6 @@ public sealed class MainViewModel : ObservableObject
                 ApplicationUpdateStatusText = _applicationUpdateResult.RollbackTarget is { } rollback
                     ? $"　已最新 · 可回退 v{rollback.Version}"
                     : "　已最新";
-                ApplicationUpdateActionText = "检查更新";
                 StatusText = "肝肾大圣当前已是最新版本";
             }
         }
@@ -2180,7 +2173,6 @@ public sealed class MainViewModel : ObservableObject
         {
             _applicationUpdateResult = null;
             ApplicationUpdateStatusText = "　检查失败";
-            ApplicationUpdateActionText = "检查更新";
             StatusText = "检查肝肾大圣更新失败，请稍后重试";
             throw;
         }
@@ -2238,14 +2230,12 @@ public sealed class MainViewModel : ObservableObject
             await _applicationUpdateService.DownloadAsync(target, operation, progress);
             _applicationUpdateDownloaded = true;
             ApplicationUpdateStatusText = $"　v{target.Version} 已下载";
-            ApplicationUpdateActionText = operation == ApplicationUpdateOperation.Update ? "待重启更新" : "待重启回退";
             StatusText = $"已下载并校验 v{target.Version}，可立即重启或下次启动时{(operation == ApplicationUpdateOperation.Update ? "更新" : "回退")}";
             return true;
         }
         catch
         {
             ApplicationUpdateStatusText = $"　v{target.Version} 下载失败";
-            ApplicationUpdateActionText = operation == ApplicationUpdateOperation.Update ? "更新" : "检查更新";
             StatusText = $"下载肝肾大圣 v{target.Version} 失败，请稍后重试";
             throw;
         }
@@ -2325,7 +2315,7 @@ public sealed class MainViewModel : ObservableObject
 
     private ModuleOperationContext RequireModuleCheckContext() => IsModuleContextCurrent(_moduleCheckContext)
         ? _moduleCheckContext!
-        : throw new InvalidOperationException("游戏、版本或连接已变化，请重新点击“检查新有”。");
+        : throw new InvalidOperationException("游戏、版本或连接已变化，请重新点击“查新”。");
 
     private void ReloadAdaptersForSessions()
     {
@@ -2503,6 +2493,7 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(CanCheckGameModules));
         OnPropertyChanged(nameof(CanInstallGameModule));
         OnPropertyChanged(nameof(ModuleInstallActionText));
+        OnPropertyChanged(nameof(ModuleInstallToolTip));
         OnPropertyChanged(nameof(CanRollbackGameModule));
         OnPropertyChanged(nameof(ModuleRollbackActionText));
         OnPropertyChanged(nameof(ModuleRestartRequired));
@@ -2523,6 +2514,7 @@ public sealed class MainViewModel : ObservableObject
 
     private void NotifyApplicationUpdateState()
     {
+        OnPropertyChanged(nameof(CanCheckApplicationUpdate));
         OnPropertyChanged(nameof(CanUseApplicationUpdate));
         OnPropertyChanged(nameof(HasApplicationUpdateAvailable));
         OnPropertyChanged(nameof(CanUseApplicationRollback));

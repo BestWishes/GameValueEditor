@@ -16,14 +16,17 @@ namespace GameValueEditor;
 
 public partial class MainWindow : Window
 {
-    private readonly MainViewModel _viewModel = new();
+    private readonly MainViewModel _viewModel;
     private readonly DispatcherTimer _connectionMonitorTimer = new()
     {
         Interval = TimeSpan.FromSeconds(1)
     };
 
-    public MainWindow()
+    public MainWindow() : this(new MainViewModel()) { }
+
+    internal MainWindow(MainViewModel viewModel)
     {
+        _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
         InitializeComponent();
         DataContext = _viewModel;
         _viewModel.SetEditorHostServices(new WpfGameEditorHostServices(this, _viewModel));
@@ -197,15 +200,14 @@ public partial class MainWindow : Window
         new ModuleCompatibilityDialog(report) { Owner = this }.ShowDialog();
     });
 
+    private async void ApplicationCheck_OnClick(object sender, RoutedEventArgs e) =>
+        await RunGuardedAsync(_viewModel.CheckApplicationUpdateAsync);
+
     private async void ApplicationUpdate_OnClick(object sender, RoutedEventArgs e)
     {
         await RunGuardedAsync(async () =>
         {
-            if (!_viewModel.HasApplicationUpdateAvailable)
-            {
-                await _viewModel.CheckApplicationUpdateAsync();
-                return;
-            }
+            if (!_viewModel.CanUseApplicationUpdate) return;
 
             if (!await _viewModel.DownloadApplicationUpdateAsync()) return;
             var restartNow = MessageDialog.Confirm(
