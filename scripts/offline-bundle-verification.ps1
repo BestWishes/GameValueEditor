@@ -1,4 +1,22 @@
 # Loaded by offline-bundle.ps1. Verification receipts are local evidence, not signatures.
+function Assert-OfflineModuleVerifierReport {
+    param($Report, [string]$Version, $Target, $Modules)
+    $caps = $Target.Compatibility
+    if (-not (Test-OfflineInteger $Target.SchemaVersion) -or $Target.SchemaVersion -ne 1 -or
+        $Target.Version -cne $Version -or -not (Test-OfflineInteger $caps.MinimumModuleHostApi) -or
+        -not (Test-OfflineInteger $caps.MaximumModuleHostApi) -or $caps.MinimumModuleHostApi -lt 1 -or
+        $caps.MaximumModuleHostApi -lt $caps.MinimumModuleHostApi) {
+        throw 'Invalid target host compatibility for module page verification.'
+    }
+    if (-not (Test-OfflineInteger $Report.SchemaVersion) -or $Report.SchemaVersion -ne 1 -or
+        $Report.ApplicationVersion -cne $Version -or -not (Test-OfflineInteger $Report.HostApiVersion) -or
+        $Report.HostApiVersion -ne $caps.MaximumModuleHostApi -or $Report.Verified -isnot [bool] -or -not $Report.Verified) {
+        throw 'Module page verifier must match the target host version and API.'
+    }
+    $expected = @($Modules | ForEach-Object { @{ Id = $_.Snapshot.id; Version = $_.Snapshot.version; EditorIds = @($_.Snapshot.editors.id) } })
+    Assert-OfflineEqual @($Report.Modules | Sort-Object Id) @($expected | Sort-Object Id) 'actual loaded modules/pages'
+}
+
 function Test-OfflineBundleModules {
     param($Bundle, [string]$Directory, [string]$Version, $Modules)
     [IO.Directory]::CreateDirectory($Directory) | Out-Null
@@ -22,11 +40,8 @@ function Test-OfflineBundleModules {
             throw "Actual module load/page verification failed (exit $($process.ExitCode)): $detail"
         }
         $report = (Read-OfflineJsonFile $reportPath) | ConvertFrom-Json -AsHashtable
-        if ($report.SchemaVersion -ne 1 -or $report.ApplicationVersion -cne $Version -or $report.HostApiVersion -ne 7 -or $report.Verified -ne $true) {
-            throw 'Module page verifier must match the target host version and API.'
-        }
-        $expected = @($Modules | ForEach-Object { @{ Id = $_.Snapshot.id; Version = $_.Snapshot.version; EditorIds = @($_.Snapshot.editors.id) } })
-        Assert-OfflineEqual @($report.Modules | Sort-Object Id) @($expected | Sort-Object Id) 'actual loaded modules/pages'
+        $target = (Read-OfflineEntryText $Bundle 'release-compatibility.json') | ConvertFrom-Json -AsHashtable
+        Assert-OfflineModuleVerifierReport $report $Version $target $Modules
     } finally {
         $process.Refresh()
         if (-not $process.HasExited) { Stop-Process -Id $process.Id; $process.WaitForExit() }

@@ -306,6 +306,41 @@ try {
     }
     Assert-OfflineTest (Test-StandardApplicationArchiveName 'GameValueEditor-v0.4.9-win-x64.zip') 'Standard cleanup recognizes standard archive'
     Assert-OfflineTest (@(Get-ChildItem -LiteralPath "$($f.App)/artifacts" -Directory -Filter 'offline-build-*').Count -eq 0) 'Owned staging cleaned after failures'
+    # Use the production assertion even though fixture bundles replace the child process.
+    # The expected API belongs to the frozen target archive, never a hardcoded current API.
+    $taskModules = @(@{ Snapshot = @{ id = 'game.fixture'; version = '1.2.3'; editors = @(@{ id = 'game.fixture.resources' }) } })
+    foreach ($taskApi in @(7, 8, 9)) {
+        $taskTarget = @{ SchemaVersion = 1; Version = '0.5.1'; Compatibility = @{ MinimumModuleHostApi = 2; MaximumModuleHostApi = $taskApi } }
+        $taskReport = @{ SchemaVersion = 1; ApplicationVersion = '0.5.1'; HostApiVersion = $taskApi; Verified = $true
+            Modules = @(@{ Id = 'game.fixture'; Version = '1.2.3'; EditorIds = @('game.fixture.resources') }) }
+        Assert-OfflineModuleVerifierReport $taskReport '0.5.1' $taskTarget $taskModules
+        Assert-OfflineTest $true "Report accepted the target's API $taskApi"
+        $taskReport.HostApiVersion++
+        Assert-OfflineThrows { Assert-OfflineModuleVerifierReport $taskReport '0.5.1' $taskTarget $taskModules } 'target host version and API'
+    }
+    $taskTarget.Compatibility.MaximumModuleHostApi = 8; $taskReport.HostApiVersion = 8
+    foreach ($taskMutation in @('schema','version','api-type','verified','pages')) {
+        $taskBadReport = @{} + $taskReport
+        switch ($taskMutation) {
+            'schema' { $taskBadReport.SchemaVersion = 2 }
+            'version' { $taskBadReport.ApplicationVersion = '0.5.0' }
+            'api-type' { $taskBadReport.HostApiVersion = '8' }
+            'verified' { $taskBadReport.Verified = $false }
+            'pages' { $taskBadReport.Modules = @() }
+        }
+        Assert-OfflineThrows { Assert-OfflineModuleVerifierReport $taskBadReport '0.5.1' $taskTarget $taskModules } 'target host version and API|actual loaded modules/pages'
+    }
+    foreach ($taskMutation in @('schema','version','api-type','zero-api','range')) {
+        $taskBadTarget = @{} + $taskTarget; $taskBadTarget.Compatibility = @{} + $taskTarget.Compatibility
+        switch ($taskMutation) {
+            'schema' { $taskBadTarget.SchemaVersion = 2 }
+            'version' { $taskBadTarget.Version = '0.5.0' }
+            'api-type' { $taskBadTarget.Compatibility.MaximumModuleHostApi = '8' }
+            'zero-api' { $taskBadTarget.Compatibility.MaximumModuleHostApi = 0 }
+            'range' { $taskBadTarget.Compatibility.MinimumModuleHostApi = 9 }
+        }
+        Assert-OfflineThrows { Assert-OfflineModuleVerifierReport $taskReport '0.5.1' $taskBadTarget $taskModules } 'Invalid target host compatibility'
+    }
     Write-Host "Offline bundle regressions passed: $script:offlineTestCount assertions."
 } finally {
     $null = Assert-OfflinePath $fixtureRoot (Join-Path $repoRoot 'artifacts')

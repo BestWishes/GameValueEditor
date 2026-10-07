@@ -37,3 +37,28 @@
 3. 第三遍（交付/差异）：应用打包失败/不可变边界 13 项、离线组合 80 项、双方保留策略模拟通过。独立未发布 review 包已真实启动并通过更新器沙盒（文件锁、恢复、强制中断、执行时兼容、旧版升级与不安全记录拒绝）；它不能代替从干净提交重建的正式包。66 个修改/新增文本通过严格 UTF-8、冲突/空白检查及 68 个本地文档链接核验；修改的 PowerShell 脚本语法、两仓 git diff --check 通过，已检查队列取消释放和原 Dispatcher 原子快照应用。首次无显式代理的 host fetch 被重置，显式代理重试成功，两个仓库均与远端无分叉；旧 v0.5.0 公开资产大小/摘要独立核验一致。没有遗留 rg 扫描进程，没有连接/修改真实游戏。
 
 以上完成提交前三遍检查。最终标准/模块 ZIP、公开摘要、索引/目录、三包清理及完整离线包的结果在提交后按同一流程核验并追加记录，不提前把计划当成已发布。
+
+## 离线工具实测补充
+
+正式四包公开摘要通过、索引/目录完成并各保留三包后，完整离线包实测在实际页面核验成功后被拒绝：`offline-bundle-verification.ps1` 仍写死报告 API 必须为 7。本轮 API 8 升级漏同步了该工具检查，原合成离线测试替代了进程核验，未覆盖这个常量。失败未提升任何离线输出，标准/模块 ZIP 均不受影响、不覆盖。
+
+修复方案只修改仓库本地工具和回归：从待验证包内 release-compatibility.json 读取冻结的宿主最大 API，报告必须匹配目标版本/API，而不是匹配源码常量或放宽门禁。提取同一报告断言供真实核验与小型回归共用，覆盖 API 7/8/9 的正确报告、错误 API/版本/协议/模块列表及无效宿主能力；再重跑完整离线组合、实际加载和负例核验。脚本不在六个标准包文件内，因此属于源码工具修复，不另升主程序版本，不重传发行资产。
+
+补充实施前三遍检查：1）输入来自原包冻结声明，旧包仍要求自己的版本/API；2）缺声明、非法整数、反向范围、错误报告都拒绝，不改变哈希/页面/启动门禁；3）复用原始四包，验证失败不产生输出，新增合成报告分支及真实 API 8 组包相互覆盖。
+
+補充实现后三遍结果：第一遍新增 16 项报告协议回归通过（离线组合累计 96 项），打包边界 13 项仍通过；第二遍真实 API 8 组合成功，并按冻结 receipt 做 VerifyOnly，原包字节不变、三模块九页及启动全部通过，真实损坏 DLL 和错误页面注册两例均拒绝；第三遍检查修改脚本语法、差异/编码/文档，确认四个已发布原包哈希保持不变，工具修复单独提交、不改标签或发行资产。
+
+## 正式发布与交付结果
+
+- 主程序源码/标签：`e04d26850f8b0c28828550d6aec2c49a3816b6cf`；模块源码/三个标签：`65942dd066e2314183dc9512fc6dbff400e79fea`。均从干净提交重建，二进制 ProductVersion 提交号匹配，正式主程序再次通过完整冒烟、真实启动和候选更新器沙盒，正式三模块包经完整生产加载验证。
+- 四包均一次代理上传成功，并各独立 VerifyOnly 确認 GitHub 大小/摘要相同。索引提交 `6d46b41768ee714ab2bc06ee8d98e59d5d30709a` 和目录提交 `5e1f77a65f4b0aa941892174bbf74a622572855e` 已推送，公开 raw 文件读回一致；模块全目录发布复验通过。
+- 主程序保留 0.5.1/0.5.0/0.4.9；WorldApart 保留 1.3.4/1.3.3/1.3.2；Fzzml 保留 2.1.4/2.1.3/2.1.2；Last Epoch 保留 0.5.5/0.5.4/0.5.3。已清理 v0.4.8、worldapart-v1.3.1、fzzml-v2.1.1、last-epoch-v0.5.2 的旧 Release/下载包，远端 Git 标签和源码均保留，原下载入口不再提供。最终认证 API 审计核对全部 12 个保留资产与索引/目录的大小、SHA-256、URL、完成状态一致。
+- 本地完整离线包包含三最新模块；完整性、模块加载/页面和启动全部为 Verified，VerifyOnly 复验 Reused=True、IsLatest=True；没有联网下载模块，也没有上传离线包。外部 receipt 保存于 `artifacts/offline-bundle-receipts/10ECAA3D8C520908637B595F1E54E7048C9B3049E3E5222C754FE3A05910B012.json`，应随本地证据单独保留。构建/验收使用隔离目录，无真实游戏写入。
+
+| 产物 | 大小（字节） | SHA-256 |
+| --- | --- | --- |
+| [主程序 0.5.1](https://github.com/BestWishes/GameValueEditor/releases/tag/v0.5.1) | 98115418 | 5341338F6157317E833D5BB4CEE810F58DF8132CEA42CAF9672391398FD38798 |
+| [WorldApart 1.3.4](https://github.com/BestWishes/GameValueEditor-Modules/releases/tag/worldapart-v1.3.4) | 48701 | 3A327CD3E76F5FA4988B6552C68A8FDC913A45DDD8504F778B63D0A2CBE06A2A |
+| [Fzzml 2.1.4](https://github.com/BestWishes/GameValueEditor-Modules/releases/tag/fzzml-v2.1.4) | 50749 | 6D4E0F4A1569FEE0B81852A055544319C6A4AAE1242B1CF87FB483F7CB257D63 |
+| [Last Epoch 0.5.5](https://github.com/BestWishes/GameValueEditor-Modules/releases/tag/last-epoch-v0.5.5) | 73761 | 2A5DC65C72BD58D8EEDF3CFE77984B5CEB83A5A15E7C83DDB1A10CB2BC4CD7DE |
+| 本地完整离线包 0.5.1：dist/GameValueEditor-v0.5.1-complete-offline-win-x64.zip | 98289773 | 10ECAA3D8C520908637B595F1E54E7048C9B3049E3E5222C754FE3A05910B012 |

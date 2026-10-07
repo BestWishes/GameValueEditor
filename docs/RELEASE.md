@@ -103,6 +103,8 @@ git tag -a v0.5.1 -m "GameValueEditor v0.5.1"
 
 核验不再仅检查 EXE 存活：隔离模式实际加载包内 DLL，核对安装身份、编辑器注册，并创建和释放模块自有页面。它使用当前源码构建的同语义版本宿主实现，再独立启动包内 EXE；不宣称证明历史宿主二进制的全部行为或游戏内读写效果。核验器缺失、版本不同、模块加载/页面创建失败都会明确停止。
 
+核验报告的 Host API 必须等于待验证包内 `release-compatibility.json` 冻结声明的 `MaximumModuleHostApi`，不写死当前数字，也不只看当前源码。报告仍必须满足目标版本、协议、成功标记和全部模块/页面的一致性。API 8 的真实组合发现并修复旧工具写死 7 的遗漏；共享断言新增 API 7/8/9 报告及不匹配/非法声明回归，离线组合累计 96 项，真实 DLL/页面失败集成两例也必须拒绝。这个本地源码工具修复不重打已发布标准或模块 ZIP，详见[最终集成记录](RELEASE_0_5_1_INTEGRATION_REVIEW.md)。
+
 成功组包或复用后，在 ZIP 外保存 `artifacts/offline-bundle-receipts/<SHA256>.json` 本地核验记录，冻结宿主来源、模块版本和全部文件散列。`VerifyOnly` 优先使用记录，原始模块/宿主 ZIP 删除、目录升级或目录不可用不会因此把原包误判损坏。无记录时，按包内安装版本匹配目录保留快照和原 ZIP，不按最新版本；缺证据时明确要求恢复核验记录或原输入。记录需要保留或单独备份，是本机可信工作流证据而非数字签名；同时篡改包及本机记录不在其安全承诺内。`VerifyOnly` 不创建或修复记录。
 
 返回结果含 `IntegrityVerified`、`ModulesVerified`、`StartupVerified`、`Reused`、SHA-256、大小、源码提交、模块版本/源哈希和 `ReceiptPath`。`IsLatest` / `LatestStatus` 独立描述当前本地目录下的组合新旧程度：`Current`、`NewerRecipeAvailable` 或目录不可用时的 `Unknown`（`IsLatest=null`）。目录与包不同不等于包损坏，新旧检查不联网。解压整个包后运行 EXE；预装模块仍受游戏构建检查约束，未来查新/更新可能需要联网。归档时间、安装时间与说明改变时新 ZIP 的哈希可能不同，不能把离线组合包当作标准应用更新资产。
