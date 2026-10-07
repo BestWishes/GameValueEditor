@@ -8,6 +8,7 @@ using System.Windows;
 using System.Windows.Data;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using GameValueEditor.Infrastructure;
 using GameValueEditor.Models;
 using GameValueEditor.ModuleSdk;
@@ -48,6 +49,7 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly ApplicationUpdateService _applicationUpdateService;
     private IGameEditorHostServices? _editorHostServices;
     private readonly Dictionary<Guid, GameConnectionSession> _sessions = [];
+    private readonly FieldOperationCoordinator _fieldOperations = new();
     private GameConnectionSession? _activeSession;
     private LibraryDocument _document = new();
     private ScanCandidateStore? _scanCandidates;
@@ -139,6 +141,12 @@ public sealed partial class MainViewModel : ObservableObject
         _editorHostServices = services ?? throw new ArgumentNullException(nameof(services));
 
     internal void ReportModulePageStatus(string message) => StatusText = message;
+
+    internal Action CaptureEditorHostOperation()
+    {
+        var operation = CaptureGameOperation();
+        return () => RequireCurrentGameOperation(operation);
+    }
 
     internal Func<int, IMemoryWriteAccess> MemoryWriteAccessFactory { get; set; } = processId => new ProcessMemoryAccessor(processId);
 
@@ -1256,23 +1264,38 @@ public sealed partial class MainViewModel : ObservableObject
         var version = SelectedVersion ?? throw new InvalidOperationException("请先选择游戏版本。");
         EnsureSelectedVersionMatchesAttached();
         using var memory = new ProcessMemoryAccessor(process.ProcessId);
+        memory.EnsureInstance(process.ProcessId, process.StartTimeUtc);
+        var superseded = false;
+        var refreshAdapter = _activeAdapter;
 
         foreach (var field in version.Fields.ToList())
         {
+            if (field.LocatorKind == "GameAdapter" && !ReferenceEquals(_activeAdapter, refreshAdapter)) { superseded = true; continue; }
+            var target = GetFieldOperationQueue(field, process, version, refreshAdapter);
+            using var turn = target.EnterRead();
+            await turn.Ready;
+            RequireCurrentGameOperation(operation);
+            if (!turn.IsCurrent || !version.Fields.Contains(field)) { superseded = true; continue; }
+            bool CanApply() => turn.IsCurrent && version.Fields.Contains(field);
             if (field.LocatorKind == "GameAdapter")
             {
-                var adapter = ResolveFieldAdapter(field);
+                var adapter = ResolveFieldAdapter(field, refreshAdapter);
+                bool IsAdapterCurrent() => ReferenceEquals(_activeAdapter, adapter);
+                if (!IsAdapterCurrent()) { superseded = true; continue; }
                 try
                 {
                     var current = await Task.Run(() => adapter.ReadField(process, field.AdapterFieldKey));
                     RequireCurrentGameOperation(operation);
+                    if (!CanApply() || !IsAdapterCurrent()) { superseded = true; continue; }
                     field.CurrentValue = current.DisplayValue;
-                    field.Status = current.Status;
+                    field.Status = field.IsValueLocked && IsUncoordinatedPageAdapter(adapter)
+                        ? $"锁定已暂停：此版本模块页面未接入协调写入，请更新模块 · {current.Status}" : current.Status;
                     field.LastVerifiedUtc = DateTime.UtcNow;
                 }
                 catch (Exception exception)
                 {
                     RequireCurrentGameOperation(operation);
+                    if (!CanApply() || !IsAdapterCurrent()) { superseded = true; continue; }
                     field.CurrentValue = "—";
                     field.Status = exception.Message;
                 }
@@ -1284,6 +1307,7 @@ public sealed partial class MainViewModel : ObservableObject
                 field.Status = "需要重新扫描定位";
                 continue;
             }
+            if (target.NativeAddress != address) { superseded = true; continue; }
             field.LastAddress = address;
             field.NotifyAddressChanged();
             if (memory.TryRead(address, field.ValueType.Size(), out var bytes))
@@ -1297,7 +1321,7 @@ public sealed partial class MainViewModel : ObservableObject
                 field.Status = "读取失败";
             }
         }
-        StatusText = "已刷新保存字段";
+        if (!superseded) StatusText = "已刷新保存字段";
     }
 
     public Task WriteSelectedCandidateAsync(string value)
@@ -1306,8 +1330,9 @@ public sealed partial class MainViewModel : ObservableObject
         return WriteCandidatesAsync([candidate], value);
     }
 
-    public Task WriteCandidatesAsync(IReadOnlyList<ScanCandidate> candidates, string value)
+    public async Task WriteCandidatesAsync(IReadOnlyList<ScanCandidate> candidates, string value)
     {
+        var operation = CaptureGameOperation();
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
         if (candidates.Count == 0) throw new InvalidOperationException("请至少选择一个扫描结果。");
         EnsureScanOwnership(candidates, process);
@@ -1327,7 +1352,16 @@ public sealed partial class MainViewModel : ObservableObject
             var warnings = new List<string>();
             foreach (var write in writes)
             {
+                using var turn = GetFieldScope(process).Native(write.Candidate.Address, write.Bytes.Length).EnterWrite();
+                await turn.Ready;
+                RequireCurrentGameOperation(operation);
+                EnsureScanOwnership([write.Candidate], process);
+                memory.EnsureInstance(process.ProcessId, process.StartTimeUtc);
+                var version = FindRunningVersion(process);
+                var aliases = NativeAliases(version, memory, process, write.Candidate.Address, write.Bytes.Length);
                 var result = MemoryWriteVerifier.Write(memory, write.Candidate.Address, write.Bytes);
+                ApplyNativeAliases(version, aliases, process, write.Candidate.Address, write.Bytes.Length, result);
+                if (aliases.Count != 0) { await SaveLibraryAsync(); RequireCurrentGameOperation(operation); }
                 counts[(int)result.State]++;
                 write.Candidate.CurrentBytes = result.CurrentBytes;
                 if (result.State != MemoryWriteState.ReadbackConfirmed && warnings.Count < 3)
@@ -1342,7 +1376,6 @@ public sealed partial class MainViewModel : ObservableObject
         {
             StartLiveCandidateRefresh();
         }
-        return Task.CompletedTask;
     }
 
     public async Task WriteSelectedFieldAsync(string value)
@@ -1350,19 +1383,178 @@ public sealed partial class MainViewModel : ObservableObject
         var operation = CaptureGameOperation();
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
         var field = SelectedSavedField ?? throw new InvalidOperationException("请先选择字段。");
+        var version = SelectedVersion ?? throw new InvalidOperationException("请先选择版本。");
         EnsureSelectedVersionMatchesAttached();
+        var adapter = field.LocatorKind == "GameAdapter" ? ResolveFieldAdapter(field) : null;
+        var target = GetFieldOperationQueue(field, process, version, adapter);
+        using var turn = target.EnterWrite();
+        await turn.Ready;
+        RequireSavedFieldOperation(operation, version, field);
+        RequireSavedFieldAdapter(field, adapter);
+        await WriteSavedFieldCoreAsync(operation, process, version, field, adapter, value, target.NativeAddress);
+    }
+
+    private FieldOperationCoordinator.Scope GetFieldScope(ProcessItem process, GameVersionProfile? version = null) =>
+        _fieldOperations.For(process.ProcessId, process.StartTimeUtc.Ticks,
+            version is not null ? (string.IsNullOrEmpty(version.BuildFingerprint)
+                ? VersionFingerprintService.CreateBuildFingerprint(version.ExecutableSha256, version.GameAssemblySha256, version.MetadataSha256) : version.BuildFingerprint)
+                : _attachedFingerprint?.BuildSha256 ?? string.Empty);
+
+    private FieldOperationCoordinator.Scope.Target GetFieldOperationQueue(SavedField field, ProcessItem? process = null,
+        GameVersionProfile? version = null, IGameAdapter? adapter = null)
+    {
+        process ??= AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
+        version ??= SelectedVersion;
+        var scope = GetFieldScope(process, version);
         if (field.LocatorKind == "GameAdapter")
+            return scope.Module(ResolveFieldAdapter(field, adapter).Id, field.AdapterFieldKey);
+        using var memory = MemoryWriteAccessFactory(process.ProcessId);
+        memory.EnsureInstance(process.ProcessId, process.StartTimeUtc);
+        if (!TryResolveAddress(memory, process, field, out var address))
+            return scope.Module("unresolved-native", field.Id.ToString()); // No write is allowed until resolution succeeds.
+        return scope.Native(address, field.ValueType.Size());
+    }
+
+    private sealed record FieldAlias(SavedField Field, bool Locked, string Target);
+    private static List<FieldAlias> AdapterAliases(GameVersionProfile? version, IGameAdapter adapter, string key) =>
+        version?.Fields.Where(field => field.LocatorKind == "GameAdapter" &&
+            (field.AdapterId == adapter.Id || adapter.LegacyIds.Contains(field.AdapterId, StringComparer.Ordinal)) &&
+            FieldOperationCoordinator.CanonicalKey(field.AdapterFieldKey) == FieldOperationCoordinator.CanonicalKey(key))
+            .Select(field => new FieldAlias(field, field.IsValueLocked, field.LockedValue)).ToList() ?? [];
+
+    private static void ApplyAdapterAliases(GameVersionProfile? version, IReadOnlyList<FieldAlias> aliases,
+        ProcessItem process, AdapterFieldValue result, bool locksPaused = false)
+    {
+        foreach (var alias in aliases)
         {
-            var adapter = ResolveFieldAdapter(field);
-            var updated = await AwaitGameOperationAsync(operation, Task.Run(() => adapter.WriteField(process, field.AdapterFieldKey, value)));
-            RequireCurrentGameOperation(operation);
-            field.CurrentValue = updated.DisplayValue;
-            field.Status = updated.Status;
+            var field = alias.Field;
+            if (version?.Fields.Contains(field) != true) continue;
+            field.CurrentValue = result.DisplayValue;
+            field.Status = locksPaused && field.IsValueLocked
+                ? $"锁定已暂停：此版本模块页面未接入协调写入，请更新模块 · {result.Status}" : result.Status;
             field.LastVerifiedUtc = DateTime.UtcNow;
             field.ProcessStartTimeUtcTicks = process.StartTimeUtc.Ticks;
-            if (field.IsValueLocked) field.LockedValue = updated.DisplayValue;
+            if (alias.Locked && field.IsValueLocked && field.LockedValue == alias.Target) field.LockedValue = result.DisplayValue;
+        }
+    }
+
+    private sealed record NativeAlias(FieldAlias Alias, ulong Address, int Size);
+    private static List<NativeAlias> NativeAliases(GameVersionProfile? version, IMemoryWriteAccess memory,
+        ProcessItem process, ulong address, int size) => version?.Fields
+        .Where(field => field.LocatorKind != "GameAdapter")
+        .Select(field => TryResolveAddress(memory, process, field, out var other)
+            ? new NativeAlias(new(field, field.IsValueLocked, field.LockedValue), other, field.ValueType.Size()) : null)
+        .OfType<NativeAlias>().Where(alias => Overlaps(address, size, alias.Address, alias.Size)).ToList() ?? [];
+
+    private static bool Overlaps(ulong first, int firstSize, ulong second, int secondSize) =>
+        first <= second ? second - first < (ulong)firstSize : first - second < (ulong)secondSize;
+
+    private static void ApplyNativeAliases(GameVersionProfile? version, IReadOnlyList<NativeAlias> aliases,
+        ProcessItem process, ulong address, int size, MemoryWriteResult result)
+    {
+        foreach (var alias in aliases)
+        {
+            var captured = alias.Alias;
+            var field = captured.Field;
+            if (version?.Fields.Contains(field) != true) continue;
+            var sameRange = alias.Address == address && alias.Size == size;
+            if (sameRange)
+            {
+                field.CurrentValue = result.HasReadback ? MemoryValueCodec.FormatDecoded(result.CurrentBytes, field.ValueType, field.ScaleMultiplier) : "—";
+                field.Status = result.Description;
+                field.LastAddress = address;
+                field.ProcessStartTimeUtcTicks = process.StartTimeUtc.Ticks;
+                if (result.HasReadback) field.LastVerifiedUtc = DateTime.UtcNow;
+            }
+            else if (result.State != MemoryWriteState.WriteFailed) field.Status = "重叠字段已修改，请刷新当前值";
+            if (result.State == MemoryWriteState.WriteFailed) continue;
+            if (!captured.Locked || !field.IsValueLocked || field.LockedValue != captured.Target) continue;
+            if (sameRange && result.State == MemoryWriteState.ReadbackConfirmed) field.LockedValue = field.CurrentValue;
+            else
+            {
+                field.IsValueLocked = false;
+                field.LockedValue = string.Empty;
+                field.Status += "；已暂停该字段锁定";
+            }
+        }
+    }
+
+    private List<SavedField> ConflictingLocks(ProcessItem process, GameVersionProfile version, SavedField field, IGameAdapter? adapter)
+    {
+        if (field.LocatorKind == "GameAdapter") return AdapterAliases(version, ResolveFieldAdapter(field, adapter), field.AdapterFieldKey)
+            .Where(alias => alias.Locked && alias.Target.Trim() != field.LockedValue.Trim()).Select(alias => alias.Field).ToList();
+        using var memory = MemoryWriteAccessFactory(process.ProcessId);
+        memory.EnsureInstance(process.ProcessId, process.StartTimeUtc);
+        if (!TryResolveAddress(memory, process, field, out var address) ||
+            !MemoryValueCodec.TryParseEncoded(field.LockedValue, field.ValueType, field.ScaleMultiplier, out var expected)) return [];
+        return NativeAliases(version, memory, process, address, expected.Length).Where(alias =>
+        {
+            if (!alias.Alias.Locked || ReferenceEquals(alias.Alias.Field, field)) return false;
+            var other = alias.Alias.Field;
+            if (!MemoryValueCodec.TryParseEncoded(alias.Alias.Target, other.ValueType, other.ScaleMultiplier, out var bytes)) return true;
+            var start = Math.Max(address, alias.Address);
+            var length = Math.Min(expected.Length - (int)(start - address), bytes.Length - (int)(start - alias.Address));
+            return !expected.AsSpan((int)(start - address), length).SequenceEqual(bytes.AsSpan((int)(start - alias.Address), length));
+        }).Select(alias => alias.Alias.Field).ToList();
+    }
+
+    // Pages bind to the running build, not whichever historical version is selected in the library.
+    private GameVersionProfile? FindRunningVersion(ProcessItem process) =>
+        ReferenceEquals(AttachedProcess, process) && _attachedFingerprint is { } build && _attachedGameId is Guid gameId
+            ? Games.FirstOrDefault(game => game.Id == gameId)?.Versions.Where(v => VersionMatches(v, build))
+                .OrderByDescending(v => v.Id == _activeSession?.VersionId).FirstOrDefault() : null;
+
+    private async Task<AdapterFieldValue> WriteAdapterFieldCoordinatedAsync(ProcessItem process, IGameAdapter adapter,
+        FieldOperationCoordinator.Scope scope, string key, string value, Action validate, Func<AdapterFieldValue>? write = null)
+    {
+        if (string.IsNullOrWhiteSpace(key)) throw new InvalidOperationException("模块字段键不能为空。");
+        validate();
+        using var turn = scope.Module(adapter.Id, key).EnterWrite();
+        await turn.Ready;
+        validate();
+        var version = FindRunningVersion(process);
+        var aliases = AdapterAliases(version, adapter, key);
+        AdapterFieldValue result;
+        try { result = await Task.Run(() => { validate(); return write is not null ? write() : adapter.WriteField(process, key, value); }); }
+        catch { validate(); throw; }
+        validate();
+        ApplyAdapterAliases(version, aliases, process, result, IsUncoordinatedPageAdapter(adapter));
+        if (aliases.Count != 0) { await SaveLibraryAsync(); validate(); }
+        return result;
+    }
+
+    private void RequireCurrentAdapterOperation(GameOperationContext operation, IGameAdapter adapter)
+    {
+        RequireCurrentGameOperation(operation);
+        if (!ReferenceEquals(_activeAdapter, adapter)) throw new OperationCanceledException("原专属模块已停用或替换。");
+    }
+
+    private void RequireSavedFieldOperation(GameOperationContext operation, GameVersionProfile version, SavedField field)
+    {
+        RequireCurrentGameOperation(operation);
+        if (!version.Fields.Contains(field)) throw new OperationCanceledException("字段已从原游戏版本中移除，原操作已取消。");
+    }
+
+    private void RequireSavedFieldAdapter(SavedField field, IGameAdapter? adapter)
+    {
+        if (adapter is not null && (!ReferenceEquals(_activeAdapter, adapter) ||
+            (field.AdapterId != adapter.Id && !adapter.LegacyIds.Contains(field.AdapterId, StringComparer.Ordinal))))
+            throw new OperationCanceledException("字段原专属模块已变化，原操作已取消。");
+    }
+
+    private async Task WriteSavedFieldCoreAsync(GameOperationContext operation, ProcessItem process, GameVersionProfile version,
+        SavedField field, IGameAdapter? adapter, string value, ulong? expectedAddress)
+    {
+        if (field.LocatorKind == "GameAdapter")
+        {
+            var aliases = AdapterAliases(version, adapter!, field.AdapterFieldKey);
+            var updated = await AwaitGameOperationAsync(operation, Task.Run(() => adapter!.WriteField(process, field.AdapterFieldKey, value)));
+            RequireSavedFieldOperation(operation, version, field);
+            RequireSavedFieldAdapter(field, adapter);
+            ApplyAdapterAliases(version, aliases, process, updated, IsUncoordinatedPageAdapter(adapter));
             await SaveLibraryAsync();
-            RequireCurrentGameOperation(operation);
+            RequireSavedFieldOperation(operation, version, field);
+            RequireSavedFieldAdapter(field, adapter);
             StatusText = $"已实时修改并保存 {field.Name}";
             return;
         }
@@ -1370,44 +1562,30 @@ public sealed partial class MainViewModel : ObservableObject
         if (!MemoryValueCodec.TryParseEncoded(value, field.ValueType, field.ScaleMultiplier, out var bytes))
             throw new InvalidOperationException("输入值无法按该字段保存的搜索套路进行编码。");
 
-        var wasLocked = field.IsValueLocked;
-        try
-        {
-            using var memory = MemoryWriteAccessFactory(process.ProcessId);
-            memory.EnsureInstance(process.ProcessId, process.StartTimeUtc);
-            if (!TryResolveAddress(memory, process, field, out var address))
-                throw new InvalidOperationException("该字段是动态地址，游戏重启后需要重新扫描并更新位置。");
-            var result = MemoryWriteVerifier.Write(memory, address, bytes);
-            field.CurrentValue = result.HasReadback
-                ? MemoryValueCodec.FormatDecoded(result.CurrentBytes, field.ValueType, field.ScaleMultiplier) : "—";
-            field.Status = result.Description;
-            StatusText = $"{field.Name}：{field.Status}";
-            if (result.State == MemoryWriteState.WriteFailed)
-                throw new InvalidOperationException(StatusText);
-            field.LastAddress = address;
-            if (result.HasReadback) field.LastVerifiedUtc = DateTime.UtcNow;
-            field.ProcessStartTimeUtcTicks = process.StartTimeUtc.Ticks;
-            if (field.IsValueLocked)
-            {
-                if (result.State == MemoryWriteState.ReadbackConfirmed) field.LockedValue = field.CurrentValue;
-                else
-                {
-                    field.IsValueLocked = false;
-                    field.LockedValue = string.Empty;
-                    field.Status += "；已暂停该字段锁定";
-                }
-            }
-            await SaveLibraryAsync();
-            RequireCurrentGameOperation(operation);
-            StatusText = $"{field.Name}：{field.Status}";
-            if (result.State != MemoryWriteState.ReadbackConfirmed)
-                throw new InvalidOperationException(StatusText);
-        }
-        finally { if (wasLocked && IsCurrentGameOperation(operation)) RestartLockMaintenance(); }
+        using var memory = MemoryWriteAccessFactory(process.ProcessId);
+        memory.EnsureInstance(process.ProcessId, process.StartTimeUtc);
+        if (!TryResolveAddress(memory, process, field, out var address))
+            throw new InvalidOperationException("该字段是动态地址，游戏重启后需要重新扫描并更新位置。");
+        if (address != expectedAddress) throw new OperationCanceledException("字段实际地址已变化，请重新定位后修改。");
+        var nativeAliases = NativeAliases(version, memory, process, address, bytes.Length);
+        var result = MemoryWriteVerifier.Write(memory, address, bytes);
+        ApplyNativeAliases(version, nativeAliases, process, address, bytes.Length, result);
+        StatusText = $"{field.Name}：{field.Status}";
+        if (result.State == MemoryWriteState.WriteFailed)
+            throw new InvalidOperationException(StatusText);
+        await SaveLibraryAsync();
+        RequireSavedFieldOperation(operation, version, field);
+        StatusText = $"{field.Name}：{field.Status}";
+        if (result.State != MemoryWriteState.ReadbackConfirmed)
+            throw new InvalidOperationException(StatusText);
     }
 
-    public async Task<SavedField> AddAdapterFieldAsync(string fieldKey, string displayName, string group)
+    public Task<SavedField> AddAdapterFieldAsync(string fieldKey, string displayName, string group) =>
+        AddAdapterFieldAsync(fieldKey, displayName, group, static () => { });
+
+    internal async Task<SavedField> AddAdapterFieldAsync(string fieldKey, string displayName, string group, Action validatePage)
     {
+        validatePage();
         var operation = CaptureGameOperation();
         var adapter = _activeAdapter ?? throw new InvalidOperationException("当前游戏构建没有可用的专属适配器。");
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
@@ -1417,8 +1595,17 @@ public sealed partial class MainViewModel : ObservableObject
         if (string.IsNullOrWhiteSpace(fieldKey)) throw new InvalidOperationException("请填写模块定义的稳定字段键；物品模块通常使用精确物品名。");
         if (string.IsNullOrWhiteSpace(displayName)) throw new InvalidOperationException("字段备注名称必须由玩家填写。");
 
-        var current = await AwaitGameOperationAsync(operation, Task.Run(() => adapter.ReadField(process, fieldKey.Trim())));
+        using var turn = GetFieldScope(process, version).Module(adapter.Id, fieldKey.Trim()).EnterRead();
+        await turn.Ready;
         RequireCurrentGameOperation(operation);
+        validatePage();
+        if (!ReferenceEquals(_activeAdapter, adapter)) throw new OperationCanceledException("原专属模块已停用。");
+        AdapterFieldValue current;
+        try { current = await AwaitGameOperationAsync(operation, Task.Run(() => adapter.ReadField(process, fieldKey.Trim()))); }
+        catch { RequireCurrentAdapterOperation(operation, adapter); validatePage(); throw; }
+        RequireCurrentGameOperation(operation);
+        validatePage();
+        if (!ReferenceEquals(_activeAdapter, adapter) || !turn.IsCurrent) throw new OperationCanceledException("原专属模块或字段读取已失效。");
         var field = new SavedField
         {
             Name = displayName.Trim(),
@@ -1439,6 +1626,8 @@ public sealed partial class MainViewModel : ObservableObject
         SelectedSavedField = field;
         await SaveLibraryAsync();
         RequireCurrentGameOperation(operation);
+        validatePage();
+        RequireSavedFieldAdapter(field, adapter);
         StatusText = $"已通过专属适配器保存字段 {field.Name}";
         return field;
     }
@@ -1451,13 +1640,40 @@ public sealed partial class MainViewModel : ObservableObject
             throw new InvalidOperationException("当前游戏构建没有可用的背包专属修改器。");
 
         StatusText = "正在读取游戏背包…";
-        var items = await AwaitGameOperationAsync(operation, Task.Run(() => adapter.ReadInventory(process)));
-        RequireCurrentGameOperation(operation);
-        _adapterInventoryItems.Clear();
-        foreach (var item in items) _adapterInventoryItems.Add(item);
-        AdapterItemsView.Refresh();
-        SelectedAdapterItem = _adapterInventoryItems.FirstOrDefault();
-        StatusText = $"已读取 {_adapterInventoryItems.Count:N0} 种背包物品";
+        await ReadAdapterSnapshotAsync(operation, process, adapter, () => adapter.ReadInventory(process), items =>
+        {
+            _adapterInventoryItems.Clear();
+            foreach (var item in items) _adapterInventoryItems.Add(item);
+            AdapterItemsView.Refresh();
+            SelectedAdapterItem = _adapterInventoryItems.FirstOrDefault();
+            StatusText = $"已读取 {_adapterInventoryItems.Count:N0} 种背包物品";
+        });
+    }
+
+    private async Task ReadAdapterSnapshotAsync<T>(GameOperationContext operation, ProcessItem process,
+        IGameAdapter adapter, Func<T> read, Action<T> apply)
+    {
+        RequireCurrentAdapterOperation(operation, adapter);
+        var snapshot = GetFieldScope(process).CaptureModuleSnapshot(adapter.Id);
+        try
+        {
+            if (!snapshot.IsCurrent) throw new GameEditorSnapshotChangedException();
+            var result = await AwaitGameOperationAsync(operation, Task.Run(read));
+            RequireCurrentAdapterOperation(operation, adapter);
+            if (!snapshot.TryApply(() => { RequireCurrentAdapterOperation(operation, adapter); apply(result); }))
+                throw new GameEditorSnapshotChangedException();
+        }
+        catch
+        {
+            RequireCurrentAdapterOperation(operation, adapter);
+            if (!snapshot.IsCurrent)
+            {
+                var changed = new GameEditorSnapshotChangedException();
+                StatusText = changed.Message;
+                throw changed;
+            }
+            throw;
+        }
     }
 
     public async Task WriteSelectedAdapterItemAsync(string value)
@@ -1472,10 +1688,14 @@ public sealed partial class MainViewModel : ObservableObject
         if (items.Count == 0) throw new InvalidOperationException("请至少选择一个背包物品。");
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
         var adapter = _activeAdapter ?? throw new InvalidOperationException("当前游戏构建没有可用的专属适配器。");
-        var updated = await AwaitGameOperationAsync(operation, Task.Run(() => items.Select(item => adapter.WriteField(process, item.FieldKey, value)).ToList()));
-        RequireCurrentGameOperation(operation);
+        var updated = new List<AdapterFieldValue>();
+        var scope = GetFieldScope(process);
+        foreach (var item in items)
+            updated.Add(await WriteAdapterFieldCoordinatedAsync(process, adapter, scope, item.FieldKey, value,
+                () => RequireCurrentAdapterOperation(operation, adapter)));
+        RequireCurrentAdapterOperation(operation, adapter);
         await RefreshAdapterInventoryAsync();
-        RequireCurrentGameOperation(operation);
+        RequireCurrentAdapterOperation(operation, adapter);
         SelectedAdapterItem = _adapterInventoryItems.FirstOrDefault(candidate =>
             string.Equals(candidate.FieldKey, items[0].FieldKey, StringComparison.Ordinal));
         StatusText = items.Count == 1
@@ -1493,18 +1713,19 @@ public sealed partial class MainViewModel : ObservableObject
         var selectedId = SelectedAdapterCharacter?.CharacterId;
         var selectedAttribute = SelectedCharacterAttribute?.Key;
         StatusText = "正在读取游戏人物与属性…";
-        var characters = await AwaitGameOperationAsync(operation, Task.Run(() => adapter.ReadCharacters(process)));
-        RequireCurrentGameOperation(operation);
-        _adapterCharacters.Clear();
-        foreach (var character in characters) _adapterCharacters.Add(character);
-        SelectedAdapterCharacter = _adapterCharacters.FirstOrDefault(item =>
-            string.Equals(item.CharacterId, selectedId, StringComparison.Ordinal)) ?? _adapterCharacters.FirstOrDefault();
-        if (SelectedAdapterCharacter is not null && !string.IsNullOrWhiteSpace(selectedAttribute))
-            SelectedCharacterAttribute = SelectedAdapterCharacter.Attributes.FirstOrDefault(item =>
-                string.Equals(item.Key, selectedAttribute, StringComparison.Ordinal)) ?? SelectedAdapterCharacter.Attributes.FirstOrDefault();
-        StatusText = IsCharacterEditorSessionOnly
-            ? $"已读取 {_adapterCharacters.Count:N0} 个人物；属性修改仅本次游戏运行有效"
-            : $"已读取 {_adapterCharacters.Count:N0} 个人物与属性";
+        await ReadAdapterSnapshotAsync(operation, process, adapter, () => adapter.ReadCharacters(process), characters =>
+        {
+            _adapterCharacters.Clear();
+            foreach (var character in characters) _adapterCharacters.Add(character);
+            SelectedAdapterCharacter = _adapterCharacters.FirstOrDefault(item =>
+                string.Equals(item.CharacterId, selectedId, StringComparison.Ordinal)) ?? _adapterCharacters.FirstOrDefault();
+            if (SelectedAdapterCharacter is not null && !string.IsNullOrWhiteSpace(selectedAttribute))
+                SelectedCharacterAttribute = SelectedAdapterCharacter.Attributes.FirstOrDefault(item =>
+                    string.Equals(item.Key, selectedAttribute, StringComparison.Ordinal)) ?? SelectedAdapterCharacter.Attributes.FirstOrDefault();
+            StatusText = IsCharacterEditorSessionOnly
+                ? $"已读取 {_adapterCharacters.Count:N0} 个人物；属性修改仅本次游戏运行有效"
+                : $"已读取 {_adapterCharacters.Count:N0} 个人物与属性";
+        });
     }
 
     public async Task WriteSelectedCharacterAttributeAsync(string value)
@@ -1519,10 +1740,16 @@ public sealed partial class MainViewModel : ObservableObject
             throw new InvalidOperationException("人物属性必须是整数；具体允许范围由游戏专属模块校验。");
 
         StatusText = $"正在修改 {character.DisplayName} 的{attribute.DisplayName}…";
-        await AwaitGameOperationAsync(operation, Task.Run(() => adapter.WriteCharacterAttribute(process, character.CharacterId, attribute.Key, target)));
-        RequireCurrentGameOperation(operation);
+        var fieldKey = ModuleFieldKey.Create(ActiveCharacterEditorId, character.CharacterId, attribute.Key);
+        await WriteAdapterFieldCoordinatedAsync(process, adapter, GetFieldScope(process), fieldKey, value,
+            () => RequireCurrentAdapterOperation(operation, adapter), () =>
+            {
+                var updated = adapter.WriteCharacterAttribute(process, character.CharacterId, attribute.Key, target);
+                return new(fieldKey, updated.Attributes.Single(a => a.Key == attribute.Key).RawValueDisplay, "已实时修改人物属性");
+            });
+        RequireCurrentAdapterOperation(operation, adapter);
         await RefreshAdapterCharactersAsync();
-        RequireCurrentGameOperation(operation);
+        RequireCurrentAdapterOperation(operation, adapter);
         SelectedAdapterCharacter = _adapterCharacters.FirstOrDefault(item =>
             string.Equals(item.CharacterId, character.CharacterId, StringComparison.Ordinal));
         SelectedCharacterAttribute = SelectedAdapterCharacter?.Attributes.FirstOrDefault(item =>
@@ -1554,12 +1781,13 @@ public sealed partial class MainViewModel : ObservableObject
         var selectedEntityId = editor.SelectedEntity?.EntityId;
         var selectedFieldKey = editor.SelectedField?.Key;
         StatusText = $"正在读取{editor.Descriptor.DisplayName}…";
-        var entities = await AwaitGameOperationAsync(operation, Task.Run(() => adapter.ReadEditorEntities(process, editor.Descriptor.Id)));
-        RequireCurrentGameOperation(operation);
-        editor.ReplaceEntities(entities, selectedEntityId, selectedFieldKey);
-        StatusText = entities.Count == 0
-            ? $"当前没有可显示的{editor.Descriptor.DisplayName}数据"
-            : $"已读取 {entities.Count:N0} 项{editor.Descriptor.DisplayName}数据";
+        await ReadAdapterSnapshotAsync(operation, process, adapter, () => adapter.ReadEditorEntities(process, editor.Descriptor.Id), entities =>
+        {
+            editor.ReplaceEntities(entities, selectedEntityId, selectedFieldKey);
+            StatusText = entities.Count == 0
+                ? $"当前没有可显示的{editor.Descriptor.DisplayName}数据"
+                : $"已读取 {entities.Count:N0} 项{editor.Descriptor.DisplayName}数据";
+        });
     }
 
     public async Task WriteEntityEditorFieldAsync(AdapterEntityEditorState editor, string value)
@@ -1578,11 +1806,16 @@ public sealed partial class MainViewModel : ObservableObject
                 $"{field.DisplayName}必须是 {field.Minimum:N0} 到 {field.Maximum:N0} 之间的整数。");
 
         StatusText = $"正在修改 {entity.DisplayName} 的{field.DisplayName}…";
-        await AwaitGameOperationAsync(operation, Task.Run(() => adapter.WriteEditorField(
-            process, editor.Descriptor.Id, entity.EntityId, field.Key, target)));
-        RequireCurrentGameOperation(operation);
+        var key = ModuleFieldKey.Create(editor.Descriptor.Id, entity.EntityId, field.Key);
+        await WriteAdapterFieldCoordinatedAsync(process, adapter, GetFieldScope(process), key, value,
+            () => RequireCurrentAdapterOperation(operation, adapter), () =>
+            {
+                var updated = adapter.WriteEditorField(process, editor.Descriptor.Id, entity.EntityId, field.Key, target);
+                return new(key, updated.Fields.Single(f => f.Key == field.Key).ValueDisplay, "已实时修改专属字段");
+            });
+        RequireCurrentAdapterOperation(operation, adapter);
         await RefreshEntityEditorAsync(editor);
-        RequireCurrentGameOperation(operation);
+        RequireCurrentAdapterOperation(operation, adapter);
         editor.SelectedEntity = editor.Entities.FirstOrDefault(item =>
             string.Equals(item.EntityId, entity.EntityId, StringComparison.Ordinal));
         editor.SelectedField = editor.SelectedEntity?.Fields.FirstOrDefault(item =>
@@ -1810,24 +2043,64 @@ public sealed partial class MainViewModel : ObservableObject
     public async Task ToggleSelectedFieldValueLockAsync()
     {
         var field = SelectedSavedField ?? throw new InvalidOperationException("请先选择字段。");
+        var version = SelectedVersion ?? throw new InvalidOperationException("请先选择版本。");
+        var unlocking = field.IsValueLocked;
+        var matchingAdapter = _activeAdapter is { } active && (active.Id == field.AdapterId ||
+            active.LegacyIds.Contains(field.AdapterId, StringComparer.Ordinal)) ? active : null;
+        var aliases = new List<FieldAlias> { new(field, field.IsValueLocked, field.LockedValue) };
+        if (field.LocatorKind == "GameAdapter")
+            aliases = matchingAdapter is { } adapter ? AdapterAliases(version, adapter, field.AdapterFieldKey)
+                : version.Fields.Where(f => f.LocatorKind == "GameAdapter" && f.AdapterId == field.AdapterId &&
+                    FieldOperationCoordinator.CanonicalKey(f.AdapterFieldKey) == FieldOperationCoordinator.CanonicalKey(field.AdapterFieldKey))
+                    .Select(f => new FieldAlias(f, f.IsValueLocked, f.LockedValue)).ToList();
+        else if (unlocking)
+            aliases = version.Fields.Where(f => f.LocatorKind != "GameAdapter" && f.ValueType.Size() == field.ValueType.Size() &&
+                (field.LocatorKind == "ModuleOffset" ? f.LocatorKind == "ModuleOffset" &&
+                    string.Equals(f.ModuleName, field.ModuleName, StringComparison.OrdinalIgnoreCase) && f.ModuleOffset == field.ModuleOffset
+                    : f.LocatorKind != "ModuleOffset" && field.LastAddress != 0 && f.LastAddress == field.LastAddress &&
+                        f.ProcessStartTimeUtcTicks == field.ProcessStartTimeUtcTicks))
+                .Select(f => new FieldAlias(f, f.IsValueLocked, f.LockedValue)).ToList();
+        if (!aliases.Any(a => ReferenceEquals(a.Field, field))) aliases.Add(new(field, field.IsValueLocked, field.LockedValue));
+        byte[]? nativeTarget = null;
+        if (field.LocatorKind != "GameAdapter" && AttachedProcess is { } process)
+        {
+            try
+            {
+                using var memory = MemoryWriteAccessFactory(process.ProcessId);
+                memory.EnsureInstance(process.ProcessId, process.StartTimeUtc);
+                if (TryResolveAddress(memory, process, field, out var address))
+                    aliases = NativeAliases(version, memory, process, address, field.ValueType.Size())
+                        .Where(a => a.Address == address && a.Size == field.ValueType.Size()).Select(a => a.Alias).ToList();
+            }
+            catch (Exception error) when (unlocking) { Debug.WriteLine(error); } // Cancellation of intent must work without the game.
+        }
         if (!field.IsValueLocked)
         {
+            if (field.LocatorKind == "GameAdapter" && IsUncoordinatedPageAdapter(_activeAdapter))
+                throw new InvalidOperationException("此版本模块页面未接入协调写入，字段锁定已暂停；请更新模块。");
             if (!GetAdapterFieldPolicy(_activeAdapter, field).CanLock)
                 throw new InvalidOperationException("该游戏专属字段仅本次运行有效，不支持锁定或在重启后自动重应用。");
             if (string.IsNullOrWhiteSpace(field.CurrentValue) || field.CurrentValue == "—")
                 throw new InvalidOperationException("请先刷新或修改字段数值，再启用锁定。");
-            field.LockedValue = field.CurrentValue;
-            field.IsValueLocked = true;
-            StatusText = $"已锁定 {field.Name} = {field.LockedValue}";
+            if (AttachedProcess is not null) GetFieldOperationQueue(field).Invalidate();
+            if (field.LocatorKind != "GameAdapter" && !MemoryValueCodec.TryParseEncoded(field.CurrentValue, field.ValueType, field.ScaleMultiplier, out nativeTarget))
+                throw new InvalidOperationException("锁定目标无法编码。");
+            foreach (var alias in aliases)
+            {
+                alias.Field.LockedValue = nativeTarget is null ? field.CurrentValue
+                    : MemoryValueCodec.FormatDecoded(nativeTarget, alias.Field.ValueType, alias.Field.ScaleMultiplier);
+                alias.Field.IsValueLocked = true;
+            }
         }
         else
         {
-            field.IsValueLocked = false;
-            field.LockedValue = string.Empty;
-            StatusText = $"已解除 {field.Name} 的数值锁定";
+            try { if (AttachedProcess is not null) GetFieldOperationQueue(field).Invalidate(); }
+            catch (Exception error) { Debug.WriteLine(error); } // The stopped maintenance also observes IsValueLocked below.
+            foreach (var alias in aliases) { alias.Field.IsValueLocked = false; alias.Field.LockedValue = string.Empty; }
         }
-        await SaveLibraryAsync();
-        RestartLockMaintenance();
+        try { await SaveLibraryAsync(); }
+        finally { RestartLockMaintenance(); }
+        StatusText = unlocking ? $"已解除 {field.Name} 的数值锁定" : $"已锁定 {field.Name} = {field.LockedValue}";
     }
 
     public async Task ChangeThemeAsync(ThemeChoice choice)
@@ -2046,9 +2319,8 @@ public sealed partial class MainViewModel : ObservableObject
     private void DeactivateModuleUntilRestart(string moduleId)
     {
         var sessions = _sessions.Values.Append(_activeSession).Where(item => item is not null)
-            .Cast<GameConnectionSession>().Distinct().ToList();
-        foreach (var session in sessions.Where(session =>
-                     string.Equals(session.Adapter?.Id, moduleId, StringComparison.Ordinal)))
+            .Cast<GameConnectionSession>().Distinct().Where(session => SessionUsesModule(session, moduleId)).ToList();
+        foreach (var session in sessions)
         {
             StopSessionLockMaintenance(session);
             session.Adapter = null;
@@ -2058,10 +2330,10 @@ public sealed partial class MainViewModel : ObservableObject
             session.SelectedCharacterId = null;
             session.SelectedCharacterAttributeKey = null;
         }
-        if (string.Equals(_activeAdapter?.Id, moduleId, StringComparison.Ordinal)) SetActiveAdapter(null);
+        if (AdapterUsesModule(_activeAdapter, moduleId)) SetActiveAdapter(null);
         _adapterRegistry.DeactivateUntilRestart(moduleId);
         RefreshLibraryModuleLoadStates();
-        RestartLockMaintenance();
+        foreach (var session in sessions) RestartSessionLockMaintenance(session);
     }
 
     public async Task UninstallCurrentGameModuleAsync()
@@ -2097,49 +2369,54 @@ public sealed partial class MainViewModel : ObservableObject
     private async Task<bool> RemoveInstalledModuleCoreAsync(string moduleId)
     {
         var sessions = _sessions.Values.Append(_activeSession).Where(item => item is not null)
-            .Cast<GameConnectionSession>().Distinct().ToList();
+            .Cast<GameConnectionSession>().Distinct().Where(session => SessionUsesModule(session, moduleId)).ToList();
         var removed = _moduleCatalogService.Unregister(moduleId)
                       ?? throw new InvalidOperationException("模块安装记录不存在。");
         foreach (var session in sessions) StopSessionLockMaintenance(session);
         try
         {
-            foreach (var session in sessions.Where(session =>
-                         string.Equals(session.Adapter?.Id, moduleId, StringComparison.Ordinal)))
+            try
             {
-                session.Adapter = null;
-                session.AdapterItems = [];
-                session.AdapterCharacters = [];
-                session.SelectedAdapterFieldKey = null;
-                session.SelectedCharacterId = null;
-                session.SelectedCharacterAttributeKey = null;
+                foreach (var session in sessions)
+                {
+                    session.Adapter = null;
+                    session.AdapterItems = [];
+                    session.AdapterCharacters = [];
+                    session.SelectedAdapterFieldKey = null;
+                    session.SelectedCharacterId = null;
+                    session.SelectedCharacterAttributeKey = null;
+                }
+                if (AdapterUsesModule(_activeAdapter, moduleId))
+                    SetActiveAdapter(null);
+                if (_adapterRegistry.RequiresRestart(moduleId))
+                {
+                    _adapterRegistry.DeactivateUntilRestart(moduleId);
+                    _moduleRestartRequired = true;
+                }
+                else _adapterRegistry.Deactivate(moduleId);
+                ReloadAdaptersForSessions();
             }
-            if (string.Equals(_activeAdapter?.Id, moduleId, StringComparison.Ordinal))
-                SetActiveAdapter(null);
-            if (_adapterRegistry.RequiresRestart(moduleId))
+            catch
             {
-                _adapterRegistry.DeactivateUntilRestart(moduleId);
-                _moduleRestartRequired = true;
+                _moduleCatalogService.RestoreRegistration(removed);
+                _adapterRegistry.LoadInstalledModule(moduleId);
+                ReloadAdaptersForSessions();
+                throw;
             }
-            else _adapterRegistry.Deactivate(moduleId);
-            ReloadAdaptersForSessions();
-        }
-        catch
-        {
-            _moduleCatalogService.RestoreRegistration(removed);
-            _adapterRegistry.LoadInstalledModule(moduleId);
-            ReloadAdaptersForSessions();
-            RestartLockMaintenance();
-            throw;
-        }
-        try
-        {
             return await _moduleCatalogService.DeletePackageAsync(moduleId);
         }
         finally
         {
-            RestartLockMaintenance();
+            foreach (var session in sessions) RestartSessionLockMaintenance(session);
         }
     }
+
+    private static bool SessionUsesModule(GameConnectionSession session, string moduleId) =>
+        AdapterUsesModule(session.Adapter, moduleId);
+
+    private static bool AdapterUsesModule(IGameAdapter? adapter, string moduleId) =>
+        adapter is not null && (string.Equals(adapter.Id, moduleId, StringComparison.Ordinal) ||
+            adapter.LegacyIds.Contains(moduleId, StringComparer.Ordinal));
 
     public IReadOnlyList<GameModuleContributor> GetModuleContributors()
     {
@@ -2476,6 +2753,8 @@ public sealed partial class MainViewModel : ObservableObject
             var process = AttachedProcess ?? throw new InvalidOperationException("模块页面需要已连接的游戏进程。");
             var fingerprint = _attachedFingerprint ?? throw new InvalidOperationException("模块页面需要已识别的游戏构建。");
             var host = _editorHostServices ?? throw new InvalidOperationException("模块页面宿主服务尚未初始化。");
+            var adapter = _activeAdapter;
+            var scope = GetFieldScope(process);
             try
             {
                 foreach (var descriptor in _activeAdapter.Editors.OrderBy(editor => editor.Order))
@@ -2487,7 +2766,12 @@ public sealed partial class MainViewModel : ObservableObject
                         var context = new GameEditorPageContext(
                             process.ToModuleContext(),
                             fingerprint.ToModuleIdentity(),
-                            host,
+                            new ScopedGameEditorHostServices(host, lifetime.Token,
+                                () => !_isShuttingDown && ReferenceEquals(_activeAdapter, adapter) &&
+                                      ReferenceEquals(AttachedProcess, process) && ReferenceEquals(_attachedFingerprint, fingerprint),
+                                Dispatcher.CurrentDispatcher,
+                                (key, value, validate) => WriteAdapterFieldCoordinatedAsync(process, adapter, scope, key, value, validate),
+                                () => scope.CaptureModuleSnapshot(adapter.Id)),
                             lifetime.Token);
                         modulePage = factory.CreateEditorPage(descriptor.Id, context)
                                      ?? throw new InvalidOperationException($"模块页面工厂没有创建 {descriptor.Id}。");
@@ -3267,15 +3551,35 @@ public sealed partial class MainViewModel : ObservableObject
         var session = _activeSession;
         if (session is null) return;
         StopSessionLockMaintenance(session);
+        if (_isShuttingDown) return;
         if (AttachedProcess is null || SelectedVersion?.Fields.Any(field => field.IsValueLocked) != true) return;
         if (SelectedGame is null || _attachedGameId != SelectedGame.Id ||
             _attachedFingerprint is null ||
             !VersionMatches(SelectedVersion, _attachedFingerprint)) return;
-        var process = AttachedProcess;
-        var version = SelectedVersion;
+        StartSessionLockMaintenance(session, AttachedProcess, SelectedVersion);
+    }
+
+    private void RestartSessionLockMaintenance(GameConnectionSession session)
+    {
+        if (ReferenceEquals(session, _activeSession)) { RestartLockMaintenance(); return; }
+        StopSessionLockMaintenance(session);
+        if (_isShuttingDown || session.GameId is not Guid gameId ||
+            !_sessions.TryGetValue(gameId, out var registered) || !ReferenceEquals(registered, session)) return;
+        var game = Games.FirstOrDefault(item => item.Id == gameId);
+        var version = game?.Versions.FirstOrDefault(item => item.Id == session.VersionId);
+        if (version?.Fields.Any(field => field.IsValueLocked) != true || session.Fingerprint is null ||
+            !VersionMatches(version, session.Fingerprint)) return;
+        StartSessionLockMaintenance(session, session.Process, version);
+    }
+
+    private void StartSessionLockMaintenance(GameConnectionSession session, ProcessItem process, GameVersionProfile version)
+    {
         var cancellation = new CancellationTokenSource();
         session.LockMaintenanceCancellation = cancellation;
-        _ = Task.Run(() => MaintainLockedValuesAsync(process, version, session.Adapter, cancellation.Token));
+        // Capture before scheduling: a later stop may dispose the source or replace the adapter.
+        var token = cancellation.Token;
+        var adapter = session.Adapter;
+        _ = Task.Run(() => MaintainLockedValuesAsync(process, version, adapter, token));
     }
 
     private void StopLockMaintenance()
@@ -3301,25 +3605,74 @@ public sealed partial class MainViewModel : ObservableObject
             while (!cancellationToken.IsCancellationRequested)
             {
                 IReadOnlyList<SavedField> lockedFields = [];
-                await RunOnUiAsync(() => lockedFields = version.Fields
-                    .Where(field => field.IsValueLocked && GetAdapterFieldPolicy(sessionAdapter, field).CanLock &&
-                                    (field.LocatorKind != "GameAdapter" || sessionAdapter is not null)).ToList());
+                await RunOnUiAsync(() =>
+                {
+                    foreach (var field in version.Fields.Where(f => f.IsValueLocked && f.LocatorKind == "GameAdapter" && IsUncoordinatedPageAdapter(sessionAdapter)))
+                        field.Status = "锁定已暂停：此版本模块页面未接入协调写入，请更新模块";
+                    lockedFields = version.Fields.Where(field => field.IsValueLocked && GetAdapterFieldPolicy(sessionAdapter, field).CanLock &&
+                        (field.LocatorKind != "GameAdapter" || sessionAdapter is not null)).ToList();
+                });
                 if (lockedFields.Count == 0) return;
 
                 foreach (var field in lockedFields)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    FieldOperationCoordinator.Scope.Turn? turn;
+                    FieldOperationCoordinator.Scope.Target target;
                     try
                     {
+                        target = GetFieldOperationQueue(field, process, version, sessionAdapter);
+                        if (!target.TryEnterMaintenance(out turn)) continue;
+                    }
+                    catch (Exception error)
+                    {
+                        await RunOnUiAsync(() => { if (!cancellationToken.IsCancellationRequested && version.Fields.Contains(field)) field.Status = $"锁定失败：{error.Message}"; });
+                        continue;
+                    }
+                    using var fieldTurn = turn!;
+                    var lockedValue = field.LockedValue;
+                    List<FieldAlias> lockSnapshots = [];
+                    bool IsCurrentTarget() => !cancellationToken.IsCancellationRequested && field.IsValueLocked &&
+                        field.LockedValue == lockedValue && version.Fields.Contains(field) && fieldTurn.IsCurrent &&
+                        lockSnapshots.All(alias => !version.Fields.Contains(alias.Field) ||
+                            alias.Field.IsValueLocked == alias.Locked && alias.Field.LockedValue == alias.Target);
+                    try
+                    {
+                        if (!IsCurrentTarget()) continue;
+                        var conflicts = new List<SavedField>();
+                        await RunOnUiAsync(() =>
+                        {
+                            if (!IsCurrentTarget()) return;
+                            conflicts = ConflictingLocks(process, version, field, sessionAdapter);
+                            if (field.LocatorKind == "GameAdapter")
+                                lockSnapshots = AdapterAliases(version, ResolveFieldAdapter(field, sessionAdapter), field.AdapterFieldKey);
+                            else
+                            {
+                                using var snapshotMemory = MemoryWriteAccessFactory(process.ProcessId);
+                                snapshotMemory.EnsureInstance(process.ProcessId, process.StartTimeUtc);
+                                if (TryResolveAddress(snapshotMemory, process, field, out var snapshotAddress))
+                                    lockSnapshots = NativeAliases(version, snapshotMemory, process, snapshotAddress, field.ValueType.Size()).Select(a => a.Alias).ToList();
+                            }
+                            if (conflicts.Count == 0) return;
+                            foreach (var conflict in conflicts.Append(field)) conflict.Status = "锁定已暂停：同一字段存在冲突目标，请手动修改或解除锁定";
+                        });
+                        if (conflicts.Count != 0 || !IsCurrentTarget()) continue;
                         if (field.LocatorKind == "GameAdapter")
                         {
                             var adapter = ResolveFieldAdapter(field, sessionAdapter);
                             var current = adapter.ReadField(process, field.AdapterFieldKey);
+                            cancellationToken.ThrowIfCancellationRequested();
+                            if (!IsCurrentTarget()) continue;
                             var final = current;
-                            if (!string.Equals(current.DisplayValue, field.LockedValue, StringComparison.Ordinal))
-                                final = adapter.WriteField(process, field.AdapterFieldKey, field.LockedValue);
+                            if (!string.Equals(current.DisplayValue, lockedValue, StringComparison.Ordinal))
+                            {
+                                using var mutation = target.BeginMutation();
+                                if (!IsCurrentTarget()) continue;
+                                final = adapter.WriteField(process, field.AdapterFieldKey, lockedValue);
+                            }
                             await RunOnUiAsync(() =>
                             {
+                                if (!IsCurrentTarget()) return;
                                 field.CurrentValue = final.DisplayValue;
                                 field.Status = $"锁定中 · {final.Status}";
                                 field.LastVerifiedUtc = DateTime.UtcNow;
@@ -3327,24 +3680,24 @@ public sealed partial class MainViewModel : ObservableObject
                             continue;
                         }
 
-                        var lockedValue = field.LockedValue;
                         if (!MemoryValueCodec.TryParseEncoded(lockedValue, field.ValueType, field.ScaleMultiplier, out var expected))
                             throw new InvalidOperationException("锁定目标值无效。");
                         using var memory = MemoryWriteAccessFactory(process.ProcessId);
                         memory.EnsureInstance(process.ProcessId, process.StartTimeUtc);
                         if (!TryResolveAddress(memory, process, field, out var address))
                             throw new InvalidOperationException("动态地址需要重新定位。");
+                        if (target.NativeAddress != address) throw new InvalidOperationException("字段实际地址已变化，请重新定位。");
                         if (!memory.TryRead(address, expected.Length, out var currentBytes))
                             throw new InvalidOperationException("读取失败。");
                         cancellationToken.ThrowIfCancellationRequested();
-                        if (!field.IsValueLocked || field.LockedValue != lockedValue) continue;
+                        if (!IsCurrentTarget()) continue;
                         var needsWrite = !currentBytes.AsSpan().SequenceEqual(expected);
                         var result = !needsWrite
                             ? new MemoryWriteResult(MemoryWriteState.ReadbackConfirmed, currentBytes)
                             : MemoryWriteVerifier.Write(memory, address, expected);
                         await RunOnUiAsync(() =>
                         {
-                            if (cancellationToken.IsCancellationRequested || !field.IsValueLocked || field.LockedValue != lockedValue) return;
+                            if (!IsCurrentTarget()) return;
                             field.CurrentValue = result.HasReadback
                                 ? MemoryValueCodec.FormatDecoded(result.CurrentBytes, field.ValueType, field.ScaleMultiplier) : "—";
                             field.Status = $"锁定中 · {(needsWrite ? result.Description : "当前值与锁定目标一致")}";
@@ -3355,7 +3708,7 @@ public sealed partial class MainViewModel : ObservableObject
                     {
                         await RunOnUiAsync(() =>
                         {
-                            if (cancellationToken.IsCancellationRequested || !field.IsValueLocked) return;
+                            if (!IsCurrentTarget()) return;
                             field.CurrentValue = "—";
                             field.Status = $"锁定失败：{exception.Message}";
                         });
@@ -3385,11 +3738,15 @@ public sealed partial class MainViewModel : ObservableObject
 
     private static GameEditorFieldPolicy GetAdapterFieldPolicy(IGameAdapter? adapter, SavedField field)
     {
+        if (field.LocatorKind == "GameAdapter" && IsUncoordinatedPageAdapter(adapter)) return new(false, false);
         if (!string.Equals(field.LocatorKind, "GameAdapter", StringComparison.Ordinal) ||
             !ModuleFieldKey.TryParse(field.AdapterFieldKey, out var editorId, out var entityId, out var fieldId))
             return new(false, true);
         return GetAdapterFieldPolicy(adapter, editorId, entityId, fieldId);
     }
+
+    private static bool IsUncoordinatedPageAdapter(IGameAdapter? adapter) =>
+        adapter is IGameEditorPageFactoryProvider and not ICoordinatedGameEditorPageProvider;
 
     private static GameEditorFieldPolicy GetAdapterFieldPolicy(
         IGameAdapter? adapter,

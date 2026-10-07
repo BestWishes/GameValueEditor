@@ -169,12 +169,15 @@ public sealed class MemoryScanService
         var destination = CreateStore(targets);
         try
         {
-            using var memory = new ProcessMemoryAccessor(processId);
-            memory.EnsureInstance(source.ProcessId, source.ProcessStartTimeUtc);
+            using var memory = _openScanMemory(processId);
+            if (processId != source.ProcessId || memory.ProcessId != source.ProcessId ||
+                memory.StartTimeUtc != source.ProcessStartTimeUtc)
+                throw new InvalidOperationException("目标进程实例已变化，请重新连接并扫描。");
             destination.ProcessId = memory.ProcessId;
             destination.ProcessStartTimeUtc = memory.StartTimeUtc;
             long processed = 0;
             long resultCount = 0;
+            long readableCandidates = 0;
             for (var partitionIndex = 0; partitionIndex < source.Partitions.Count; partitionIndex++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -215,7 +218,7 @@ public sealed class MemoryScanService
                     if (pageAddress != cachedPageAddress)
                     {
                         cachedPageAddress = pageAddress;
-                        memory.TryRead(pageAddress, 4096, out cachedPage);
+                        if (!memory.TryRead(pageAddress, 4096, out cachedPage)) cachedPage = [];
                     }
 
                     var pageOffset = (int)(address - pageAddress);
@@ -224,12 +227,14 @@ public sealed class MemoryScanService
                     {
                         current = cachedPage.AsSpan(pageOffset, valueSize).ToArray();
                     }
-                    else if (!memory.TryRead(address, valueSize, out current))
+                    else if (!memory.TryRead(address, valueSize, out current) || current.Length != valueSize)
                     {
                         processed++;
                         continue;
                     }
 
+                    cancellationToken.ThrowIfCancellationRequested();
+                    readableCandidates++;
                     if (Matches(previous, current, sourcePartition.ValueType, comparison, exactTarget))
                     {
                         writer.Write(address);
@@ -245,6 +250,9 @@ public sealed class MemoryScanService
                 }
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
+            if (source.Count > 0 && readableCandidates == 0)
+                throw new IOException("本次筛选无法读取任何候选地址，已保留上一轮扫描结果。请检查游戏进程或重新扫描。");
             progress?.Report(new ScanProgress((ulong)source.Count, (ulong)source.Count, resultCount));
             return new ScanRunResult(destination, (ulong)source.Count);
         }

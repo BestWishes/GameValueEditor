@@ -5,7 +5,7 @@ namespace GameValueEditor.ModuleSdk;
 
 public static class ModuleHostApi
 {
-    public const int CurrentVersion = 7;
+    public const int CurrentVersion = 8;
 }
 
 /// <summary>
@@ -126,6 +126,30 @@ public interface IGameEditorHostServices
     void ShowError(string title, string message);
 }
 
+/// <summary>
+/// Host API 8: module pages submit semantic writes through the host's per-target
+/// queue, sharing ordering and lock targets with saved-field aliases. Already
+/// executing synchronous game writes cannot be undone by page cancellation.
+/// </summary>
+public interface IGameEditorFieldOperations
+{
+    Task<AdapterFieldValue> WriteFieldAsync(string fieldKey, string displayValue);
+}
+
+/// <summary>
+/// Host API 8: read a module-wide snapshot off-thread and apply it synchronously
+/// on the page Dispatcher only if no coordinated module write overlapped it.
+/// The apply callback must not wait, access the game, or save host profiles.
+/// </summary>
+public interface IGameEditorSnapshotOperations
+{
+    Task ReadSnapshotAsync<T>(Func<T> read, Action<T> apply);
+}
+
+/// <summary>A stale/busy snapshot is discarded, not retried or reported as a game error.</summary>
+public sealed class GameEditorSnapshotChangedException() : OperationCanceledException(
+    "模块数据已变化，本次刷新已忽略，请重新刷新。");
+
 public sealed record GameEditorPageContext(
     GameProcessContext Process,
     GameBuildIdentity Build,
@@ -149,6 +173,9 @@ public interface IGameEditorPageFactoryProvider : IGameAdapter
 {
     IGameEditorPage CreateEditorPage(string editorId, GameEditorPageContext context);
 }
+
+/// <summary>Promises every module-page field write uses IGameEditorFieldOperations.</summary>
+public interface ICoordinatedGameEditorPageProvider : IGameEditorPageFactoryProvider { }
 
 public sealed record GameEditorFieldPolicy(bool SessionOnly, bool CanLock);
 

@@ -356,6 +356,8 @@ public sealed class GameAdapterRegistry : IDisposable
         }
         if (manifest.HostApiVersion is >= 4 and <= 5) GameEditorPageResolver.ValidateApi4Provider(adapter);
         if (manifest.HostApiVersion >= 6) GameEditorPageResolver.ValidateApi6Provider(adapter);
+        if (manifest.HostApiVersion >= 8 && adapter is not ICoordinatedGameEditorPageProvider)
+            throw new InvalidOperationException("Host API 8 模块页面必须实现协调写入契约。");
         if (manifest.HostApiVersion >= 5 && adapter is not IGameCompatibilityDiagnosticsProvider)
             throw new InvalidOperationException("Host API 5 游戏包必须实现只读兼容性诊断接口。");
     }

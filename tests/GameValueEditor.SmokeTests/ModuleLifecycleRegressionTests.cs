@@ -29,10 +29,19 @@ internal static class ModuleLifecycleRegressionTests
                     { await GameLifecycleRegressionTests.RunAsync(Path.Combine(root, "game-lifecycle")); completion.SetResult(); return; }
                     if (args.Contains("--safety-boundaries-only", StringComparer.Ordinal))
                     { await SafetyBoundaryRegressionTests.RunAsync(Path.Combine(root, "safety-boundaries")); completion.SetResult(); return; }
+                    if (args.Contains("--background-boundaries-only", StringComparer.Ordinal))
+                    { await BackgroundOperationRegressionTests.RunAsync(Path.Combine(root, "background-boundaries"), args); completion.SetResult(); return; }
+                    if (args.Contains("--field-order-only", StringComparer.Ordinal))
+                    { await FieldOrderRegressionTests.RunAsync(Path.Combine(root, "field-order"), args); completion.SetResult(); return; }
+                    if (args.Contains("--shared-field-only", StringComparer.Ordinal))
+                    { await SharedFieldRegressionTests.RunAsync(Path.Combine(root, "shared-field"), args); completion.SetResult(); return; }
                     await ModuleReliabilityRegressionTests.RunAsync(Path.Combine(root, "module-reliability"));
                     if (args.Contains("--module-reliability-only", StringComparer.Ordinal)) { completion.SetResult(); return; }
                     await SafetyBoundaryRegressionTests.RunAsync(Path.Combine(root, "safety-boundaries"));
                     await GameLifecycleRegressionTests.RunAsync(Path.Combine(root, "game-lifecycle"));
+                    await BackgroundOperationRegressionTests.RunAsync(Path.Combine(root, "background-boundaries"));
+                    await FieldOrderRegressionTests.RunAsync(Path.Combine(root, "field-order"));
+                    await SharedFieldRegressionTests.RunAsync(Path.Combine(root, "shared-field"));
                     await CheckStaleResultsAsync(root);
                     await CheckRecoveryMarkerAsync(root);
                     await StabilityRegressionTests.RunAsync(root, args);

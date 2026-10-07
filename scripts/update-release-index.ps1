@@ -8,7 +8,7 @@ param(
     [string]$AssetPath,
 
     [ValidateRange(1, 100)] [int]$MinimumModuleHostApi = 2,
-    [ValidateRange(1, 100)] [int]$MaximumModuleHostApi = 7,
+    [ValidateRange(1, 100)] [int]$MaximumModuleHostApi = 8,
     [ValidateRange(1, 100)] [int]$MaximumCatalogSchemaVersion = 5
 )
 

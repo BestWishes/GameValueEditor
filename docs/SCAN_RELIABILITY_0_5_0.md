@@ -44,4 +44,10 @@
 
 最终干净源码提交 `7fb7976f37336ede5d5969f12750b68cf4199b57` 的全部正式门禁、标准包启动/更新器、真实完整离线包、实际模块页面及负向输入核验通过。v0.5.0 已发布，独立线上摘要核验、公开索引与三版本保留收尾完成；产物散列、提交和线上证据统一记录在[集成发布记录](RELEASE_0_5_0_INTEGRATION_REVIEW.md)。以上证明已确认的漏扫和错误伪零问题得到处理，不声称重建了历史那一次失败的唯一现场。若原断言或任何新门禁再次失败，必须停止后续发布，不删断言、不按通过次数替代分析。
 
+## 后续本地补充：再次筛选（2026-10-07，未提交、未发布）
+
+上述 v0.5.0 记录中的全失败保护针对首次扫描；后续审查确认再次筛选仍有“全部候选不可读却返回正常零结果”的独立缺口。本地修复复用内部只读访问器工厂，核对请求/候选 PID 和创建时间，统计实际读取成功的候选。非空源全部读取失败时抛出明确错误并清理本轮输出；既有界面错误路径保留原候选、历史、预览和选择。
+
+有可读候选但无匹配仍允许零结果；部分不可读继续跳过，页读取失败不能使用失败缓冲区，单项读取不足完整值也视为失败。覆盖确定性全失败/部分失败/页回退/短读/零匹配/空源/取消/进程身份，以及测试进程自有 NoAccess 页上的实际筛选命令。详细方案及执行证据见[后台操作边界修复](BACKGROUND_OPERATION_BOUNDARIES_LOCAL.md)。不生成或覆盖 v0.5.0 标准/离线包，不扩大扫描或改变保护。
+
 技术依据：[ReadProcessMemory](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-readprocessmemory)、[VirtualQueryEx](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualqueryex)、[MEMORY_BASIC_INFORMATION](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-memory_basic_information)。

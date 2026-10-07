@@ -17,14 +17,21 @@ internal static class DownloadFeedbackRegressionTests
         var folder = Path.Combine(root, "download-feedback");
         Directory.CreateDirectory(folder);
         var samples = new List<DownloadProgressSnapshot>();
+        var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using (var client = new HttpClient(new Handler(async (_, token) =>
                {
-                   await Task.Delay(1200, token);
-                   return new(HttpStatusCode.OK) { Content = new StreamContent(new SlowStream(false)) };
+                   await connected.Task.WaitAsync(TimeSpan.FromSeconds(6), token);
+                   return new(HttpStatusCode.OK) { Content = new StreamContent(new SlowStream(false, waiting.Task)) };
                })))
         {
             await HttpDownloadService.DownloadToFileAsync(client, "https://example.invalid/slow", Path.Combine(folder, "slow.bin"), 4,
-                new InlineProgress(samples.Add));
+                new InlineProgress(sample =>
+                {
+                    samples.Add(sample);
+                    if (sample.Phase == DownloadPhase.Connecting && sample.WaitingSeconds >= 1) connected.TrySetResult();
+                    if (sample.Phase == DownloadPhase.Waiting && sample.WaitingSeconds >= 1) waiting.TrySetResult();
+                }));
         }
         Assert(samples.Any(sample => sample.Phase == DownloadPhase.Connecting && sample.WaitingSeconds >= 1), "Connecting heartbeat missing.");
         Assert(samples.Any(sample => sample.Phase == DownloadPhase.Waiting && sample.WaitingSeconds >= 1), "Waiting heartbeat missing.");
@@ -133,13 +140,13 @@ internal static class DownloadFeedbackRegressionTests
     { public void Report(DownloadProgressSnapshot value) => action(value); }
     private sealed class Handler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> action) : HttpMessageHandler
     { protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => action(request, cancellationToken); }
-    private sealed class SlowStream(bool stall) : MemoryStream(new byte[] { 1, 2, 3, 4 })
+    private sealed class SlowStream(bool stall, Task? firstRead = null) : MemoryStream(new byte[] { 1, 2, 3, 4 })
     {
         private bool _read;
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {
             if (stall && _read) await Task.Delay(Timeout.Infinite, cancellationToken);
-            if (!stall && !_read) await Task.Delay(1200, cancellationToken);
+            if (!stall && !_read && firstRead is not null) await firstRead.WaitAsync(TimeSpan.FromSeconds(6), cancellationToken);
             _read = true;
             return await base.ReadAsync(buffer, cancellationToken);
         }

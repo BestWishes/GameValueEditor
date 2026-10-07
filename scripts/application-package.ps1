@@ -44,7 +44,7 @@ function Invoke-ApplicationPackage {
         foreach ($name in @('README.md','LICENSE','SECURITY.md')) { Copy-Item -LiteralPath (Join-Path $rootPath $name) -Destination $package }
         [IO.File]::WriteAllText((Join-Path $package 'release-compatibility.json'), (@{
             SchemaVersion = 1; Version = $Version; Compatibility = @{
-                MinimumModuleHostApi = 2; MaximumModuleHostApi = 7; MaximumCatalogSchemaVersion = 5
+                MinimumModuleHostApi = 2; MaximumModuleHostApi = 8; MaximumCatalogSchemaVersion = 5
             }
         } | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
         [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($temporary)) | Out-Null

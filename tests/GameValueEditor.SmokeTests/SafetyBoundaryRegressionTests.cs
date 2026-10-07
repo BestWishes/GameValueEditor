@@ -373,7 +373,7 @@ internal static class SafetyBoundaryRegressionTests
         public void Dispose() { }
     }
 
-    private sealed class WriteFixture : IDisposable
+    internal sealed class WriteFixture : IDisposable
     {
         internal string Root { get; }
         internal MainViewModel ViewModel { get; }

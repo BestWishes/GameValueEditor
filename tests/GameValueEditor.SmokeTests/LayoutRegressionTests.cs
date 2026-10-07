@@ -233,18 +233,20 @@ internal static class LayoutRegressionTests
         Assert(entry.RowDefinitions.Count == 0 && entry.ColumnDefinitions.Count == 6 &&
             entry.ColumnDefinitions.Skip(2).Select(column => column.ActualWidth).SequenceEqual(new double[] { 24, 24, 24, 32 }),
             "Library is not one row with four fixed status slots.");
-        Assert(icons.Select(icon => icon.Name).SequenceEqual(new[] { "LockedStatusIcon", "TopmostStatusIcon", "DedicatedModuleLoadedIcon", "ConnectedStatusIcon" }),
+        Assert(icons.Select(icon => icon.Name).SequenceEqual(new[] { "TopmostStatusIcon", "LockedStatusIcon", "DedicatedModuleLoadedIcon", "ConnectedStatusIcon" }),
             "Library status order changed.");
         Assert(avatar.ActualWidth == 38 && avatar.ActualHeight == 38 && avatar.ToolTip is null &&
             ((Image)avatar.Child).ToolTip is null && ((Image)avatar.Child).Source is not null && entry.ToolTip is null,
             "Avatar was removed, resized or received a tooltip.");
         Assert(name.Text == game.Name && name.TextTrimming == TextTrimming.CharacterEllipsis && name.TextWrapping == TextWrapping.NoWrap &&
             (string)name.ToolTip == game.Name && name.ActualWidth > 0, "Name lost its single-line full-name tooltip.");
-        var tips = new[] { "已锁定", "已置顶", "已加载本地模块", "已连接到游戏" };
+        var tips = new[] { "已置顶", "已锁定", "已加载本地模块", "已连接到游戏" };
+        var sizes = new[] { new Size(14, 16), new Size(13, 15), new Size(14, 16), new Size(24, 28) };
+        var statusBits = new[] { 2, 1, 4, 8 };
         for (var index = 0; index < icons.Length; index++)
         {
             var icon = icons[index];
-            Assert(icon.ActualWidth == (index == 3 ? 24 : 18) && icon.ActualHeight == (index == 3 ? 28 : 20) &&
+            Assert(icon.ActualWidth == sizes[index].Width && icon.ActualHeight == sizes[index].Height &&
                 icon.Fill is SolidColorBrush fill && fill.Color == ((SolidColorBrush)Application.Current.Resources["AccentBrush"]).Color &&
                 (string)icon.ToolTip == tips[index] && AutomationProperties.GetName(icon) == tips[index] && !icon.Focusable,
                 $"Icon size, theme, tooltip or accessibility changed: {theme}/{icon.Name}.");
@@ -267,7 +269,7 @@ internal static class LayoutRegressionTests
                 var current = icons.Select(icon => icon.TranslatePoint(new Point(), root)).ToArray();
                 Assert(current.SequenceEqual(baseline), $"Status or long name moved a library icon: width={width}, theme={theme}, bits={bits}, nameLength={text.Length}, baseline={string.Join(';', baseline)}, current={string.Join(';', current)}.");
                 for (var index = 0; index < icons.Length; index++)
-                    Assert(icons[index].Visibility == ((bits & (1 << index)) != 0 ? Visibility.Visible : Visibility.Hidden),
+                    Assert(icons[index].Visibility == ((bits & statusBits[index]) != 0 ? Visibility.Visible : Visibility.Hidden),
                         "Missing status did not leave its fixed hidden slot.");
                 Assert(name.Text == text && (string)name.ToolTip == text && name.TranslatePoint(new Point(name.ActualWidth, 0), entry).X <=
                     icons[0].TranslatePoint(new Point(), entry).X, "Long name collided with status icons.");

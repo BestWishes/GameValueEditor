@@ -19,8 +19,8 @@
                     ImageSource="pack://application:,,,/GameValueEditor;component/Assets/GameValueEditorConnected.png"
                     Viewbox="0.357,0.263,0.268,0.474" ViewboxUnits="RelativeToBoundingBox" Stretch="Uniform"/>
         <Style x:Key="LibraryStatusIconStyle" TargetType="Rectangle">
-            <Setter Property="Width" Value="18"/>
-            <Setter Property="Height" Value="20"/>
+            <Setter Property="Width" Value="14"/>
+            <Setter Property="Height" Value="16"/>
             <Setter Property="HorizontalAlignment" Value="Center"/>
             <Setter Property="VerticalAlignment" Value="Center"/>
             <Setter Property="Fill" Value="{DynamicResource AccentBrush}"/>
@@ -350,7 +350,7 @@
                                     <TextBlock x:Name="LibraryGameName" Grid.Column="1" Text="{Binding Name}"
                                                FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,8,0"
                                                TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" ToolTip="{Binding Name}"/>
-                                    <Rectangle x:Name="LockedStatusIcon" Grid.Column="2" OpacityMask="{StaticResource LockedIconMask}"
+                                    <Rectangle x:Name="LockedStatusIcon" Grid.Column="3" Width="13" Height="15" OpacityMask="{StaticResource LockedIconMask}"
                                                ToolTip="已锁定" AutomationProperties.Name="已锁定">
                                         <Rectangle.Style>
                                             <Style TargetType="Rectangle" BasedOn="{StaticResource LibraryStatusIconStyle}">
@@ -360,7 +360,7 @@
                                             </Style>
                                         </Rectangle.Style>
                                     </Rectangle>
-                                    <Rectangle x:Name="TopmostStatusIcon" Grid.Column="3" OpacityMask="{StaticResource TopmostIconMask}"
+                                    <Rectangle x:Name="TopmostStatusIcon" Grid.Column="2" OpacityMask="{StaticResource TopmostIconMask}"
                                                ToolTip="已置顶" AutomationProperties.Name="已置顶">
                                         <Rectangle.Style>
                                             <Style TargetType="Rectangle" BasedOn="{StaticResource LibraryStatusIconStyle}">

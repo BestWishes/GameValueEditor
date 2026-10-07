@@ -1,6 +1,6 @@
 #Requires -Version 7.4
 [CmdletBinding()]
-param([string]$ApplicationVersion = '0.5.0')
+param([string]$ApplicationVersion = '0.5.1')
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'offline-bundle.ps1')
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))

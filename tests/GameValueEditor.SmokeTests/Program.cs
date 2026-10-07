@@ -95,7 +95,8 @@ if (args.FirstOrDefault(arg => arg.StartsWith("--instance-lease-target=", String
 }
 
 if (args.Contains("--module-reliability-only", StringComparer.Ordinal) || args.Contains("--safety-boundaries-only", StringComparer.Ordinal) ||
-    args.Contains("--game-lifecycle-only", StringComparer.Ordinal))
+    args.Contains("--game-lifecycle-only", StringComparer.Ordinal) || args.Contains("--background-boundaries-only", StringComparer.Ordinal) ||
+    args.Contains("--field-order-only", StringComparer.Ordinal) || args.Contains("--shared-field-only", StringComparer.Ordinal))
 {
     await ModuleLifecycleRegressionTests.RunAsync(args);
     return 0;
@@ -291,7 +292,7 @@ try
            new SemanticVersion(0, 4, 9).Next() == new SemanticVersion(0, 5, 0) &&
            new SemanticVersion(0, 9, 9).Next() == new SemanticVersion(1, 0, 0),
         "Decimal-counter release carry failed");
-    Assert(ModuleHostApi.CurrentVersion == 7, "Host API version was not advanced for the module visual contract");
+    Assert(ModuleHostApi.CurrentVersion == 8, "Host API version was not advanced for coordinated module-page writes");
     Assert(ModuleVisualResources.PagePadding == new Thickness(12) &&
            ModuleVisualResources.AccentBrush == "AccentBrush",
         "Host API 7 visual resource contract is incomplete");
@@ -1681,8 +1682,11 @@ static void VerifyPackagedModule(string archivePath)
 
         Assert(!string.IsNullOrWhiteSpace(moduleId) && !string.IsNullOrWhiteSpace(version),
             "Module package identity is incomplete.");
-        if (hostApiVersion >= 7)
+        if (hostApiVersion == 7)
             Assert(minimumHostVersion == "0.4.4", "Host API 7 module did not declare minimum host v0.4.4.");
+        if (hostApiVersion >= 8)
+            Assert(Version.TryParse(minimumHostVersion, out var api8Minimum) && api8Minimum >= new Version(0, 5, 1),
+                "Host API 8 module must require the first compatible host v0.5.1 or newer.");
         var packageDirectory = Path.Combine(verificationRoot, "packages", moduleId, version);
         Directory.CreateDirectory(packageDirectory);
         using (var archive = ZipFile.OpenRead(resolvedArchive))
@@ -1836,17 +1840,21 @@ public sealed class SmokeTestModuleAdapter :
     IInventoryGameAdapter,
     ICharacterAttributesGameAdapter,
     IGameEditorPageProvider,
-    IGameCompatibilityDiagnosticsProvider
+    IGameCompatibilityDiagnosticsProvider,
+    IGameEditorFieldPolicyProvider
 {
+    internal BackgroundOperationRegressionTests.ProbeAdapter? BoundaryProbe { get; init; }
+    internal Func<GameProcessContext, string, AdapterFieldValue>? ReadFieldOverride { get; init; }
+    internal Func<GameProcessContext, string, string, AdapterFieldValue>? WriteFieldOverride { get; init; }
     public bool ThrowCompatibilityDiagnostics { get; init; }
     public bool IdentityOnly { get; init; }
     public string? IdentityId { get; init; }
     public IReadOnlyList<string> IdentityLegacyIds { get; init; } = [];
-    public string Id => IdentityId ?? "game.test.multi-editor";
-    public IReadOnlyList<string> LegacyIds => IdentityLegacyIds;
+    public string Id => BoundaryProbe?.Id ?? IdentityId ?? "game.test.multi-editor";
+    public IReadOnlyList<string> LegacyIds => BoundaryProbe?.Aliases ?? IdentityLegacyIds;
     public string DisplayName => "测试多编辑器游戏模块";
     public string Description => "仅用于宿主接口冒烟测试。";
-    public IReadOnlyList<GameEditorDescriptor> Editors => IdentityOnly ? [] :
+    public IReadOnlyList<GameEditorDescriptor> Editors => IdentityOnly || BoundaryProbe is not null ? [] :
     [
         new("test.inventory", "背包物品", GameEditorKind.Collection, 100, "测试集合编辑器"),
         new("test.characters", "人物属性", GameEditorKind.MasterDetail, 200, "测试主从编辑器", true)
@@ -1856,7 +1864,10 @@ public sealed class SmokeTestModuleAdapter :
         new("test.inventory", GameEditorPageRole.Inventory),
         new("test.characters", GameEditorPageRole.CharacterAttributes)
     ];
-    public bool Supports(GameProcessContext process, GameBuildIdentity fingerprint) => !IdentityOnly || process.ProcessId == Environment.ProcessId;
+    public bool Supports(GameProcessContext process, GameBuildIdentity fingerprint) => BoundaryProbe is { } probe
+        ? process.ProcessName == probe.ProcessName : !IdentityOnly || process.ProcessId == Environment.ProcessId;
+    public GameEditorFieldPolicy? GetFieldPolicy(string editorId, string entityId, string fieldId) => BoundaryProbe is { } probe
+        ? new(false, probe.CanLock) : null;
     public IReadOnlyList<GameCompatibilityDiagnostic> GetCompatibilityDiagnostics(
         GameProcessContext process,
         GameBuildIdentity fingerprint)
@@ -1870,10 +1881,14 @@ public sealed class SmokeTestModuleAdapter :
                 $"{process.ExecutablePath} PID={process.ProcessId} 0x1234")
         ];
     }
-    public AdapterFieldValue ReadField(GameProcessContext process, string fieldKey) => IdentityOnly
-        ? throw new InvalidOperationException("Identity tests must not read fields.") : new(fieldKey, "1", "测试");
-    public AdapterFieldValue WriteField(GameProcessContext process, string fieldKey, string displayValue) => IdentityOnly
-        ? throw new InvalidOperationException("Identity tests must not write game data.") : new(fieldKey, displayValue, "测试");
+    public AdapterFieldValue ReadField(GameProcessContext process, string fieldKey) => ReadFieldOverride is { } read
+        ? read(process, fieldKey) : BoundaryProbe is { } probe
+        ? probe.ReadField(fieldKey) : IdentityOnly
+            ? throw new InvalidOperationException("Identity tests must not read fields.") : new(fieldKey, "1", "测试");
+    public AdapterFieldValue WriteField(GameProcessContext process, string fieldKey, string displayValue) => WriteFieldOverride is { } write
+        ? write(process, fieldKey, displayValue) : BoundaryProbe is { } probe
+        ? probe.WriteField(fieldKey, displayValue) : IdentityOnly
+            ? throw new InvalidOperationException("Identity tests must not write game data.") : new(fieldKey, displayValue, "测试");
     public IReadOnlyList<AdapterInventoryItem> ReadInventory(GameProcessContext process) => [new("test", "测试物品", 1)];
     public bool SupportsCharacterAttributes(GameProcessContext process) => true;
     public IReadOnlyList<AdapterCharacterItem> ReadCharacters(GameProcessContext process) =>

@@ -7,7 +7,7 @@ GitHub Actions 不是发布前提。正式版本先完成源码级构建与测�
 ## 1. 验证标准包
 
 ```powershell
-./scripts/verify-release.ps1 -Version 0.5.0
+./scripts/verify-release.ps1 -Version 0.5.1
 ```
 
 记录脚本输出的标准 ZIP 路径与 SHA-256。正式发布版本是独立的十进制计数器：每次只加 `0.0.1`，`0.4.9` 的下一版是 `0.5.0`，`0.9.9` 的下一版是 `1.0.0`。发布脚本从最新正式标签计算唯一下一版本并拒绝跳号；预览标签和 `complete-offline` 完整离线包均不能上传 GitHub Release，完整离线包只供本地或 QQ 分发。Host API 与 Schema 是独立整数协议号，不参与此进位。
@@ -16,16 +16,26 @@ GitHub Actions 不是发布前提。正式版本先完成源码级构建与测�
 
 尚未提交的本地代码用 `./scripts/build-local-review-package.ps1` 验证，输出到唯一的 `artifacts/local-review-*` 目录，并在目录旁明确标注“未发布、含未提交改动”。此命令不改版本、不生成正式 dist 资产、不提交或联网发布；不得把同版本 review 包上传覆盖正式资产。二进制提交号仅代表基线提交，不代表其工作树已经提交。
 
-v0.5.0 汇总此前本地工作树的离线打包、下载反馈、模块资料/安装事务、单实例、游戏库结构、通用写入回读、日志及会话生命周期修复，见 [集成复核与发布记录](RELEASE_0_5_0_INTEGRATION_REVIEW.md)。历史设计文档保留当时的本地交付范围与验证记录；本次在用户授权后统一发布。日志失败不绕过更新恢复门禁；配置格式仍为 7，Host API 仍为 7，不要求模块联动升版。
+v0.5.0 汇总离线打包、下载反馈、模块资料/安装事务、单实例、游戏库结构、通用写入回读、日志及会话生命周期修复，见[历史集成记录](RELEASE_0_5_0_INTEGRATION_REVIEW.md)。该版本配置格式为 7，Host API 为 7，旧版资产不覆盖。
+
+v0.5.1 经用户授权集成此前本地后台操作、字段顺序、共享目标协调、解锁和刷新边界修复，并调整游戏库小图标。Host API 正式升为 8，主程序、更新器及离线核验器版本均为 0.5.1，SDK 两仓源码为 4.0.3（CLR 2.0.0.0）。标准包能力和发布索引最大 API 均为 8；资料 Schema 7、目录 Schema 5 不变。三个新模块分别为 WorldApart 1.3.4、Fzzml 2.1.4、Last Epoch 0.5.5，最低宿主 0.5.1，先发布宿主再发布模块和目录。见[方案与实际复核](RELEASE_0_5_1_INTEGRATION_REVIEW.md)。
 
 完整冒烟包含扫描读取边界回归，也可运行 `GameValueEditor.SmokeTests.exe --scan-read-only`。扫描变化页使用真实自有 native 区域先红后绿验证，异常枚举/全失败与正常零匹配分别处理；历史间歇失败与确定性缺口的证据边界见[扫描记录](SCAN_RELIABILITY_0_5_0.md)。不得通过跳过断言或无限重跑放行。
+
+原本地锁定取消、模块会话隔离及再次筛选全失败修复见[历史方案与验收](BACKGROUND_OPERATION_BOUNDARIES_LOCAL.md)。针对性回归入口为 `GameValueEditor.SmokeTests.exe --background-boundaries-only`，也包含于完整冒烟；历史文档保留当时不提交的授权范围，本次正式集成单独记录。
+
+保存字段顺序、模块页面有效期和刷新进程身份修复见[历史设计与验收](FIELD_ORDER_AND_PAGE_LIFETIME_LOCAL.md)。针对性入口为 `GameValueEditor.SmokeTests.exe --field-order-only`（也包含于完整冒烟）；可用 `--field-area=fields|pages|identity` 分组诊断。禁止把同版本本地构建覆盖既有正式资产。
+
+实际字段协调与模块停用边界的原记录见[本地设计](SHARED_FIELD_COORDINATION_LOCAL.md)，针对性入口为 `--shared-field-only`。三个模块及脚手架同步接入 API 8，旧 API 6/7 页面包仍可加载，但未接入桥接的模块字段锁定安全暂停。先用 `validate-modules.ps1 -SkipCatalog` 验证新源码，不能把跳过目录检查当成发布完成；真实新资产核验后才更新 catalog。正式组包仍要求干净的已提交工作树。
+
+解锁与整页快照的原记录见[本地边界方案](REFRESH_AND_UNLOCK_BOUNDARIES_LOCAL.md)。针对性入口 `--shared-field-only --shared-area=refresh`，可用 `--refresh-area=unlock|legacy|snapshots` 分组；完整冒烟包含这些回归。两仓 SDK 必须同步，新页面读取需要宿主快照能力，不能宣称现有 API 7 ZIP 已具备新能力。快照只覆盖宿主协调的模块写入，不保证游戏自然变化或未知原生地址写入的一致性。
 
 ## 2. 提交并创建标签
 
 确认工作树、差异和远端状态后提交，在已验证的提交上创建带注释标签：
 
 ```powershell
-git tag -a v0.5.0 -m "GameValueEditor v0.5.0"
+git tag -a v0.5.1 -m "GameValueEditor v0.5.1"
 ```
 
 发布脚本从 `origin`（或 `-RemoteName` 指定的远端）解析 GitHub 仓库，避免手工填写错误的所有者或仓库名。可用 `-PushRefs` 同时推送当前分支和标签；脚本先使用配置的 Git 远端，HTTPS 失败时自动通过 GitHub SSH 443 重试。
@@ -34,9 +44,9 @@ git tag -a v0.5.0 -m "GameValueEditor v0.5.0"
 
 ```powershell
 ./scripts/publish-github-release.ps1 `
-  -Tag v0.5.0 `
-  -ReleaseName "肝肾大圣 v0.5.0" `
-  -AssetPath ./dist/GameValueEditor-v0.5.0-win-x64.zip `
+  -Tag v0.5.1 `
+  -ReleaseName "肝肾大圣 v0.5.1" `
+  -AssetPath ./dist/GameValueEditor-v0.5.1-win-x64.zip `
   -PushRefs
 ```
 
@@ -58,9 +68,9 @@ git tag -a v0.5.0 -m "GameValueEditor v0.5.0"
 
 ```powershell
 ./scripts/publish-github-release.ps1 `
-  -Tag v0.5.0 `
-  -ReleaseName "肝肾大圣 v0.5.0" `
-  -AssetPath ./dist/GameValueEditor-v0.5.0-win-x64.zip `
+  -Tag v0.5.1 `
+  -ReleaseName "肝肾大圣 v0.5.1" `
+  -AssetPath ./dist/GameValueEditor-v0.5.1-win-x64.zip `
   -VerifyOnly
 ```
 
@@ -79,7 +89,7 @@ git tag -a v0.5.0 -m "GameValueEditor v0.5.0"
 ```powershell
 ./scripts/build-complete-offline-bundle.ps1
 # 版本默认读取宿主项目，也可显式指定；模块仓库可以在别的位置：
-./scripts/build-complete-offline-bundle.ps1 -ApplicationVersion 0.5.0 `
+./scripts/build-complete-offline-bundle.ps1 -ApplicationVersion 0.5.1 `
   -ModuleRepository D:/MyOtherProjects/GameValueEditor-Modules
 ./scripts/build-complete-offline-bundle.ps1 -VerifyOnly
 ./scripts/test-offline-bundle.ps1

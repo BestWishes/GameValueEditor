@@ -16,6 +16,10 @@ function Build-ApplicationBinaries {
 function Test-ApplicationCandidate {
     param($Archive, [string]$Version, [string]$Commit, [string]$Work)
     Assert-OfflineEntries $Archive @('GameValueEditor.exe','GameValueEditor.Updater.exe','README.md','LICENSE','SECURITY.md','release-compatibility.json')
+    $capability = (Read-OfflineEntryText $Archive 'release-compatibility.json') | ConvertFrom-Json
+    Check ($capability.Version -ceq $Version -and $capability.Compatibility.MinimumModuleHostApi -eq 2 -and
+        $capability.Compatibility.MaximumModuleHostApi -eq 8 -and $capability.Compatibility.MaximumCatalogSchemaVersion -eq 5) `
+        'Candidate capability declaration does not match the current API 8 host'
     if ($script:failCandidate) { throw 'Injected candidate failure.' }
     if ($script:collisionPath) { [IO.File]::WriteAllText($script:collisionPath, 'concurrent package') }
 }
