@@ -68,6 +68,48 @@ if (args.Contains("--speed-target", StringComparer.OrdinalIgnoreCase))
     return 0;
 }
 
+if (args.Contains("--game-identity-target", StringComparer.Ordinal))
+{
+    Console.WriteLine("READY");
+    Console.ReadLine();
+    return 0;
+}
+
+if (args.Contains("--launcher-routing-only", StringComparer.Ordinal))
+{
+    LauncherProcessRegressionTests.Run();
+    return 0;
+}
+if (args.FirstOrDefault(arg => arg.StartsWith("--inspect-launcher-route=", StringComparison.Ordinal)) is { } launcherArgument)
+{
+    LauncherProcessRegressionTests.InspectLive(int.Parse(launcherArgument["--inspect-launcher-route=".Length..]));
+    return 0;
+}
+
+if (args.Contains("--game-association-ui-only", StringComparer.Ordinal))
+{
+    Exception? failure = null;
+    var thread = new Thread(() =>
+    {
+        try
+        {
+            var app = new App(); app.InitializeComponent();
+            GameRecognitionRegressionTests.CheckDialog();
+            app.Shutdown();
+        }
+        catch (Exception exception) { failure = exception; }
+    });
+    thread.SetApartmentState(ApartmentState.STA); thread.Start(); thread.Join();
+    if (failure is not null) throw failure;
+    return 0;
+}
+
+if (args.FirstOrDefault(arg => arg.StartsWith("--inspect-game-identity=", StringComparison.Ordinal)) is { } identityArgument)
+{
+    await GameRecognitionRegressionTests.InspectProcessIdentityAsync(int.Parse(identityArgument["--inspect-game-identity=".Length..]));
+    return 0;
+}
+
 if (args.Contains("--speed-stress-target", StringComparer.OrdinalIgnoreCase))
     return await SpeedStressTarget.RunAsync();
 
@@ -96,7 +138,8 @@ if (args.FirstOrDefault(arg => arg.StartsWith("--instance-lease-target=", String
 
 if (args.Contains("--module-reliability-only", StringComparer.Ordinal) || args.Contains("--safety-boundaries-only", StringComparer.Ordinal) ||
     args.Contains("--game-lifecycle-only", StringComparer.Ordinal) || args.Contains("--background-boundaries-only", StringComparer.Ordinal) ||
-    args.Contains("--field-order-only", StringComparer.Ordinal) || args.Contains("--shared-field-only", StringComparer.Ordinal))
+    args.Contains("--field-order-only", StringComparer.Ordinal) || args.Contains("--shared-field-only", StringComparer.Ordinal) ||
+    args.Contains("--game-recognition-only", StringComparer.Ordinal) || args.Contains("--page-sessions-only", StringComparer.Ordinal))
 {
     await ModuleLifecycleRegressionTests.RunAsync(args);
     return 0;
@@ -109,6 +152,7 @@ static void Assert(bool condition, string message)
 
 if (args.Contains("--scan-read-only", StringComparer.Ordinal))
 {
+    LauncherProcessRegressionTests.Run();
     await ScanReadRegressionTests.RunAsync();
     return 0;
 }
@@ -154,6 +198,7 @@ if (args.Contains("--scan-diagnostics-only", StringComparer.Ordinal) || args.Con
 try
 {
     await ModuleLifecycleRegressionTests.RunAsync(args);
+    LauncherProcessRegressionTests.Run();
     await ScanReadRegressionTests.RunAsync();
     Assert(MemoryValueCodec.TryParse("123456", MemoryValueType.Int32, out var integerBytes), "Int32 parse failed");
     Assert(MemoryValueCodec.Format(integerBytes, MemoryValueType.Int32) == "123456", "Int32 roundtrip failed");
@@ -1242,6 +1287,7 @@ try
         {
             var application = new App();
             application.InitializeComponent();
+            GameRecognitionRegressionTests.CheckDialog();
             var dialog = new AdapterFieldDialog(["背包物品", "角色资源", "未分组"], "赤元丸", "赤元丸");
             dialog.ShowActivated = false;
             dialog.ShowInTaskbar = false;
@@ -1581,9 +1627,11 @@ try
     if (dialogFailure is not null) throw new InvalidOperationException("Editable group dialog smoke test failed", dialogFailure);
 
     foreach (var moduleArgument in args.Where(argument =>
-                 argument.StartsWith("--verify-module-package=", StringComparison.OrdinalIgnoreCase)))
+                 argument.StartsWith("--verify-module-package=", StringComparison.OrdinalIgnoreCase) ||
+                 argument.StartsWith("--verify-local-module-package=", StringComparison.OrdinalIgnoreCase)))
     {
-        VerifyPackagedModule(moduleArgument[(moduleArgument.IndexOf('=') + 1)..]);
+        VerifyPackagedModule(moduleArgument[(moduleArgument.IndexOf('=') + 1)..],
+            requireContributors: !moduleArgument.StartsWith("--verify-local-module-package=", StringComparison.OrdinalIgnoreCase));
     }
 
     Console.WriteLine("Smoke tests passed: codec, scaled routine, scanner, writer, fingerprint.");
@@ -1646,7 +1694,7 @@ static ScanCandidate? FindStoredCandidate(ScanCandidateStore store, ulong expect
     return null;
 }
 
-static void VerifyPackagedModule(string archivePath)
+static void VerifyPackagedModule(string archivePath, bool requireContributors = true)
 {
     var resolvedArchive = Path.GetFullPath(archivePath);
     Assert(File.Exists(resolvedArchive), $"Module package does not exist: {resolvedArchive}");
@@ -1713,7 +1761,7 @@ static void VerifyPackagedModule(string archivePath)
         };
         File.WriteAllText(Path.Combine(verificationRoot, "installed.json"), JsonSerializer.Serialize(installed));
         LoadAndVerifyPackagedModule(verificationRoot, moduleId, hostApiVersion, editorIds);
-        Assert(contributorCount > 0, "Official packaged module has no contributor metadata.");
+        if (requireContributors) Assert(contributorCount > 0, "Official packaged module has no contributor metadata.");
         Console.WriteLine($"Verified packaged module: {moduleId} v{version}, {editorIds.Length} pages.");
     }
     finally
@@ -1841,10 +1889,13 @@ public sealed class SmokeTestModuleAdapter :
     ICharacterAttributesGameAdapter,
     IGameEditorPageProvider,
     IGameCompatibilityDiagnosticsProvider,
+    IGameVersionMetadataProvider,
     IGameEditorFieldPolicyProvider
 {
     internal BackgroundOperationRegressionTests.ProbeAdapter? BoundaryProbe { get; init; }
     internal Func<GameProcessContext, string, AdapterFieldValue>? ReadFieldOverride { get; init; }
+    internal Func<bool>? SupportsOverride { get; init; }
+    internal Func<GameDeclaredVersionInfo>? MetadataOverride { get; init; }
     internal Func<GameProcessContext, string, string, AdapterFieldValue>? WriteFieldOverride { get; init; }
     public bool ThrowCompatibilityDiagnostics { get; init; }
     public bool IdentityOnly { get; init; }
@@ -1864,8 +1915,9 @@ public sealed class SmokeTestModuleAdapter :
         new("test.inventory", GameEditorPageRole.Inventory),
         new("test.characters", GameEditorPageRole.CharacterAttributes)
     ];
-    public bool Supports(GameProcessContext process, GameBuildIdentity fingerprint) => BoundaryProbe is { } probe
+    public bool Supports(GameProcessContext process, GameBuildIdentity fingerprint) => SupportsOverride is { } supports ? supports() : BoundaryProbe is { } probe
         ? process.ProcessName == probe.ProcessName : !IdentityOnly || process.ProcessId == Environment.ProcessId;
+    public GameDeclaredVersionInfo ReadGameVersionMetadata(GameProcessContext process) => MetadataOverride?.Invoke() ?? new("", "", "");
     public GameEditorFieldPolicy? GetFieldPolicy(string editorId, string entityId, string fieldId) => BoundaryProbe is { } probe
         ? new(false, probe.CanLock) : null;
     public IReadOnlyList<GameCompatibilityDiagnostic> GetCompatibilityDiagnostics(

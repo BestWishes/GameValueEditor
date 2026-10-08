@@ -22,4 +22,6 @@ public sealed record VersionFingerprint(
     string PlatformName = "",
     string PlatformAppId = "",
     string PlatformBuildId = "",
-    string PlatformDisplayName = "");
+    string PlatformDisplayName = "",
+    string PackageSha256 = "",
+    GameIdentityEvidence? Identity = null);

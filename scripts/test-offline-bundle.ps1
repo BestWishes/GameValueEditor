@@ -341,6 +341,58 @@ try {
         }
         Assert-OfflineThrows { Assert-OfflineModuleVerifierReport $taskReport '0.5.1' $taskBadTarget $taskModules } 'Invalid target host compatibility'
     }
+    # Local review inputs use the same checks, while remaining distinct from indexed releases.
+    $f = New-OfflineFixture $fixtureRoot; $argsForFixture = $f.Args
+    $reviewDirectory = "$($f.App)/artifacts/local-review-fixture"
+    [IO.Directory]::CreateDirectory($reviewDirectory) | Out-Null
+    $review = "$reviewDirectory/GameValueEditor-local-review-v0.4.9-win-x64.zip"
+    Copy-Item -LiteralPath $f.HostZip -Destination $review
+    $reviewHash = (Get-FileHash -LiteralPath $review).Hash
+    [IO.File]::WriteAllText("$reviewDirectory/LOCAL-REVIEW.txt", "LOCAL ONLY / NOT A RELEASE. Version 0.4.9, base commit $('a' * 40). SHA256 $reviewHash.")
+    $localOutput = "$($f.App)/dist/GameValueEditor-local-review-complete-fixture.zip"
+    $localArgs = @{} + $argsForFixture
+    $localArgs.LocalHostArchivePath = $review; $localArgs.ExpectedHostSha256 = $reviewHash; $localArgs.OutputPath = $localOutput
+    $localModuleDirectory = "$($f.Mods)/artifacts/local-module-fixture"
+    [IO.Directory]::CreateDirectory($localModuleDirectory) | Out-Null
+    $localManifest = @{} + $f.Manifest; $localManifest.id = 'game.local-fixture'; $localManifest.version = '0.0.1'
+    $localZip = "$localModuleDirectory/local-module.zip"
+    Write-OfflineFixtureZip $localZip @{ 'module.json' = ($localManifest | ConvertTo-Json -Depth 30); 'Fixture.dll' = 'local synthetic dll' }
+    $localArgs.LocalModuleArchivePaths = @($localZip); $localArgs.LocalModuleSha256 = @((Get-FileHash -LiteralPath $localZip).Hash)
+    $indexedHash = (Get-FileHash -LiteralPath $f.HostZip).Hash
+    $catalogBefore = [IO.File]::ReadAllText("$($f.Mods)/catalog.json")
+    $indexBefore = [IO.File]::ReadAllText("$($f.App)/release-index.json")
+    $localResult = Invoke-OfflineBundle @localArgs
+    Assert-OfflineTest ($localResult.LocalOnly -and $localResult.Modules.Count -eq 2 -and $localResult.LatestStatus -eq 'LocalReview') 'Local host and unpublished module form a complete review bundle'
+    Assert-OfflineTest ((Get-FileHash -LiteralPath $f.HostZip).Hash -ceq $indexedHash -and
+        [IO.File]::ReadAllText("$($f.Mods)/catalog.json") -ceq $catalogBefore -and [IO.File]::ReadAllText("$($f.App)/release-index.json") -ceq $indexBefore) 'Local packaging preserved published inputs and indexes'
+    $localReceipt = (Read-OfflineJsonFile $localResult.ReceiptPath) | ConvertFrom-Json -AsHashtable
+    Assert-OfflineTest $localReceipt.LocalOnly 'Receipt records unpublished source classification'
+    $opened = Open-OfflineArchive $localOutput
+    try { Assert-OfflineTest ((Read-OfflineEntryText $opened '完整离线包说明.txt').Contains('未提交代码')) 'In-package notice distinguishes local bytes from the official version' }
+    finally { Close-OfflineArchive $opened }
+    Assert-OfflineTest ((Invoke-OfflineBundle @argsForFixture -OutputPath $localOutput -VerifyOnly).LocalOnly) 'Frozen review receipt supports verification without review inputs'
+    Assert-OfflineTest ((Invoke-OfflineBundle @localArgs).Reused) 'Same local review bytes can be safely reused'
+    Assert-OfflineThrows { Invoke-OfflineBundle @localArgs -Force } 'Force is not allowed'
+    $bad = @{} + $localArgs; $bad.OutputPath = $f.Output
+    Assert-OfflineThrows { Invoke-OfflineBundle @bad } 'local-review OutputPath'
+    $bad = @{} + $localArgs; $bad.LocalHostArchivePath = $f.HostZip
+    Assert-OfflineThrows { Invoke-OfflineBundle @bad } 'Path escaped permitted directory|review archive'
+    $bad = @{} + $localArgs; $bad.ExpectedHostSha256 = '0' * 64
+    Assert-OfflineThrows { Invoke-OfflineBundle @bad } 'evidence does not match'
+    $bad = @{} + $localArgs; $bad.LocalModuleSha256 = @()
+    Assert-OfflineThrows { Invoke-OfflineBundle @bad } 'explicit SHA-256'
+    $bad = @{} + $localArgs; $bad.LocalModuleSha256 = @('0' * 64)
+    Assert-OfflineThrows { Invoke-OfflineBundle @bad } 'Local module SHA-256 mismatch'
+    $localManifest.id = 'game.fixture'
+    Write-OfflineFixtureZip $localZip @{ 'module.json' = ($localManifest | ConvertTo-Json -Depth 30); 'Fixture.dll' = 'local synthetic dll' }
+    $localArgs.LocalModuleSha256 = @((Get-FileHash -LiteralPath $localZip).Hash)
+    Assert-OfflineThrows { Invoke-OfflineBundle @localArgs } 'Duplicate identity'
+    $localManifest.id = 'game.local-fixture'; $localManifest.hostApiVersion = 8
+    Write-OfflineFixtureZip $localZip @{ 'module.json' = ($localManifest | ConvertTo-Json -Depth 30); 'Fixture.dll' = 'local synthetic dll' }
+    $localArgs.LocalModuleSha256 = @((Get-FileHash -LiteralPath $localZip).Hash)
+    Assert-OfflineThrows { Invoke-OfflineBundle @localArgs } 'Local module is incompatible'
+    Assert-OfflineTest ((Get-FileHash -LiteralPath $localOutput).Hash -ceq $localResult.Sha256) 'Failed local recomposition preserved existing review bundle'
+    Assert-OfflineTest (@(Get-ChildItem -LiteralPath "$($f.App)/artifacts" -Directory -Filter 'offline-build-*').Count -eq 0) 'Owned local staging cleaned after failures'
     Write-Host "Offline bundle regressions passed: $script:offlineTestCount assertions."
 } finally {
     $null = Assert-OfflinePath $fixtureRoot (Join-Path $repoRoot 'artifacts')

@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text;
 using GameValueEditor.Models;
 using GameValueEditor.Services.Adapters;
 
@@ -7,20 +8,35 @@ namespace GameValueEditor.Services;
 internal static class GameIdentityResolver
 {
     internal static GameProfile? Resolve(IEnumerable<GameProfile> games, ProcessItem process,
-        VersionFingerprint? fingerprint = null, IReadOnlyCollection<string>? confirmedModuleIds = null)
+        VersionFingerprint? fingerprint = null, IReadOnlyCollection<string>? confirmedModuleIds = null,
+        Func<string, IReadOnlyList<string>>? moduleNames = null, GameProfile? preferredGame = null,
+        IReadOnlyCollection<string>? runningNames = null)
     {
-        var candidates = games.Where(game => confirmedModuleIds is not { Count: > 0 } ||
-            string.IsNullOrWhiteSpace(game.ModuleId) || confirmedModuleIds.Contains(game.ModuleId, StringComparer.Ordinal)).ToArray();
-        var paths = candidates.Where(game => PathsEqual(game.ExecutablePath, process.ExecutablePath)).ToArray();
-        if (paths.Length > 0) return Unique(paths);
-        if (confirmedModuleIds is { Count: > 0 })
-        {
-            var modules = candidates.Where(game => confirmedModuleIds.Contains(game.ModuleId, StringComparer.Ordinal)).ToArray();
-            if (modules.Length > 0) return Unique(modules);
-        }
-        return fingerprint is null ? null : Unique(candidates.Where(game =>
-            game.Versions.Any(version => MatchesVersion(version, fingerprint))).ToArray());
+        // Game identity is a name, not a build or an adapter's Supports result.
+        // Build hashes remain useful below ONLY for isolating version-bound scan addresses.
+        var names = new[] { process.WindowTitle, process.ProcessName, fingerprint?.Identity?.ProductName ?? "" }
+            .Concat(runningNames ?? [])
+            .Select(NormalizeName).Where(IsGameName).ToHashSet(StringComparer.Ordinal);
+        var candidates = games.Where(game => Names(game, moduleNames).Any(names.Contains)).ToArray();
+        if (preferredGame is not null && candidates.Contains(preferredGame)) return preferredGame;
+        return Unique(candidates);
     }
+
+    private static IEnumerable<string> Names(GameProfile game, Func<string, IReadOnlyList<string>>? moduleNames) =>
+        new[] { game.Name, game.ProcessName, game.Identity?.ProductName ?? "" }
+            .Concat(moduleNames?.Invoke(game.ModuleId) ?? []).Select(NormalizeName).Where(IsGameName);
+
+    internal static string NormalizeName(string name)
+    {
+        name = name.Trim();
+        if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) name = name[..^4];
+        return string.Concat(name.Normalize(NormalizationForm.FormKC).Where(char.IsLetterOrDigit)).ToUpperInvariant();
+    }
+
+    // These are runtime executable names, not names of games. An actual window title,
+    // product name or declared alias still identifies a game using these runtimes.
+    private static bool IsGameName(string name) => name.Length > 0 &&
+        name is not ("GAME" or "ELECTRON" or "NW" or "NWJS" or "UNITYPLAYER");
 
     internal static bool MatchesVersion(GameVersionProfile version, VersionFingerprint fingerprint)
     {
@@ -32,19 +48,20 @@ internal static class GameIdentityResolver
         return !string.IsNullOrWhiteSpace(version.ExecutableSha256) &&
                Equal(version.ExecutableSha256, fingerprint.Sha256) &&
                Equal(version.GameAssemblySha256, fingerprint.GameAssemblySha256) &&
-               Equal(version.MetadataSha256, fingerprint.MetadataSha256);
+               Equal(version.MetadataSha256, fingerprint.MetadataSha256) && Equal(version.PackageSha256, fingerprint.PackageSha256);
     }
 
     internal static bool MatchesInstalledBuild(GameModuleBuildMatch build, GameVersionProfile version)
     {
-        if (new[] { build.BuildFingerprint, build.ExecutableSha256, build.GameAssemblySha256, build.MetadataSha256 }
+        if (new[] { build.BuildFingerprint, build.ExecutableSha256, build.GameAssemblySha256, build.MetadataSha256, build.PackageSha256 }
             .All(string.IsNullOrWhiteSpace)) return false;
         var fingerprint = version.BuildFingerprint;
         if (string.IsNullOrWhiteSpace(fingerprint) && !string.IsNullOrWhiteSpace(version.ExecutableSha256))
             fingerprint = VersionFingerprintService.CreateBuildFingerprint(version.ExecutableSha256,
-                version.GameAssemblySha256, version.MetadataSha256);
+                version.GameAssemblySha256, version.MetadataSha256, version.PackageSha256);
         return Optional(build.BuildFingerprint, fingerprint) && Optional(build.ExecutableSha256, version.ExecutableSha256) &&
-               Optional(build.GameAssemblySha256, version.GameAssemblySha256) && Optional(build.MetadataSha256, version.MetadataSha256);
+               Optional(build.GameAssemblySha256, version.GameAssemblySha256) && Optional(build.MetadataSha256, version.MetadataSha256) &&
+               Optional(build.PackageSha256, version.PackageSha256);
     }
 
     internal static bool PathsEqual(string left, string right)
@@ -54,6 +71,17 @@ internal static class GameIdentityResolver
         catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
         { return false; }
     }
+
+    internal static GameIdentityEvidence Merge(GameIdentityEvidence? saved, GameIdentityEvidence current) => current with
+    {
+        InstallationExecutablePath = Keep(current.InstallationExecutablePath, saved?.InstallationExecutablePath),
+        ExecutableName = Keep(current.ExecutableName, saved?.ExecutableName),
+        ProductName = Keep(current.ProductName, saved?.ProductName), PackageId = Keep(current.PackageId, saved?.PackageId),
+        PlatformName = current.PlatformName.Length > 0 && current.PlatformAppId.Length > 0 ? current.PlatformName : saved?.PlatformName ?? "",
+        PlatformAppId = current.PlatformName.Length > 0 && current.PlatformAppId.Length > 0 ? current.PlatformAppId : saved?.PlatformAppId ?? ""
+    };
+
+    private static string Keep(string current, string? saved) => string.IsNullOrWhiteSpace(current) ? saved ?? "" : current;
 
     private static GameProfile? Unique(GameProfile[] games) => games.Length == 1 ? games[0] : null;
     private static bool Equal(string left, string right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);

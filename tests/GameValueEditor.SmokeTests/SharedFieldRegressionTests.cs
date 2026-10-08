@@ -137,7 +137,7 @@ internal static class SharedFieldRegressionTests
             {
                 var activeWrite = operations.WriteFieldAsync(key, "20");
                 await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                Invoke(f.ViewModel, "RebuildEditorPages");
+                FieldOrderRegressionTests.InvalidatePages(f.ViewModel);
                 field.CurrentValue = "new state"; field.Status = "new status";
                 release.TrySetResult(); await ExpectAsync<OperationCanceledException>(activeWrite);
                 Check(calls.SequenceEqual(["20"]) && field.CurrentValue == "new state" && field.Status == "new status" && field.LockedValue == "10",
@@ -161,7 +161,7 @@ internal static class SharedFieldRegressionTests
                 Check(!editing.IsCompleted && calls.Count == (scenario == "lock-first" ? 0 : 1), "Page write bypassed the saved-field/maintenance queue.");
                 if (scenario == "unlock") { alias.IsValueLocked = false; alias.LockedValue = ""; }
                 if (scenario == "target") alias.LockedValue = "99";
-                if (scenario == "expired") Invoke(f.ViewModel, "RebuildEditorPages");
+                if (scenario == "expired") FieldOrderRegressionTests.InvalidatePages(f.ViewModel);
                 if (scenario == "save-error") Directory.CreateDirectory(f.ViewModel.LibraryPath);
             }
             finally { release.TrySetResult(); }

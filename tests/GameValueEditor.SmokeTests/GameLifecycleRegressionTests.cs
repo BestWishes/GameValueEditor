@@ -35,31 +35,33 @@ internal static class GameLifecycleRegressionTests
         var b = new GameProfile { Name = "B", ProcessName = "Game", ExecutablePath = process.ExecutablePath };
         Check(GameIdentityResolver.Resolve([a], process) is null, "Same process name merged different games.");
         Check(GameIdentityResolver.Resolve([a, b], process) == b, "An exact path was overridden by a same-name entry.");
-        Check(GameIdentityResolver.Resolve([b, new() { ExecutablePath = b.ExecutablePath }], process) is null, "Ambiguous paths picked the first game.");
+        Check(GameIdentityResolver.Resolve([b, new() { Name = "B", ExecutablePath = b.ExecutablePath }], process) is null, "Ambiguous names picked the first game.");
         Check(!GameIdentityResolver.PathsEqual("", "") && !GameIdentityResolver.PathsEqual(" ", " "), "Empty paths matched.");
         Check(GameIdentityResolver.PathsEqual(@"C:\games\B\..\A\Game.exe", a.ExecutablePath), "Normalized paths stopped matching.");
         var fingerprint = Fingerprint("EXE", "ASM", "META");
         a.Versions.Add(new() { ExecutableSha256 = "EXE" });
         Check(GameIdentityResolver.Resolve([a], process, fingerprint) is null, "EXE-only legacy record identified IL2CPP.");
         a.Versions[0].GameAssemblySha256 = "ASM"; a.Versions[0].MetadataSha256 = "META";
-        Check(GameIdentityResolver.Resolve([a], process, fingerprint) == a, "Complete legacy build components were not identified.");
+        Check(GameIdentityResolver.Resolve([a], process, fingerprint) is null, "Hashes identified a differently named game.");
         Check(GameIdentityResolver.Resolve([a], process, Fingerprint("EXE", "ASM2", "META")) is null, "A changed IL2CPP build reused an old identity.");
         Check(!GameIdentityResolver.MatchesVersion(new(), Fingerprint("")), "Empty hashes matched.");
         Check(!GameIdentityResolver.MatchesInstalledBuild(new(), new()), "An empty compatible-build row matched a game.");
         Check(GameIdentityResolver.MatchesInstalledBuild(new() { BuildFingerprint = fingerprint.BuildSha256 }, a.Versions[0]), "Legacy component combination did not match a manifest.");
         b.ExecutablePath = @"C:\games\old\Game.exe"; b.Versions.Add(new() { BuildFingerprint = fingerprint.BuildSha256 });
-        Check(GameIdentityResolver.Resolve([a, b], process, fingerprint) is null, "Ambiguous build identity silently merged.");
+        Check(GameIdentityResolver.Resolve([a, b], process, fingerprint) == b, "Changed path/hash vetoed matching name.");
         a.ModuleId = "game.a"; b.ModuleId = "game.b";
         Check(GameIdentityResolver.Resolve([a, b], process, fingerprint, ["game.b"]) == b, "Confirmed module identity was not preferred.");
         Check(GameIdentityResolver.Resolve([a], process, fingerprint, ["game.b"]) is null, "Different module identity was overwritten by matching hashes.");
         a.ModuleId = "game.old";
-        Check(GameIdentityResolver.Resolve([a], process, fingerprint, ["game.a", "game.old"]) == a, "Confirmed legacy module ID stopped working.");
+        Check(GameIdentityResolver.Resolve([a], process, fingerprint, ["game.a", "game.old"]) is null, "Module identity overrode a different game name.");
 
-        var pathGame = new GameProfile { ExecutablePath = a.ExecutablePath, ProcessName = "Game" };
-        var exact = ProcessItem("Game", "exact", a.ExecutablePath);
-        Check(ProcessService.FindRunningGame(pathGame, [process, exact]) == exact, "Process discovery ranked a same-name wrong path first.");
-        Check(ProcessService.FindRunningGame(new() { ProcessName = "Game" }, [process, exact]) is null, "Ambiguous installation paths were guessed.");
-        Check(ProcessService.FindRunningGame(new() { ProcessName = "Game" }, [process]) == process, "Unique name candidate could no longer be discovered for later verification.");
+        var pathGame = new GameProfile { Name = "B", ExecutablePath = a.ExecutablePath, ProcessName = "Game" };
+        var exact = ProcessItem("Game", "different-title", a.ExecutablePath);
+        Check(ProcessService.FindRunningGame(pathGame, [process, exact]) == process, "Old path overrode the actual game name.");
+        var second = new ProcessItem { ProcessId = 12345, ProcessName = "Game", WindowTitle = "B", ExecutablePath = a.ExecutablePath,
+            StartTimeUtc = process.StartTimeUtc, Role = GameProcessRole.Main, RuntimeKind = GameRuntimeKind.Native };
+        Check(ProcessService.FindRunningGame(new() { Name = "B" }, [process, second]) is null, "Multiple same-name game instances were guessed.");
+        Check(ProcessService.FindRunningGame(new() { Name = "B" }, [process]) == process, "Unique name candidate could no longer be discovered.");
     }
 
     private static async Task CheckConnectionsAsync(string root)
@@ -71,6 +73,7 @@ internal static class GameLifecycleRegressionTests
             using var fixture = new Fixture(Path.Combine(root, scenario));
             var game = new GameProfile { Name = "A", ProcessName = "Game", ExecutablePath = Path.Combine(root, "A", "Game.exe"),
                 Versions = [new() { BuildFingerprint = scenario == "moved" ? actual.BuildSha256 : "OTHER" }] };
+            if (scenario != "different-game") game.ProcessName = "ActualGame";
             if (scenario.Contains("module", StringComparison.Ordinal))
             {
                 game.ExecutablePath = ""; game.Versions.Clear();
@@ -78,13 +81,13 @@ internal static class GameLifecycleRegressionTests
                 fixture.Adapters.Add(new SmokeTestModuleAdapter { IdentityOnly = true, IdentityId = "game.fixture", IdentityLegacyIds = ["game.old"] });
             }
             fixture.Vm.Games.Add(game); fixture.Vm.SelectedGame = game;
-            var process = ProcessItem("Game", "B", executable);
+            var process = ProcessItem("ActualGame", "B", executable);
             var originalPath = game.ExecutablePath;
             if (scenario == "different-game")
             {
                 var context = Invoke(fixture.Vm, "CaptureGameOperation");
                 try { await Connect(fixture.Vm, process, game); throw new Exception("Wrong game was accepted by a library connection."); }
-                catch (InvalidOperationException exception) when (exception.Message.Contains("无法确认", StringComparison.Ordinal)) { }
+                catch (InvalidOperationException exception) when (exception.Message.Contains("游戏名称", StringComparison.Ordinal)) { }
                 Check(fixture.Vm.SelectedGame == game && fixture.Vm.AttachedProcess is null && game.ExecutablePath == originalPath,
                     "Rejected library connection changed the old entry or view.");
                 Invoke(fixture.Vm, "RequireCurrentGameOperation", context);
@@ -115,13 +118,13 @@ internal static class GameLifecycleRegressionTests
             var game = new GameProfile { Name = "A", ProcessName = "Game", Versions = [scenario == "name-only" ? new() : version],
                 ModuleId = scenario == "other-module" ? "game.other" : "" };
             fixture.Vm.Games.Add(game);
-            if (scenario == "ambiguous-build") fixture.Vm.Games.Add(new() { Name = "B", Versions = [version] });
-            var manifest = new InstalledModuleManifest { Id = "game.fixture", Version = "1.0.0", DisplayName = "Fixture", ProcessNames = ["Game"],
+            if (scenario == "ambiguous-build") fixture.Vm.Games.Add(new() { Name = "A", Versions = [version] });
+            var manifest = new InstalledModuleManifest { Id = "game.fixture", Version = "1.0.0", DisplayName = "Fixture", GameDisplayName = "A", ProcessNames = ["Game"],
                 CompatibleBuilds = [new() { BuildFingerprint = Fingerprint("EXE", "ASM", "META").BuildSha256,
                     ExecutableSha256 = "EXE", GameAssemblySha256 = "ASM", MetadataSha256 = "META" }] };
             fixture.Register(manifest);
             Invoke(fixture.Vm, "ReconcileInstalledModulesWithLibrary");
-            if (scenario == "known-build") Check(game.ModuleId == manifest.Id && fixture.Vm.Games.Count == 1, "Unique known legacy build did not associate its module.");
+            if (scenario is "known-build" or "name-only") Check(game.ModuleId == manifest.Id && fixture.Vm.Games.Count == 1, "Matching name did not associate its module.");
             else Check(game.ModuleId == (scenario == "other-module" ? "game.other" : "") && fixture.Vm.Games.Count == (scenario == "ambiguous-build" ? 3 : 2),
                 "Module reconciliation claimed an unrelated or ambiguous game.");
             var count = fixture.Vm.Games.Count;
@@ -142,7 +145,7 @@ internal static class GameLifecycleRegressionTests
         var exeOnly = new GameVersionProfile { ExecutableSha256 = fingerprint.Sha256 };
         var different = new GameVersionProfile { ExecutableSha256 = fingerprint.Sha256, GameAssemblySha256 = "OLD-ASSEMBLY", MetadataSha256 = fingerprint.MetadataSha256 };
         var current = new GameVersionProfile { ExecutableSha256 = fingerprint.Sha256, GameAssemblySha256 = fingerprint.GameAssemblySha256, MetadataSha256 = fingerprint.MetadataSha256 };
-        var game = new GameProfile { ExecutablePath = executable, Versions = [exeOnly, different, current] };
+        var game = new GameProfile { Name = "fixture", ExecutablePath = executable, Versions = [exeOnly, different, current] };
         fixture.Vm.Games.Add(game); fixture.Vm.SelectedGame = game;
         await Connect(fixture.Vm, ProcessItem("Game", "fixture", executable), game);
         Check(exeOnly.BuildFingerprint.Length == 0 && different.BuildFingerprint.Length == 0 && different.GameAssemblySha256 == "OLD-ASSEMBLY",

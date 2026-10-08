@@ -111,14 +111,14 @@ public sealed class GameModuleCatalogService
         GameVersionProfile version,
         CancellationToken cancellationToken = default)
         => await CheckCoreAsync(game.ProcessName, version.BuildFingerprint, version.ExecutableSha256,
-            version.GameAssemblySha256, version.MetadataSha256, cancellationToken);
+            version.GameAssemblySha256, version.MetadataSha256, version.PackageSha256, cancellationToken);
 
     public async Task<GameModuleCheckResult> CheckAsync(
         string processName,
         VersionFingerprint fingerprint,
         CancellationToken cancellationToken = default)
         => await CheckCoreAsync(processName, fingerprint.BuildSha256, fingerprint.Sha256,
-            fingerprint.GameAssemblySha256, fingerprint.MetadataSha256, cancellationToken);
+            fingerprint.GameAssemblySha256, fingerprint.MetadataSha256, fingerprint.PackageSha256, cancellationToken);
 
     private async Task<GameModuleCheckResult> CheckCoreAsync(
         string processName,
@@ -126,6 +126,7 @@ public sealed class GameModuleCatalogService
         string executableSha256,
         string gameAssemblySha256,
         string metadataSha256,
+        string packageSha256,
         CancellationToken cancellationToken)
     {
         using var response = await _httpClient.GetAsync(DefaultCatalogUrl, cancellationToken);
@@ -154,7 +155,7 @@ public sealed class GameModuleCatalogService
                     : $"服务器有当前游戏的专属模块，但没有兼容主程序 v{_currentHostVersion} 与 Host API {ModuleHostApi.CurrentVersion} 的版本。");
 
         var exactCandidates = hostCompatibleCandidates.Where(module => MatchesBuild(module, buildFingerprint,
-                executableSha256, gameAssemblySha256, metadataSha256))
+                executableSha256, gameAssemblySha256, metadataSha256, packageSha256))
             .ToList();
         var exactBuildMatch = exactCandidates.Count > 0;
         var candidates = exactBuildMatch
@@ -186,7 +187,7 @@ public sealed class GameModuleCatalogService
         if (updateTarget is not null)
         {
             var updateExact = MatchesBuild(updateTarget, buildFingerprint, executableSha256,
-                gameAssemblySha256, metadataSha256);
+                gameAssemblySha256, metadataSha256, packageSha256);
             return new GameModuleCheckResult(GameModuleAvailability.UpdateAvailable, updateTarget, installed,
                 updateExact
                     ? $"发现模块更新：v{installed.Version} → v{updateTarget.Version}"
@@ -433,13 +434,15 @@ public sealed class GameModuleCatalogService
         string buildFingerprint,
         string executableSha256,
         string gameAssemblySha256,
-        string metadataSha256)
+        string metadataSha256,
+        string packageSha256)
     {
         return module.CompatibleBuilds.Any(build =>
             MatchOptional(build.BuildFingerprint, buildFingerprint) &&
             MatchOptional(build.ExecutableSha256, executableSha256) &&
             MatchOptional(build.GameAssemblySha256, gameAssemblySha256) &&
-            MatchOptional(build.MetadataSha256, metadataSha256));
+            MatchOptional(build.MetadataSha256, metadataSha256) &&
+            MatchOptional(build.PackageSha256, packageSha256));
     }
 
     private static bool MatchOptional(string expected, string actual) =>
@@ -606,4 +609,5 @@ public sealed class GameModuleBuildMatch
     public string ExecutableSha256 { get; set; } = string.Empty;
     public string GameAssemblySha256 { get; set; } = string.Empty;
     public string MetadataSha256 { get; set; } = string.Empty;
+    public string PackageSha256 { get; set; } = string.Empty;
 }

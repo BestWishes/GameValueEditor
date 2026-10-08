@@ -298,6 +298,8 @@ internal static class FieldOrderRegressionTests
         Set(fixture.ViewModel, "_activeAdapter", factory);
         Invoke(fixture.ViewModel, "RebuildEditorPages");
         var first = proxy.Contexts.Single();
+        Invoke(fixture.ViewModel, "RebuildEditorPages");
+        Check(proxy.Contexts.Count == 1 && !first.Lifetime.IsCancellationRequested, "Unchanged session recreated its page.");
         first.Host.ReportStatus("current"); first.Host.ShowError("current", "error");
         Check(host.Statuses == 1 && host.Errors == 1, "Current page lost host status/error services.");
         Check(await first.Host.PromptValueAsync(new("input", "message", "1")) == "42", "Current page lost input service.");
@@ -306,7 +308,7 @@ internal static class FieldOrderRegressionTests
         var delayed = Gate(); host.PromptGate = delayed.Task; host.PromptEntered = Gate();
         var prompt = first.Host.PromptValueAsync(new("input", "message", "1"));
         await host.PromptEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Invoke(fixture.ViewModel, "RebuildEditorPages");
+        InvalidatePages(fixture.ViewModel);
         Check(first.Lifetime.IsCancellationRequested, "Rebuilt page kept its old lifetime.");
         first.Host.ReportStatus("stale"); first.Host.ShowError("stale", "old error");
         Check(host.Statuses == 1 && host.Errors == 1, "Expired module page still reached host status/error UI.");
@@ -319,6 +321,13 @@ internal static class FieldOrderRegressionTests
         fixture.ViewModel.Shutdown();
         await Task.Run(() => current.Host.ShowError("closing", "late"));
         Check(host.Errors == 1, "Closing page produced a late host error.");
+    }
+
+    internal static void InvalidatePages(MainViewModel viewModel)
+    {
+        var session = (GameConnectionSession)typeof(MainViewModel).GetField("_activeSession", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(viewModel)!;
+        typeof(MainViewModel).GetMethod("DisposeSessionEditorPages", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [session]);
+        Invoke(viewModel, "RebuildEditorPages");
     }
 
     private static async Task CheckPageDispatchAsync()

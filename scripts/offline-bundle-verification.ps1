@@ -56,13 +56,14 @@ function Get-OfflineReceiptPath {
 }
 
 function Save-OfflineReceipt {
-    param([string]$Root, $Bundle, [string]$Version, $HostInfo, [string]$HostHash, $Modules, [bool]$Complete)
+    param([string]$Root, $Bundle, [string]$Version, $HostInfo, [string]$HostHash, $Modules, [bool]$Complete, [switch]$LocalOnly)
     $path = Get-OfflineReceiptPath $Root $Bundle.Hash
     $files = @{}
     foreach ($name in $Bundle.Entries.Keys) { $files[$name] = Get-OfflineEntryHash $Bundle $name }
     $receipt = @{ SchemaVersion = 1; Sha256 = $Bundle.Hash; SizeBytes = $Bundle.Stream.Length; ApplicationVersion = $Version
         SourceCommit = $HostInfo.SourceCommit; Capability = $HostInfo.Capability; HostSha256 = $HostHash; Complete = $Complete
         Files = $files; Modules = @($Modules | ForEach-Object { @{ Snapshot = $_.Snapshot; Sha256 = $_.Source.Hash } }) }
+    if ($LocalOnly) { $receipt.LocalOnly = $true }
     [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path)) | Out-Null
     # Existing evidence is never silently repaired or replaced by verification.
     if ([IO.File]::Exists($path)) {
@@ -113,6 +114,7 @@ function Test-OfflineReceiptBundle {
         if ($receipt.SchemaVersion -ne 1 -or $receipt.Sha256 -cne $bundle.Hash -or $receipt.SizeBytes -ne $bundle.Stream.Length -or
             $receipt.ApplicationVersion -cne $Version -or $receipt.SourceCommit -cnotmatch '^[0-9a-f]{40}$' -or
             $receipt.Files -isnot [Collections.IDictionary] -or $receipt.Modules -isnot [array]) { throw 'Invalid local verification receipt.' }
+        if ($receipt.ContainsKey('LocalOnly') -and $receipt.LocalOnly -isnot [bool]) { throw 'Invalid local review classification.' }
         Assert-OfflineEntries $bundle @($receipt.Files.Keys)
         foreach ($name in $receipt.Files.Keys) {
             if ((Get-OfflineEntryHash $bundle $name) -cne $receipt.Files[$name]) { throw "Receipt file hash mismatch: $name" }
@@ -132,11 +134,12 @@ function Test-OfflineReceiptBundle {
         }
         Test-OfflineBundleModules $bundle (Join-Path $work 'modules') $Version $receipt.Modules
         Test-OfflineBundleStartup $bundle (Join-Path $work 'startup')
-        $freshness = Get-OfflineFreshness $ModuleRoot $Version $receipt.Capability $receipt.Modules $receipt.Complete
+        $freshness = if ($receipt.LocalOnly) { @{ IsLatest = $null; LatestStatus = 'LocalReview' } } else { Get-OfflineFreshness $ModuleRoot $Version $receipt.Capability $receipt.Modules $receipt.Complete }
         return [pscustomobject]@{ ArchivePath = $Output; ApplicationVersion = $Version; SourceCommit = $receipt.SourceCommit
             HostSha256 = $receipt.HostSha256; Sha256 = $bundle.Hash; SizeBytes = $bundle.Stream.Length
             Verified = $true; IntegrityVerified = $true; ModulesVerified = $true; StartupVerified = $true
             VerifyOnly = $true; Reused = $true; IsLatest = $freshness.IsLatest; LatestStatus = $freshness.LatestStatus; ReceiptPath = $receiptPath
+            LocalOnly = [bool]$receipt.LocalOnly
             Modules = @($receipt.Modules | ForEach-Object { [pscustomobject]@{ Id = $_.Snapshot.id; Version = $_.Snapshot.version; Sha256 = $_.Sha256 } }) }
     } finally {
         Close-OfflineArchive $bundle

@@ -15,12 +15,14 @@ public sealed class GameAdapterRegistry : IDisposable
     private readonly string _runtimeRoot;
     private readonly string _runtimeSessionDirectory;
     private readonly List<IGameAdapter> _adapters = [];
+    private readonly SemaphoreSlim _supportGate = new(1, 1);
     private readonly List<ModuleLoadContext> _loadContexts = [];
     private readonly List<string> _shadowDirectories = [];
     private readonly List<string> _loadErrors = [];
     private readonly HashSet<string> _restartRequiredIds = new(StringComparer.Ordinal);
     private readonly HashSet<string> _nonCollectibleModuleIds = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _loadedVersions = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, IReadOnlyList<string>> _gameNames = new(StringComparer.Ordinal);
 
     public GameAdapterRegistry(string? modulesDirectory = null)
     {
@@ -63,12 +65,37 @@ public sealed class GameAdapterRegistry : IDisposable
     }
 
     public IGameAdapter? Resolve(ProcessItem process, VersionFingerprint fingerprint) =>
-        _adapters.FirstOrDefault(adapter => adapter.Supports(process.ToModuleContext(), fingerprint.ToModuleIdentity()));
+        _adapters.FirstOrDefault(adapter => Supports(adapter, process.ToModuleContext(), fingerprint.ToModuleIdentity()));
+
+    private static bool Supports(IGameAdapter adapter, GameProcessContext process, GameBuildIdentity build)
+    {
+        try { return adapter.Supports(process, build); }
+        catch (Exception error) { Debug.WriteLine($"Optional module {adapter.Id}: {error}"); return false; }
+    }
+
+    // Snapshot on the caller/UI thread. Optional Supports implementations may hash
+    // large packages; never enumerate a mutable registry on the worker thread.
+    public async Task<IGameAdapter?> ResolveAsync(ProcessItem process, VersionFingerprint fingerprint)
+    {
+        var adapters = _adapters.ToArray();
+        var context = process.ToModuleContext();
+        var identity = fingerprint.ToModuleIdentity();
+        var match = await Task.Run(async () =>
+        {
+            await _supportGate.WaitAsync().ConfigureAwait(false);
+            try { return adapters.FirstOrDefault(adapter => Supports(adapter, context, identity)); }
+            finally { _supportGate.Release(); }
+        });
+        return match is not null && _adapters.Contains(match) ? match : null;
+    }
 
     public IGameAdapter? FindById(string id) =>
         _adapters.FirstOrDefault(adapter =>
             string.Equals(adapter.Id, id, StringComparison.Ordinal) ||
             adapter.LegacyIds.Any(alias => string.Equals(alias, id, StringComparison.Ordinal)));
+
+    public IReadOnlyList<string> GetGameNames(string id) =>
+        _gameNames.GetValueOrDefault(FindById(id)?.Id ?? id) ?? [];
 
     public bool Deactivate(string id) => _adapters.RemoveAll(adapter =>
         string.Equals(adapter.Id, id, StringComparison.Ordinal) ||
@@ -125,6 +152,7 @@ public sealed class GameAdapterRegistry : IDisposable
     private WeakReference[] ReleaseLoadContexts()
     {
         _adapters.Clear();
+        _gameNames.Clear();
         var collectibleContexts = _loadContexts.Where(context => context.IsCollectible).ToArray();
         var unloadedContexts = collectibleContexts.Select(context => new WeakReference(context)).ToArray();
         foreach (var context in collectibleContexts) context.Unload();
@@ -166,6 +194,9 @@ public sealed class GameAdapterRegistry : IDisposable
         if (manifest is null || !string.Equals(manifest.Id, record.Id, StringComparison.Ordinal) ||
             !string.Equals(manifest.Version, record.Version, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("module.json 的模块身份/版本与登记不一致。");
+        // Name aliases are metadata, independent of whether the optional DLL can load or run.
+        _gameNames[record.Id] = new[] { manifest.GameDisplayName }.Concat(manifest.ProcessNames ?? [])
+            .Where(name => !string.IsNullOrWhiteSpace(name)).ToArray();
         if (manifest.HostApiVersion is < 1 or > ModuleHostApi.CurrentVersion)
             throw new InvalidOperationException(
                 $"模块需要 Host API {manifest.HostApiVersion}，当前最高支持 {ModuleHostApi.CurrentVersion}。");
@@ -218,6 +249,8 @@ public sealed class GameAdapterRegistry : IDisposable
             if (loadedAdapters.Count > 0)
             {
                 _loadedVersions[record.Id] = record.Version;
+                foreach (var alias in loadedAdapters.SelectMany(adapter => adapter.LegacyIds))
+                    _gameNames[alias] = _gameNames[record.Id];
                 if (!context.IsCollectible) _nonCollectibleModuleIds.Add(record.Id);
                 _loadContexts.Add(context);
                 _shadowDirectories.Add(shadowDirectory);

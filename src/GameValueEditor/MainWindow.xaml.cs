@@ -128,7 +128,11 @@ public partial class MainWindow : Window
     }
 
     private async void AttachSelectedGame_OnClick(object sender, RoutedEventArgs e) =>
-        await RunGuardedAsync(_viewModel.AttachSelectedGameAsync);
+        await RunGuardedAsync(() => _viewModel.AttachSelectedGameWithAssociationAsync(request =>
+        {
+            var dialog = new GameAssociationDialog(request) { Owner = this };
+            return dialog.ShowDialog() == true ? dialog.SelectedProcess : null;
+        }));
 
     private async void DisconnectSelectedGame_OnClick(object sender, RoutedEventArgs e) =>
         await RunGuardedAsync(_viewModel.DisconnectSelectedGameAsync);

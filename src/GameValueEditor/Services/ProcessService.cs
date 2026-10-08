@@ -67,21 +67,35 @@ public sealed class ProcessService
 
     internal static ProcessItem? FindRunningGame(GameProfile game, IReadOnlyList<ProcessItem> processes)
     {
-        var candidates = processes.Where(item => PathsEqual(item.ExecutablePath, game.ExecutablePath)).ToArray();
-        if (candidates.Length == 0)
-        {
-            candidates = processes.Where(item => !string.IsNullOrWhiteSpace(game.ProcessName) &&
-                string.Equals(item.ProcessName, game.ProcessName, StringComparison.OrdinalIgnoreCase)).ToArray();
-            // Names only discover candidates; the caller must verify game identity before binding.
-            // Do not choose a different installation by window title or memory usage.
-            if (candidates.Select(item => item.ExecutablePath).Distinct(StringComparer.OrdinalIgnoreCase).Count() != 1)
-                return null;
-        }
-        return candidates
-            .OrderByDescending(item => item.Role == GameProcessRole.Main)
-            .ThenByDescending(item => !string.IsNullOrWhiteSpace(item.WindowTitle))
-            .ThenByDescending(item => item.WorkingSetBytes)
-            .FirstOrDefault();
+        var candidates = new ProcessService().FindGameCandidates(game, processes)
+            .Where(item => GameIdentityResolver.Resolve([game], item) is not null).ToArray();
+        // A path may discover a renamed executable, but never identifies a differently named game.
+        // Multiple instances need an actual process choice, not a working-set tie breaker.
+        return candidates.Length == 1 ? candidates[0] : null;
+    }
+
+    internal IReadOnlyList<ProcessItem> FindGameCandidates(GameProfile game, IReadOnlyList<ProcessItem> processes,
+        IReadOnlyList<string>? aliases = null)
+    {
+        var byId = processes.GroupBy(item => item.ProcessId).ToDictionary(items => items.Key, items => items.First());
+        var candidates = processes.Where(item => GameIdentityResolver.Resolve([game], item,
+                moduleNames: _ => aliases ?? []) is not null ||
+            // Installation paths only discover candidates when the executable was renamed.
+            // They never authorize association; the caller resolves the real game name.
+            PathsEqual(item.ExecutablePath, game.ExecutablePath) ||
+            !string.IsNullOrWhiteSpace(game.Identity?.InstallationExecutablePath) &&
+            PathsEqual(GameIdentityEvidenceService.FindLaunchSource(item, byId)?.ExecutablePath ?? "", game.Identity.InstallationExecutablePath))
+            .Select(item => TryResolveCandidate(item, processes)).Where(group => group is not null)
+            .Select(group => group!).GroupBy(group => (group.RootProcess.ProcessId, group.RootProcess.StartTimeUtc))
+            .Select(groups => groups.First().DataProcess).OrderByDescending(item => !string.IsNullOrWhiteSpace(item.WindowTitle))
+            .ThenByDescending(item => item.WorkingSetBytes).ToArray();
+        return candidates;
+    }
+
+    private LogicalGameProcessGroup? TryResolveCandidate(ProcessItem seed, IReadOnlyList<ProcessItem> processes)
+    {
+        try { return ResolveLogicalGame(seed, processes); }
+        catch (AmbiguousGameProcessException) { return null; }
     }
 
     public LogicalGameProcessGroup ResolveLogicalGame(
@@ -107,8 +121,13 @@ public sealed class ProcessService
             root = parent;
         }
 
+        // A headless self-extracting launcher may start a windowed Web runtime in
+        // Temp. This is conservative role discovery, not proof of game identity;
+        // never let scans or speed hooks fall back to the outer launcher.
+        root = ResolveExtractedWebRuntime(root, byId);
+
         var childrenByParent = processes
-            .Where(item => PathsEqual(item.ExecutablePath, canonicalSeed.ExecutablePath))
+            .Where(item => PathsEqual(item.ExecutablePath, root.ExecutablePath))
             .GroupBy(item => item.ParentProcessId)
             .ToDictionary(group => group.Key, group => group.ToList());
         var members = new List<ProcessItem>();
@@ -125,7 +144,8 @@ public sealed class ProcessService
                 queue.Enqueue(child);
         }
 
-        if (!memberIds.Contains(canonicalSeed.ProcessId)) members.Add(canonicalSeed);
+        if (!memberIds.Contains(canonicalSeed.ProcessId) && PathsEqual(canonicalSeed.ExecutablePath, root.ExecutablePath))
+            members.Add(canonicalSeed);
         var webRuntime = members.Select(item => item.RuntimeKind)
             .FirstOrDefault(kind => kind is GameRuntimeKind.Electron or GameRuntimeKind.NwJs);
         var runtime = webRuntime is GameRuntimeKind.Electron or GameRuntimeKind.NwJs
@@ -141,6 +161,31 @@ public sealed class ProcessService
             Members = members.OrderBy(item => item.StartTimeUtc).ThenBy(item => item.ProcessId).ToList(),
             RuntimeKind = runtime
         };
+    }
+
+    private static ProcessItem ResolveExtractedWebRuntime(ProcessItem source, IReadOnlyDictionary<int, ProcessItem> byId)
+    {
+        if (source.RuntimeKind is not (GameRuntimeKind.Native or GameRuntimeKind.Unknown) ||
+            !string.IsNullOrWhiteSpace(source.WindowTitle) ||
+            source.Role != GameProcessRole.Main || source.StartTimeUtc == default ||
+            string.IsNullOrWhiteSpace(source.ExecutablePath)) return source;
+
+        var runtimes = byId.Values.Where(item =>
+            item.RuntimeKind is GameRuntimeKind.Electron or GameRuntimeKind.NwJs &&
+            item.Role == GameProcessRole.Main && item.StartTimeUtc != default &&
+            !string.IsNullOrWhiteSpace(item.WindowTitle) &&
+            item.StartTimeUtc >= source.StartTimeUtc &&
+            !PathsEqual(item.ExecutablePath, source.ExecutablePath) &&
+            GameIdentityEvidenceService.IsTemporaryPath(item.ExecutablePath) &&
+            GameIdentityEvidenceService.FindLaunchSource(item, byId) is { } origin &&
+            origin.ProcessId == source.ProcessId && origin.StartTimeUtc == source.StartTimeUtc &&
+            PathsEqual(origin.ExecutablePath, source.ExecutablePath) &&
+            byId.Values.Any(child => child.ParentProcessId == item.ProcessId &&
+                child.StartTimeUtc >= item.StartTimeUtc && child.Role == GameProcessRole.Renderer &&
+                PathsEqual(child.ExecutablePath, item.ExecutablePath))).ToArray();
+        if (runtimes.Length > 1)
+            throw new AmbiguousGameProcessException("这个启动器关联了多个游戏实例，无法确认唯一目标。请选择实际游戏进程或 renderer 进程连接。");
+        return runtimes.SingleOrDefault() ?? source;
     }
 
     private static ProcessItem SelectDataProcess(
@@ -302,3 +347,5 @@ public sealed class ProcessService
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DestroyIcon(IntPtr iconHandle);
 }
+
+internal sealed class AmbiguousGameProcessException(string message) : InvalidOperationException(message);

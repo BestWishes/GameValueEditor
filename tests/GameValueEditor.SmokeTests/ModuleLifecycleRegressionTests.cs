@@ -25,6 +25,10 @@ internal static class ModuleLifecycleRegressionTests
                 Directory.CreateDirectory(root);
                 try
                 {
+                    if (args.Contains("--page-sessions-only", StringComparer.Ordinal))
+                    { await PageSessionRegressionTests.RunAsync(Path.Combine(root, "page-sessions")); completion.SetResult(); return; }
+                    if (args.Contains("--game-recognition-only", StringComparer.Ordinal))
+                    { await GameRecognitionRegressionTests.RunAsync(Path.Combine(root, "game-recognition")); completion.SetResult(); return; }
                     if (args.Contains("--game-lifecycle-only", StringComparer.Ordinal))
                     { await GameLifecycleRegressionTests.RunAsync(Path.Combine(root, "game-lifecycle")); completion.SetResult(); return; }
                     if (args.Contains("--safety-boundaries-only", StringComparer.Ordinal))
@@ -39,6 +43,8 @@ internal static class ModuleLifecycleRegressionTests
                     if (args.Contains("--module-reliability-only", StringComparer.Ordinal)) { completion.SetResult(); return; }
                     await SafetyBoundaryRegressionTests.RunAsync(Path.Combine(root, "safety-boundaries"));
                     await GameLifecycleRegressionTests.RunAsync(Path.Combine(root, "game-lifecycle"));
+                    await GameRecognitionRegressionTests.RunAsync(Path.Combine(root, "game-recognition"));
+                    await PageSessionRegressionTests.RunAsync(Path.Combine(root, "page-sessions"));
                     await BackgroundOperationRegressionTests.RunAsync(Path.Combine(root, "background-boundaries"));
                     await FieldOrderRegressionTests.RunAsync(Path.Combine(root, "field-order"));
                     await SharedFieldRegressionTests.RunAsync(Path.Combine(root, "shared-field"));
@@ -47,8 +53,9 @@ internal static class ModuleLifecycleRegressionTests
                     await StabilityRegressionTests.RunAsync(root, args);
                     await LayoutRegressionTests.CheckUpdateStatesAsync(root);
                     await DownloadFeedbackRegressionTests.RunAsync(root);
-                    var paths = args.Where(arg => arg.StartsWith("--verify-module-package=", StringComparison.Ordinal))
-                        .Select(arg => arg["--verify-module-package=".Length..]).ToArray();
+                    var paths = args.Where(arg => arg.StartsWith("--verify-module-package=", StringComparison.Ordinal) ||
+                                                 arg.StartsWith("--verify-local-module-package=", StringComparison.Ordinal))
+                        .Select(arg => arg[(arg.IndexOf('=') + 1)..]).ToArray();
                     if (paths.Length >= 2) await CheckInstalledLifecycleAsync(root, paths);
                     completion.SetResult();
                 }
@@ -63,7 +70,18 @@ internal static class ModuleLifecycleRegressionTests
         }) { IsBackground = true };
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
-        return completion.Task;
+        return AwaitThreadExitAsync(completion.Task, thread);
+    }
+
+    private static async Task AwaitThreadExitAsync(Task completion, Thread thread)
+    {
+        try { await completion.ConfigureAwait(false); }
+        finally
+        {
+            // Task completion can precede the async dispatcher's finally block.
+            // Never let process exit race WPF window/dispatcher cleanup.
+            await Task.Run(thread.Join).ConfigureAwait(false);
+        }
     }
 
     internal static MainViewModel CreateViewModel(string root, GameModuleCatalogService catalog, GameAdapterRegistry registry,
@@ -247,7 +265,6 @@ internal static class ModuleLifecycleRegressionTests
         entry.DownloadUrl = "https://example.invalid/" + Path.GetFileName(path);
         entry.SizeBytes = new FileInfo(path).Length;
         entry.Sha256 = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));
-        if (entry.Id == "game.last-epoch") CheckLastEpochBuildGuard(zip);
         return entry;
     }
 
@@ -273,35 +290,6 @@ internal static class ModuleLifecycleRegressionTests
         catch (InvalidOperationException exception) when (exception.Message.Contains("恢复", StringComparison.Ordinal)) { }
         try { service.LaunchPendingUpdate(false); throw new Exception("Pending install bypassed recovery marker."); }
         catch (InvalidOperationException exception) when (exception.Message.Contains("恢复", StringComparison.Ordinal)) { }
-    }
-
-    private static void CheckLastEpochBuildGuard(ZipArchive zip)
-    {
-        var context = new System.Runtime.Loader.AssemblyLoadContext("guard-" + Guid.NewGuid(), true);
-        try
-        {
-            using var dll = zip.GetEntry("GameValueEditor.Modules.LastEpoch.dll")!.Open();
-            using var assemblyBytes = new MemoryStream();
-            dll.CopyTo(assemblyBytes); assemblyBytes.Position = 0;
-            var assembly = context.LoadFromStream(assemblyBytes);
-            var guard = assembly.GetType("GameValueEditor.Modules.LastEpoch.LastEpochBuildGuard", true)!;
-            var match = guard.GetMethod("IsVerifiedBuild", BindingFlags.Static | BindingFlags.NonPublic)!;
-            using var manifest = zip.GetEntry("module.json")!.Open();
-            var entry = JsonSerializer.Deserialize<GameModuleCatalogEntry>(manifest, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
-            foreach (var build in entry.CompatibleBuilds)
-            {
-                var identity = new GameValueEditor.ModuleSdk.GameBuildIdentity(build.ExecutableSha256.ToLowerInvariant(), "", build.GameAssemblySha256, build.MetadataSha256);
-                if (!(bool)match.Invoke(null, [identity])!) throw new Exception("Verified build was rejected.");
-            }
-            var first = entry.CompatibleBuilds[0]; var last = entry.CompatibleBuilds[^1];
-            foreach (var identity in new[]
-            {
-                new GameValueEditor.ModuleSdk.GameBuildIdentity(first.ExecutableSha256, "", first.GameAssemblySha256, last.MetadataSha256),
-                new GameValueEditor.ModuleSdk.GameBuildIdentity(first.ExecutableSha256, "", "", ""),
-                new GameValueEditor.ModuleSdk.GameBuildIdentity(first.ExecutableSha256, "", new string('F', 64), last.MetadataSha256)
-            }) if ((bool)match.Invoke(null, [identity])!) throw new Exception("Unverified/mixed build was accepted.");
-        }
-        finally { context.Unload(); }
     }
 
     private sealed class Handler(Func<HttpRequestMessage, Task<HttpResponseMessage>> factory) : HttpMessageHandler

@@ -30,7 +30,9 @@ public sealed class VersionFingerprintService
         var metadataHash = File.Exists(metadataPath)
             ? await ComputeSha256Async(metadataPath, cancellationToken)
             : string.Empty;
-        var buildHash = CreateBuildFingerprint(hash, gameAssemblyHash, metadataHash);
+        var packagePath = GameIdentityEvidenceService.PackagePath(executablePath);
+        var packageHash = packagePath.Length > 0 ? await ComputeSha256Async(packagePath, cancellationToken) : string.Empty;
+        var buildHash = CreateBuildFingerprint(hash, gameAssemblyHash, metadataHash, packageHash);
         var fileVersion = CleanVersion(versionInfo.FileVersion);
         var productVersion = CleanVersion(versionInfo.ProductVersion);
         var display = !string.IsNullOrWhiteSpace(productVersion)
@@ -53,21 +55,31 @@ public sealed class VersionFingerprintService
             platform.PlatformName,
             platform.AppId,
             platform.BuildId,
-            platform.DisplayName);
+            platform.DisplayName,
+            packageHash,
+            new GameIdentityEvidenceService().Read(executablePath));
     }
 
-    internal static string CreateBuildFingerprint(string executableHash, string gameAssemblyHash, string metadataHash)
+    internal static string CreateBuildFingerprint(string executableHash, string gameAssemblyHash, string metadataHash, string packageHash = "")
     {
-        if (string.IsNullOrWhiteSpace(gameAssemblyHash) && string.IsNullOrWhiteSpace(metadataHash))
+        if (string.IsNullOrWhiteSpace(gameAssemblyHash) && string.IsNullOrWhiteSpace(metadataHash) && string.IsNullOrWhiteSpace(packageHash))
             return executableHash;
-        var components = Encoding.UTF8.GetBytes($"exe:{executableHash}\nassembly:{gameAssemblyHash}\nmetadata:{metadataHash}");
+        var text = $"exe:{executableHash}\nassembly:{gameAssemblyHash}\nmetadata:{metadataHash}";
+        if (!string.IsNullOrWhiteSpace(packageHash)) text += $"\npackage:{packageHash}";
+        var components = Encoding.UTF8.GetBytes(text);
         return Convert.ToHexString(SHA256.HashData(components));
     }
 
     private static async Task<string> ComputeSha256Async(string path, CancellationToken cancellationToken)
     {
+        var before = new FileInfo(path);
+        var length = before.Length;
+        var modified = before.LastWriteTimeUtc;
         await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1024 * 1024, true);
         var hash = await SHA256.HashDataAsync(stream, cancellationToken);
+        before.Refresh();
+        if (before.Length != length || before.LastWriteTimeUtc != modified)
+            throw new IOException("游戏文件在构建核验期间发生变化，请等待更新完成后重新连接。");
         return Convert.ToHexString(hash);
     }
 

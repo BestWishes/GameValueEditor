@@ -23,6 +23,7 @@ public sealed class GameProfile : ObservableObject
     public string ExecutablePath { get => _executablePath; set => SetProperty(ref _executablePath, value); }
     public string ProcessName { get => _processName; set => SetProperty(ref _processName, value); }
     public string ModuleId { get; set; } = string.Empty;
+    public GameIdentityEvidence? Identity { get; set; }
     public string IconFileName { get; set; } = string.Empty;
     public bool IsPinned { get => _isPinned; set { if (SetProperty(ref _isPinned, value)) OnPropertyChanged(nameof(Badges)); } }
     public bool IsLocked { get => _isLocked; set { if (SetProperty(ref _isLocked, value)) OnPropertyChanged(nameof(Badges)); } }
@@ -87,6 +88,7 @@ public sealed class GameVersionProfile : ObservableObject
     public string BuildFingerprint { get; set; } = string.Empty;
     public string GameAssemblySha256 { get; set; } = string.Empty;
     public string MetadataSha256 { get; set; } = string.Empty;
+    public string PackageSha256 { get; set; } = string.Empty;
     public string GameDeclaredVersion { get; set; } = string.Empty;
     public string GameDeclaredProductName { get; set; } = string.Empty;
     public string GameDeclaredBuildGuid { get; set; } = string.Empty;

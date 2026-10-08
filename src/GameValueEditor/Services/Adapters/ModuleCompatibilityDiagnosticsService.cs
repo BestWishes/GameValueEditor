@@ -89,6 +89,8 @@ internal static partial class ModuleCompatibilityDiagnosticsService
         AddHash(items, "组合构建指纹", buildHash);
         AddHash(items, "GameAssembly SHA-256", assemblyHash);
         AddHash(items, "metadata SHA-256", metadataHash);
+        var packageHash = context.Fingerprint?.PackageSha256 ?? version?.PackageSha256 ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(packageHash)) AddHash(items, "游戏包 SHA-256", packageHash);
     }
 
     private static void AddModuleItems(
@@ -336,6 +338,9 @@ internal static partial class ModuleCompatibilityDiagnosticsService
         AddCatalogBuildComparison(items, "metadata 对照",
             context.Fingerprint?.MetadataSha256 ?? version?.MetadataSha256 ?? string.Empty,
             module.CompatibleBuilds.Select(build => build.MetadataSha256), canValidateLocally);
+        AddCatalogBuildComparison(items, "游戏包对照",
+            context.Fingerprint?.PackageSha256 ?? version?.PackageSha256 ?? string.Empty,
+            module.CompatibleBuilds.Select(build => build.PackageSha256), canValidateLocally);
     }
 
     private static void AddCatalogBuildComparison(

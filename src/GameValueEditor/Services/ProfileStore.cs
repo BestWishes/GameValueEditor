@@ -57,15 +57,15 @@ public sealed class ProfileStore
         }
     }
 
-    public Task SaveAsync(LibraryDocument document)
+    public Task SaveAsync(LibraryDocument document, Action? onCommitted = null)
     {
         // Capture on the caller's thread before yielding: UI collections remain mutable.
         var snapshot = JsonSerializer.SerializeToUtf8Bytes(document, _jsonOptions);
         ReadDocument(snapshot);
-        return SaveSnapshotAsync(snapshot);
+        return SaveSnapshotAsync(snapshot, onCommitted);
     }
 
-    private async Task SaveSnapshotAsync(byte[] snapshot)
+    private async Task SaveSnapshotAsync(byte[] snapshot, Action? onCommitted)
     {
         using var gate = await AcquireAsync();
         var tempPath = LibraryPath + $".{Guid.NewGuid():N}.tmp";
@@ -76,11 +76,16 @@ public sealed class ProfileStore
             if (!validPrimary && !validBackup && (File.Exists(LibraryPath) || File.Exists(BackupPath)))
                 throw new InvalidDataException("游戏库没有有效主文件或备份，已拒绝覆盖原资料。");
             await WriteDurableAsync(tempPath, snapshot);
-            if (validPrimary) File.Replace(tempPath, LibraryPath, BackupPath);
+            if (validPrimary)
+            {
+                File.Replace(tempPath, LibraryPath, BackupPath);
+                onCommitted?.Invoke();
+            }
             else
             {
                 // Never copy a damaged primary over the valid recovery source.
                 File.Move(tempPath, LibraryPath, true);
+                onCommitted?.Invoke();
                 if (!validBackup)
                 {
                     var backupTemporary = BackupPath + $".{Guid.NewGuid():N}.tmp";

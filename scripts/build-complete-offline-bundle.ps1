@@ -7,6 +7,9 @@ param(
     [string[]]$ModuleIds = @(),
     [string]$OutputPath = '',
     [string]$ExpectedHostSha256 = '',
+    [string]$LocalHostArchivePath = '',
+    [string[]]$LocalModuleArchivePaths = @(),
+    [string[]]$LocalModuleSha256 = @(),
     [switch]$Force,
     [switch]$VerifyOnly
 )

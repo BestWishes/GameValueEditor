@@ -51,11 +51,23 @@ internal sealed class FieldOperationCoordinator
         {
             internal long Generation;
             internal int Writes;
+            internal readonly SemaphoreSlim Reads = new(1, 1);
         }
         internal sealed class Snapshot(Scope owner, ModuleRevision revision, long generation, bool idleAtStart)
         {
             private bool Current => idleAtStart && revision.Writes == 0 && revision.Generation == generation;
             internal bool IsCurrent { get { lock (owner._sync) return Current; } }
+            internal async Task<T> ReadAsync<T>(Func<T> read, CancellationToken lifetime)
+            {
+                await revision.Reads.WaitAsync(lifetime).ConfigureAwait(false);
+                try
+                {
+                    lifetime.ThrowIfCancellationRequested();
+                    if (!IsCurrent) throw new GameEditorSnapshotChangedException();
+                    return await Task.Run(read, lifetime).ConfigureAwait(false);
+                }
+                finally { revision.Reads.Release(); }
+            }
             internal bool TryApply(Action apply)
             {
                 lock (owner._sync)

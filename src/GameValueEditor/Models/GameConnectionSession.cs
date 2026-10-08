@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using GameValueEditor.ModuleSdk;
 using GameValueEditor.Services;
 using GameValueEditor.Services.Adapters;
+using GameValueEditor.ViewModels;
 
 namespace GameValueEditor.Models;
 
@@ -13,6 +14,12 @@ internal sealed class GameConnectionSession(LogicalGameProcessGroup processGroup
     public Guid? VersionId { get; set; }
     public VersionFingerprint? Fingerprint { get; set; }
     public IGameAdapter? Adapter { get; set; }
+    public long AdapterCheckGeneration { get; set; }
+    public List<AdapterEditorPageState> EditorPages { get; } = [];
+    public string? SelectedEditorId { get; set; }
+    public IGameAdapter? PageAdapter { get; set; }
+    public ProcessItem? PageProcess { get; set; }
+    public string? PageBuild { get; set; }
     public ProcessSpeedService SpeedService { get; set; } = new();
     public bool IsSpeedActive { get; set; }
     public bool IsSpeedOperationRunning { get; set; }

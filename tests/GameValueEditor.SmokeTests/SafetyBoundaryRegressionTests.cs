@@ -393,6 +393,11 @@ internal static class SafetyBoundaryRegressionTests
             typeof(MainViewModel).GetProperty(nameof(MainViewModel.AttachedProcess))!.SetValue(ViewModel, Process);
             SetField("_attachedGameId", game.Id);
             SetField("_attachedFingerprint", new VersionFingerprint("", "", "", "fixture-build", 0, "x64", "fixture-build", "", ""));
+            var session = new GameConnectionSession(new() { SeedProcess = Process, RootProcess = Process, DataProcess = Process,
+                Members = [Process], RuntimeKind = GameRuntimeKind.Native }, game.Id)
+            { VersionId = Version.Id, Fingerprint = new("", "", "", "fixture-build", 0, "x64", "fixture-build", "", "") };
+            var sessions = (Dictionary<Guid, GameConnectionSession>)typeof(MainViewModel).GetField("_sessions", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(ViewModel)!;
+            sessions[game.Id] = session; SetField("_activeSession", session);
         }
 
         internal IReadOnlyList<ScanCandidate> SetCandidates(ulong[] addresses)

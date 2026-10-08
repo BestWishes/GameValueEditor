@@ -309,6 +309,41 @@ function Test-OfflineBundleStartup {
     }
 }
 
+function Assert-OfflineLocalHostEvidence {
+    param([string]$Path, [string]$Root, [string]$Version, [string]$Hash)
+    $resolved = Assert-OfflinePath $Path (Join-Path $Root 'artifacts')
+    if ([IO.Path]::GetFileName($resolved) -cne "GameValueEditor-local-review-v$Version-win-x64.zip" -or
+        $Hash -cnotmatch '^[a-fA-F0-9]{64}$') { throw 'Local host requires a review archive and explicit SHA-256, not a standard release ZIP.' }
+    $noticePath = Assert-OfflinePath (Join-Path ([IO.Path]::GetDirectoryName($resolved)) 'LOCAL-REVIEW.txt') (Join-Path $Root 'artifacts')
+    if (-not [IO.File]::Exists($noticePath) -or (Get-Item -LiteralPath $noticePath).Length -gt 4096) { throw 'Local host is missing its bounded LOCAL-REVIEW evidence.' }
+    $notice = [IO.File]::ReadAllText($noticePath, [Text.Encoding]::UTF8)
+    if (-not $notice.Contains('LOCAL ONLY / NOT A RELEASE.') -or
+        -not $notice.Contains("Version $Version, base commit ") -or
+        $notice -notmatch ('SHA256 ' + [regex]::Escape($Hash) + '\.')) { throw 'Local review evidence does not match the requested host.' }
+    return $resolved
+}
+
+function Get-OfflineLocalModuleSnapshot {
+    param($Source, [string]$Hash, [string]$Schema, $Capability, [string]$Version)
+    if ($Hash -notmatch '^[a-fA-F0-9]{64}$' -or $Source.Hash -ine $Hash) { throw 'Local module SHA-256 mismatch.' }
+    $json = Read-OfflineEntryText $Source 'module.json'
+    Assert-OfflineJsonSchema $json $Schema
+    $manifest = $json | ConvertFrom-Json -AsHashtable
+    Assert-OfflineSegment $manifest.id
+    $null = Assert-OfflineVersion $manifest.version
+    $minimum = Assert-OfflineVersion $manifest.minimumHostVersion
+    $maximum = if ($manifest.maximumHostVersion) { Assert-OfflineVersion $manifest.maximumHostVersion } else { $null }
+    if (-not (Test-OfflineInteger $manifest.hostApiVersion) -or
+        $manifest.hostApiVersion -lt $Capability.MinimumModuleHostApi -or $manifest.hostApiVersion -gt $Capability.MaximumModuleHostApi -or
+        ($maximum -and $maximum -lt $minimum) -or [version]$Version -lt $minimum -or ($maximum -and [version]$Version -gt $maximum)) {
+        throw 'Local module is incompatible with the frozen host.'
+    }
+    Assert-OfflineUnique @($manifest.editors.id) 'local editor ID'
+    $snapshot = @{} + $manifest
+    $snapshot.sha256 = $Source.Hash; $snapshot.sizeBytes = $Source.Stream.Length
+    return $snapshot
+}
+
 function Invoke-OfflineBundle {
     [CmdletBinding()]
     param(
@@ -318,11 +353,19 @@ function Invoke-OfflineBundle {
         [string[]]$ModuleIds = @(),
         [string]$OutputPath = '',
         [string]$ExpectedHostSha256 = '',
+        [string]$LocalHostArchivePath = '',
+        [string[]]$LocalModuleArchivePaths = @(),
+        [string[]]$LocalModuleSha256 = @(),
         [switch]$Force,
         [switch]$VerifyOnly
     )
     $ErrorActionPreference = 'Stop'
     if ($Force -and $VerifyOnly) { throw 'Force and VerifyOnly cannot be combined.' }
+    $localOnly = $LocalHostArchivePath.Length -gt 0 -or $LocalModuleArchivePaths.Count -gt 0
+    if ($LocalModuleArchivePaths.Count -ne $LocalModuleSha256.Count) { throw 'Each local module requires an explicit SHA-256.' }
+    if ($localOnly -and ($Force -or -not $OutputPath -or [IO.Path]::GetFileName($OutputPath) -notmatch '-local-review-')) {
+        throw 'Local review bundles require a unique explicit local-review OutputPath; Force is not allowed.'
+    }
     $root = [IO.Path]::GetFullPath($ApplicationRepository)
     if (-not $ApplicationVersion) {
         $project = [xml](Get-Content -LiteralPath (Join-Path $root 'src/GameValueEditor/GameValueEditor.csproj') -Raw -Encoding UTF8)
@@ -334,6 +377,7 @@ function Invoke-OfflineBundle {
     $dist = Join-Path $root 'dist'
     $artifacts = Join-Path $root 'artifacts'
     $hostPath = Assert-OfflinePath (Join-Path $dist "GameValueEditor-v$ApplicationVersion-win-x64.zip") $dist
+    if ($LocalHostArchivePath) { $hostPath = Assert-OfflineLocalHostEvidence $LocalHostArchivePath $root $ApplicationVersion $ExpectedHostSha256 }
     if (-not $OutputPath) {
         $flavor = if ($ModuleIds.Count -gt 0) { 'selected-offline' } else { 'complete-offline' }
         $OutputPath = Join-Path $dist "GameValueEditor-v$ApplicationVersion-$flavor-win-x64.zip"
@@ -359,7 +403,7 @@ function Invoke-OfflineBundle {
     $catalog = $catalogJson | ConvertFrom-Json -AsHashtable
     $indexRecord = $null
     $indexPath = Join-Path $root 'release-index.json'
-    if ([IO.File]::Exists($indexPath)) {
+    if (-not $LocalHostArchivePath -and [IO.File]::Exists($indexPath)) {
         $index = (Read-OfflineJsonFile $indexPath) | ConvertFrom-Json -AsHashtable
         if (-not (Test-OfflineInteger $index.schemaVersion) -or $index.schemaVersion -ne 1) { throw 'Unknown host release index schema.' }
         $matchesInIndex = @($index.releases | Where-Object { $_.version -ceq $ApplicationVersion })
@@ -395,6 +439,15 @@ function Invoke-OfflineBundle {
             $modules.Add($module)
             $module.Manifest = Assert-OfflineModule $source $snapshot (Join-Path $moduleRoot 'schemas/module.schema.json')
         }
+        for ($index = 0; $index -lt $LocalModuleArchivePaths.Count; $index++) {
+            $localPath = Assert-OfflinePath $LocalModuleArchivePaths[$index] (Join-Path $moduleRoot 'artifacts')
+            $source = Open-OfflineArchive $localPath
+            $module = @{ Source = $source; Snapshot = $null; Manifest = $null }
+            $modules.Add($module)
+            $module.Snapshot = Get-OfflineLocalModuleSnapshot $source $LocalModuleSha256[$index] (Join-Path $moduleRoot 'schemas/module.schema.json') $hostInfo.Capability $ApplicationVersion
+            $module.Manifest = Assert-OfflineModule $source $module.Snapshot (Join-Path $moduleRoot 'schemas/module.schema.json')
+        }
+        Assert-OfflineUnique @($modules.Snapshot.id) 'installed module ID'
         $expected = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
         foreach ($name in $hostInfo.Names) { $expected.Add($name, (Get-OfflineEntryHash $hostSource $name)) }
         foreach ($module in $modules) {
@@ -425,7 +478,8 @@ function Invoke-OfflineBundle {
             }
             $utf8 = [Text.UTF8Encoding]::new($false)
             [IO.File]::WriteAllText((Join-Path $package 'data/modules/installed.json'), (@{ SchemaVersion = 1; Modules = $installed } | ConvertTo-Json -Depth 10), $utf8)
-            $notice = "完整离线包：解压整个 ZIP 后运行 GameValueEditor.exe。`n已预装模块仅支持其声明并经过验证的游戏构建；不会绕过游戏兼容检查。`n未来查新和更新可能需要访问 GitHub。此包仅供本地或 QQ 分发，不是主程序在线更新资产。`n"
+            $notice = "完整离线包：解压整个 ZIP 后运行 GameValueEditor.exe。`n预装模块使用各自的运行时定位方式；名称识别与修改功能支持分开处理，不直接复用历史内存地址。`n未来查新和更新可能需要访问 GitHub。此包仅供本地或 QQ 分发，不是主程序在线更新资产。`n"
+            if ($localOnly) { $notice = "本地测试版 / 未发布：包含未提交代码，不代表同版本正式发布资产，不可上传覆盖正式包。`n源码提交号仅为构建基线。请解压到新目录测试，勿覆盖正在使用的程序。`n" + $notice }
             [IO.File]::WriteAllText((Join-Path $package '完整离线包说明.txt'), $notice, $utf8)
             [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($temporary)) | Out-Null
             $archiveStream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
@@ -442,13 +496,14 @@ function Invoke-OfflineBundle {
             if ((Get-OfflineArchiveHash $source) -cne $source.Hash) { throw 'Source changed during offline packaging.' }
         }
         if ((Get-OfflineArchiveHash $bundle) -cne $bundle.Hash) { throw 'Offline ZIP changed during verification.' }
-        $receiptPath = if (-not $VerifyOnly) { Save-OfflineReceipt $root $bundle $ApplicationVersion $hostInfo $hostSource.Hash $modules ($ModuleIds.Count -eq 0) } else { $null }
-        $freshness = Get-OfflineFreshness $moduleRoot $ApplicationVersion $hostInfo.Capability $modules ($ModuleIds.Count -eq 0)
+        $receiptPath = if (-not $VerifyOnly) { Save-OfflineReceipt $root $bundle $ApplicationVersion $hostInfo $hostSource.Hash $modules ($ModuleIds.Count -eq 0) -LocalOnly:$localOnly } else { $null }
+        $freshness = if ($localOnly) { @{ IsLatest = $null; LatestStatus = 'LocalReview' } } else { Get-OfflineFreshness $moduleRoot $ApplicationVersion $hostInfo.Capability $modules ($ModuleIds.Count -eq 0) }
         $result = [pscustomobject]@{
             ArchivePath = $output; ApplicationVersion = $ApplicationVersion; SourceCommit = $hostInfo.SourceCommit
             HostSha256 = $hostSource.Hash; Sha256 = $bundle.Hash; SizeBytes = $bundle.Stream.Length
             Verified = $true; StartupVerified = $true; Reused = $reused; VerifyOnly = [bool]$VerifyOnly
             IntegrityVerified = $true; ModulesVerified = $true; IsLatest = $freshness.IsLatest; LatestStatus = $freshness.LatestStatus; ReceiptPath = $receiptPath
+            LocalOnly = $localOnly
             Modules = @($modules | ForEach-Object { [pscustomobject]@{ Id = $_.Snapshot.id; Version = $_.Snapshot.version; Sha256 = $_.Source.Hash } })
         }
         Close-OfflineArchive $bundle

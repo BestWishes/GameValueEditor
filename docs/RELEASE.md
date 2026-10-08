@@ -7,7 +7,7 @@ GitHub Actions 不是发布前提。正式版本先完成源码级构建与测�
 ## 1. 验证标准包
 
 ```powershell
-./scripts/verify-release.ps1 -Version 0.5.1
+./scripts/verify-release.ps1 -Version 0.5.2
 ```
 
 记录脚本输出的标准 ZIP 路径与 SHA-256。正式发布版本是独立的十进制计数器：每次只加 `0.0.1`，`0.4.9` 的下一版是 `0.5.0`，`0.9.9` 的下一版是 `1.0.0`。发布脚本从最新正式标签计算唯一下一版本并拒绝跳号；预览标签和 `complete-offline` 完整离线包均不能上传 GitHub Release，完整离线包只供本地或 QQ 分发。Host API 与 Schema 是独立整数协议号，不参与此进位。
@@ -19,6 +19,8 @@ GitHub Actions 不是发布前提。正式版本先完成源码级构建与测�
 v0.5.0 汇总离线打包、下载反馈、模块资料/安装事务、单实例、游戏库结构、通用写入回读、日志及会话生命周期修复，见[历史集成记录](RELEASE_0_5_0_INTEGRATION_REVIEW.md)。该版本配置格式为 7，Host API 为 7，旧版资产不覆盖。
 
 v0.5.1 经用户授权集成此前本地后台操作、字段顺序、共享目标协调、解锁和刷新边界修复，并调整游戏库小图标。Host API 正式升为 8，主程序、更新器及离线核验器版本均为 0.5.1，SDK 两仓源码为 4.0.3（CLR 2.0.0.0）。标准包能力和发布索引最大 API 均为 8；资料 Schema 7、目录 Schema 5 不变。三个新模块分别为 WorldApart 1.3.4、Fzzml 2.1.4、Last Epoch 0.5.5，最低宿主 0.5.1，先发布宿主再发布模块和目录。见[方案与实际复核](RELEASE_0_5_1_INTEGRATION_REVIEW.md)。
+
+v0.5.2 集成用户确认的名称优先识别、启动器通用路由/倍速、页面会话保留/串行读取与本地 review 组合。API/Schema 不变；Last Epoch 0.5.6 使用当前元数据定位，远征 0.0.6 首次正式发布且最低宿主 0.5.2。不问凡尘本轮仅提交问题记录，万里仙途不发新版。发布顺序和实际核验见[本次集成记录](RELEASE_0_5_2_INTEGRATION_REVIEW.md)。
 
 完整冒烟包含扫描读取边界回归，也可运行 `GameValueEditor.SmokeTests.exe --scan-read-only`。扫描变化页使用真实自有 native 区域先红后绿验证，异常枚举/全失败与正常零匹配分别处理；历史间歇失败与确定性缺口的证据边界见[扫描记录](SCAN_RELIABILITY_0_5_0.md)。不得通过跳过断言或无限重跑放行。
 
@@ -35,7 +37,7 @@ v0.5.1 经用户授权集成此前本地后台操作、字段顺序、共享目�
 确认工作树、差异和远端状态后提交，在已验证的提交上创建带注释标签：
 
 ```powershell
-git tag -a v0.5.1 -m "GameValueEditor v0.5.1"
+git tag -a v0.5.2 -m "GameValueEditor v0.5.2"
 ```
 
 发布脚本从 `origin`（或 `-RemoteName` 指定的远端）解析 GitHub 仓库，避免手工填写错误的所有者或仓库名。可用 `-PushRefs` 同时推送当前分支和标签；脚本先使用配置的 Git 远端，HTTPS 失败时自动通过 GitHub SSH 443 重试。
@@ -44,9 +46,9 @@ git tag -a v0.5.1 -m "GameValueEditor v0.5.1"
 
 ```powershell
 ./scripts/publish-github-release.ps1 `
-  -Tag v0.5.1 `
-  -ReleaseName "肝肾大圣 v0.5.1" `
-  -AssetPath ./dist/GameValueEditor-v0.5.1-win-x64.zip `
+  -Tag v0.5.2 `
+  -ReleaseName "肝肾大圣 v0.5.2" `
+  -AssetPath ./dist/GameValueEditor-v0.5.2-win-x64.zip `
   -PushRefs
 ```
 
@@ -68,9 +70,9 @@ git tag -a v0.5.1 -m "GameValueEditor v0.5.1"
 
 ```powershell
 ./scripts/publish-github-release.ps1 `
-  -Tag v0.5.1 `
-  -ReleaseName "肝肾大圣 v0.5.1" `
-  -AssetPath ./dist/GameValueEditor-v0.5.1-win-x64.zip `
+  -Tag v0.5.2 `
+  -ReleaseName "肝肾大圣 v0.5.2" `
+  -AssetPath ./dist/GameValueEditor-v0.5.2-win-x64.zip `
   -VerifyOnly
 ```
 
@@ -89,13 +91,17 @@ git tag -a v0.5.1 -m "GameValueEditor v0.5.1"
 ```powershell
 ./scripts/build-complete-offline-bundle.ps1
 # 版本默认读取宿主项目，也可显式指定；模块仓库可以在别的位置：
-./scripts/build-complete-offline-bundle.ps1 -ApplicationVersion 0.5.1 `
+./scripts/build-complete-offline-bundle.ps1 -ApplicationVersion 0.5.2 `
   -ModuleRepository D:/MyOtherProjects/GameValueEditor-Modules
 ./scripts/build-complete-offline-bundle.ps1 -VerifyOnly
 ./scripts/test-offline-bundle.ps1
 ```
 
 主程序输入固定为 `dist/GameValueEditor-v{version}-win-x64.zip`，必须与本地发布索引的大小/SHA-256、二进制版本/源码提交和能力声明一致。尚未进入索引的独立验证标准 ZIP 可显式提供 `-ExpectedHostSha256`；不能用它绕过已存在的索引记录。不得从正在使用的应用目录或 `artifacts/package` 直接组包，不能复制个人游戏库、存档、缓存或更新事务。
+
+包含未提交源码或尚未发布模块的完整测试包也使用同一入口，但显式指定 `-LocalHostArchivePath <review ZIP>` 与 `-ExpectedHostSha256 <SHA256>`。宿主输入只接受 artifacts 下由 review 工具生成、带同哈希 LOCAL-REVIEW.txt 的六文件包，不接受标准发布 ZIP。本地模块用 `-LocalModuleArchivePaths <ZIP>` 与一一对应的 `-LocalModuleSha256 <SHA256>`，路径限模块 artifacts 下，逐包核验 schema/宿主边界/文件图并实际创建页面；不能与本次已选择的目录模块 ID 重复。测试已发布模块的本地修改时，用 `-ModuleIds` 只选择仍复用的目录模块，再显式加入修改后的本地模块，最终每个 ID 只安装一份；不修改 catalog 或正式 ZIP。
+
+本地模式必须显式提供带 `-local-review-` 的新 `-OutputPath`，不允许 Force；未指定 ModuleIds 时选择全部目录模块，指定时精确选择并由维护者核对最终模块集合。包内说明与 ZIP 外核验记录写入 LocalOnly，源码提交号仅表示构建基线，不宣称工作树已提交；新旧状态为 LocalReview 而非“已是服务器最新”。二次核验仅需同一 OutputPath 加 VerifyOnly，优先使用冻结记录，无须仍保有本地输入。正式发布入口、索引和目录完全不改，不能把该同版本包上传替换正式包。
 
 默认包含每个模块版本列表中与宿主 API 范围和主程序版本边界兼容的最新快照；没有兼容项、缺少本地 ZIP、清单/目录不一致或哈希错误时停止，不能静默漏装。未知目录协议也停止，不自动放宽兼容边界。工具不连接 GitHub；先准备所需模块原始 ZIP，不用应用下载缓存代替。
 

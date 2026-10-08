@@ -631,15 +631,19 @@ public sealed partial class MainViewModel : ObservableObject
     {
         var snapshot = _processService.GetProcesses();
         var group = _processService.ResolveLogicalGame(process, snapshot);
-        var game = ResolveGameForProcess(group.DataProcess);
+        var identity = new GameIdentityEvidenceService().Read(group, snapshot);
+        var game = ResolveGameForProcess(group.DataProcess, new("", "", "", "", 0, "", "", "", "", Identity: identity), group: group);
         if (preferredGame is not null && !ReferenceEquals(game, preferredGame))
-            throw new InvalidOperationException("不能仅凭进程名确认所选游戏，请通过游戏库连接执行构建验证。");
+            throw new InvalidOperationException("所选进程的游戏名称与当前条目不同，请选择该游戏的实际运行进程。");
         AttachCore(process, group, game);
     }
 
     private void AttachCore(ProcessItem process, LogicalGameProcessGroup group, GameProfile? matchingGame)
     {
         var dataProcess = group.DataProcess;
+        using var rootProcess = Process.GetProcessById(group.RootProcess.ProcessId);
+        if (rootProcess.HasExited || rootProcess.StartTime.ToUniversalTime() != group.RootProcess.StartTimeUtc)
+            throw new InvalidOperationException("游戏主进程已经退出或重新启动，请重新选择。");
         using var memory = new ProcessMemoryAccessor(dataProcess.ProcessId);
         memory.EnsureInstance(dataProcess.ProcessId, dataProcess.StartTimeUtc);
         CaptureActiveSession();
@@ -695,16 +699,51 @@ public sealed partial class MainViewModel : ObservableObject
         finally { ReleaseConnectionControlsAfter(cooldown); }
     }
 
-    public async Task AttachSelectedGameAsync()
+    public Task AttachSelectedGameAsync() => AttachSelectedGameWithAssociationAsync(null);
+
+    internal async Task AttachSelectedGameWithAssociationAsync(Func<GameAssociationRequest, ProcessItem?>? confirmAssociation)
     {
         var game = SelectedGame ?? throw new InvalidOperationException("请先选择游戏条目。");
         if (!CanConnectSelectedGame) throw new InvalidOperationException("所选游戏已经连接，或连接操作尚未完成。");
         var cooldown = BeginConnectionControlInteraction();
         try
         {
-            var process = _processService.FindRunningGame(game)
-                          ?? throw new InvalidOperationException("没有找到可确认的游戏进程。若有多个同名程序，请在顶部选择实际游戏进程连接。");
-            await ConnectToProcessAsync(process, game);
+            var operation = CaptureGameOperation();
+            var snapshot = _processService.GetProcesses();
+            var candidates = _processService.FindGameCandidates(game, snapshot, _adapterRegistry.GetGameNames(game.ModuleId));
+            var verified = new List<PreparedGameConnection>();
+            foreach (var candidate in candidates)
+            {
+                PreparedGameConnection prepared;
+                try { prepared = await PrepareGameConnectionAsync(operation, candidate, snapshot); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { continue; }
+                if (!ReferenceEquals(prepared.Game, game)) continue;
+                verified.Add(prepared);
+            }
+            if (verified.Count == 1)
+            {
+                await CompleteGameConnectionAsync(verified[0], game);
+                return;
+            }
+            RequireCurrentGameOperation(operation);
+            if (confirmAssociation is null)
+                throw new InvalidOperationException("没有找到可确认的游戏进程。请从游戏库连接并确认实际进程，或在顶部选择进程连接。");
+            var selected = confirmAssociation(new(game.Name, snapshot, candidates));
+            RequireCurrentGameOperation(operation);
+            if (selected is null) return;
+            if (!Games.Contains(game) || !snapshot.Any(item => item.ProcessId == selected.ProcessId && item.StartTimeUtc == selected.StartTimeUtc))
+                throw new OperationCanceledException("游戏条目或候选进程已失效，请重新选择。");
+            // Re-snapshot after the modal dialog: a PID/ancestor may have been replaced meanwhile.
+            var refreshed = _processService.GetProcesses();
+            var current = refreshed.FirstOrDefault(item => item.ProcessId == selected.ProcessId && item.StartTimeUtc == selected.StartTimeUtc)
+                          ?? throw new InvalidOperationException("所选进程已经退出或重新启动，请重新选择。");
+            var confirmed = await PrepareGameConnectionAsync(operation, current, refreshed);
+            if (confirmed.Game is not null && !ReferenceEquals(confirmed.Game, game))
+                throw new InvalidOperationException($"所选进程已确认属于游戏库中的“{confirmed.Game.Name}”，不会覆盖“{game.Name}”。");
+            if (confirmed.Adapter is not null && !string.IsNullOrWhiteSpace(game.ModuleId) &&
+                game.ModuleId != confirmed.Adapter.Id && !confirmed.Adapter.LegacyIds.Contains(game.ModuleId, StringComparer.Ordinal))
+                throw new InvalidOperationException("所选进程的已验证模块身份与当前游戏不同，不能关联。");
+            await CompleteGameConnectionAsync(confirmed, game);
         }
         finally { ReleaseConnectionControlsAfter(cooldown); }
     }
@@ -741,29 +780,84 @@ public sealed partial class MainViewModel : ObservableObject
     private async Task ConnectToProcessAsync(ProcessItem process, GameProfile? preferredGame = null)
     {
         var operation = CaptureGameOperation();
-        var group = _processService.ResolveLogicalGame(process, _processService.GetProcesses());
+        var prepared = await PrepareGameConnectionAsync(operation, process, _processService.GetProcesses());
+        if (preferredGame is not null && !ReferenceEquals(prepared.Game, preferredGame))
+            throw new InvalidOperationException("候选进程的游戏名称与所选条目不同，请选择实际游戏进程。");
+        await CompleteGameConnectionAsync(prepared, preferredGame ?? prepared.Game);
+    }
+
+    private sealed record PreparedGameConnection(ProcessItem Seed, LogicalGameProcessGroup Group,
+        VersionFingerprint Fingerprint, IGameAdapter? Adapter, GameProfile? Game);
+
+    private async Task<PreparedGameConnection> PrepareGameConnectionAsync(GameOperationContext operation, ProcessItem process,
+        IReadOnlyList<ProcessItem> snapshot)
+    {
+        var group = _processService.ResolveLogicalGame(process, snapshot);
         var fingerprint = await AwaitGameOperationAsync(operation, _fingerprintService.CreateAsync(group.DataProcess.ExecutablePath));
-        var adapter = _adapterRegistry.Resolve(group.DataProcess, fingerprint);
+        var identity = new GameIdentityEvidenceService().Read(group, snapshot);
+        if (fingerprint.Identity?.PackageId != identity.PackageId)
+            throw new IOException("游戏包在识别期间发生变化，请等待更新完成后重新连接。");
+        fingerprint = fingerprint with { Identity = identity };
+        if (fingerprint.PlatformAppId.Length == 0 && identity.PlatformAppId.Length > 0)
+        {
+            var platform = new GameVersionMetadataService().ReadPlatformMetadata(identity.InstallationExecutablePath);
+            fingerprint = fingerprint with { PlatformName = platform.PlatformName, PlatformAppId = platform.AppId,
+                PlatformBuildId = platform.BuildId, PlatformDisplayName = platform.DisplayName };
+        }
+        var game = ResolveGameForProcess(group.DataProcess, fingerprint, group: group);
+        var adapter = await AwaitGameOperationAsync(operation, _adapterRegistry.ResolveAsync(group.DataProcess, fingerprint));
         RequireCurrentGameOperation(operation);
-        var game = ResolveGameForProcess(group.DataProcess, fingerprint, adapter);
-        if (preferredGame is not null && !ReferenceEquals(game, preferredGame))
-            throw new InvalidOperationException("候选进程的路径、已知构建或已验证模块身份无法确认是所选游戏，未更改游戏档案。请在顶部选择实际进程连接。");
-        AttachCore(process, group, game);
-        await MatchAttachedVersionCoreAsync(fingerprint);
+        return new(process, group, fingerprint, adapter, game);
+    }
+
+    private async Task CompleteGameConnectionAsync(PreparedGameConnection prepared, GameProfile? game)
+    {
+        var owner = game is null ? null : _sessions.Values.FirstOrDefault(session => session.GameId != game.Id &&
+            session.ProcessGroup.IsSameInstance(prepared.Group) && Games.Any(profile => profile.Id == session.GameId));
+        if (owner is not null)
+            throw new InvalidOperationException("所选游戏实例已经关联到另一个游戏库条目，不能抢占已有连接。");
+        var checkpoint = game is null ? null : new GameConnectionProfileCheckpoint(game);
+        var durablySaved = false;
+        try
+        {
+            AttachCore(prepared.Seed, prepared.Group, game);
+            await MatchAttachedVersionCoreAsync(prepared.Fingerprint, game, prepared.Adapter, adapterPrepared: true,
+                durableSaveCompleted: () => durablySaved = true);
+        }
+        catch
+        {
+            // A failed durable save must not leave newly learned identity active as if persisted.
+            if (game is not null && !durablySaved)
+            {
+                checkpoint!.Restore();
+                if (_sessions.TryGetValue(game.Id, out var session) && session.ProcessGroup.IsSameInstance(prepared.Group))
+                    DisconnectSession(session, ReferenceEquals(_activeSession, session));
+            }
+            throw;
+        }
     }
 
     public Task MatchAttachedVersionAsync() => MatchAttachedVersionCoreAsync();
 
-    private async Task MatchAttachedVersionCoreAsync(VersionFingerprint? existingFingerprint = null)
+    private async Task MatchAttachedVersionCoreAsync(VersionFingerprint? existingFingerprint = null, GameProfile? associatedGame = null,
+        IGameAdapter? preparedAdapter = null, bool adapterPrepared = false, Action? durableSaveCompleted = null)
     {
         var operation = CaptureGameOperation();
         var process = AttachedProcess ?? throw new InvalidOperationException("游戏进程未连接。");
         var fingerprint = existingFingerprint ?? await AwaitGameOperationAsync(operation, _fingerprintService.CreateAsync(process.ExecutablePath));
+        if (existingFingerprint is null && fingerprint.Identity is not null)
+            fingerprint = fingerprint with { Identity = GameIdentityResolver.Merge(_activeSession?.Fingerprint?.Identity, fingerprint.Identity) };
         RequireCurrentGameOperation(operation);
+        var adapter = adapterPrepared ? preparedAdapter : await AwaitGameOperationAsync(operation, _adapterRegistry.ResolveAsync(process, fingerprint));
+        if (adapter is not null && !ReferenceEquals(_adapterRegistry.FindById(adapter.Id), adapter)) adapter = null;
+        var metadata = await ReadGameDeclaredMetadataAsync(operation, process, adapter);
+        RequireCurrentGameOperation(operation);
+        if (!IsProcessRunning(process)) throw new InvalidOperationException("游戏进程已经退出或重启，请重新连接。");
+        if (adapter is not null && !ReferenceEquals(_adapterRegistry.FindById(adapter.Id), adapter)) adapter = null;
         _attachedFingerprint = fingerprint;
         if (_activeSession is not null) _activeSession.Fingerprint = fingerprint;
-        SetActiveAdapter(_adapterRegistry.Resolve(process, fingerprint));
-        var game = ResolveGameForProcess(process, fingerprint, _activeAdapter);
+        SetActiveAdapter(adapter);
+        var game = associatedGame ?? ResolveGameForProcess(process, fingerprint, _activeAdapter);
         if (game is null)
         {
             SelectedVersion = null;
@@ -795,7 +889,7 @@ public sealed partial class MainViewModel : ObservableObject
         {
             ApplyFingerprint(version, fingerprint);
         }
-        libraryChanged |= ApplyGameDeclaredMetadata(version, process);
+        libraryChanged |= ApplyGameDeclaredMetadata(version, metadata);
         if (_activeAdapter is not null)
         {
             migratedFieldCount += MigrateAdapterFields(game, version, _activeAdapter.Id);
@@ -816,11 +910,16 @@ public sealed partial class MainViewModel : ObservableObject
             game.ProcessName = process.ProcessName;
             libraryChanged = true;
         }
+        libraryChanged |= UpdateGameIdentity(game, fingerprint.Identity);
         game.LastUsedUtc = DateTime.UtcNow;
         game.NotifySummaryChanged();
         GamesView.Refresh();
         operation = CaptureGameOperation();
-        if (libraryChanged) await SaveLibraryAsync();
+        if (libraryChanged)
+        {
+            RefreshLibraryModuleLoadStates();
+            await _profileStore.SaveAsync(_document, durableSaveCompleted);
+        }
         RequireCurrentGameOperation(operation);
         StatusText = migratedFieldCount > 0
             ? $"已识别 {game.Name} 的新构建，并迁移 {migratedFieldCount} 个专属字段"
@@ -844,9 +943,16 @@ public sealed partial class MainViewModel : ObservableObject
     {
         var operation = CaptureGameOperation();
         var fingerprint = existingFingerprint ?? await AwaitGameOperationAsync(operation, _fingerprintService.CreateAsync(process.ExecutablePath));
+        if (existingFingerprint is null && fingerprint.Identity is not null)
+            fingerprint = fingerprint with { Identity = GameIdentityResolver.Merge(_activeSession?.Fingerprint?.Identity, fingerprint.Identity) };
         RequireCurrentGameOperation(operation);
+        var adapter = await AwaitGameOperationAsync(operation, _adapterRegistry.ResolveAsync(process, fingerprint));
+        var metadata = await ReadGameDeclaredMetadataAsync(operation, process, adapter);
+        RequireCurrentGameOperation(operation);
+        if (!IsProcessRunning(process)) throw new InvalidOperationException("游戏进程已经退出或重启，请重新连接。");
+        if (adapter is not null && !ReferenceEquals(_adapterRegistry.FindById(adapter.Id), adapter)) adapter = null;
         _attachedFingerprint = fingerprint;
-        SetActiveAdapter(_adapterRegistry.Resolve(process, fingerprint));
+        SetActiveAdapter(adapter);
         if (_activeSession is not null)
         {
             _activeSession.Fingerprint = fingerprint;
@@ -873,6 +979,7 @@ public sealed partial class MainViewModel : ObservableObject
             game.LastUsedUtc = DateTime.UtcNow;
         }
         game.Name = userName.Trim();
+        UpdateGameIdentity(game, fingerprint.Identity);
         if (_activeAdapter is not null)
         {
             game.ModuleId = _activeAdapter.Id;
@@ -891,7 +998,7 @@ public sealed partial class MainViewModel : ObservableObject
             game.Versions.Add(version);
         }
         else ApplyFingerprint(version, fingerprint);
-        ApplyGameDeclaredMetadata(version, process);
+        ApplyGameDeclaredMetadata(version, metadata);
         if (_activeAdapter is not null) MigrateAdapterFields(game, version, _activeAdapter.Id);
 
         UpdateCurrentVersionMarkers(game, fingerprint.BuildSha256);
@@ -2194,7 +2301,7 @@ public sealed partial class MainViewModel : ObservableObject
             else
             {
                 _adapterRegistry.LoadInstalledModule(module.Id);
-                ReloadAdaptersForSessions();
+                await ReloadAdaptersForSessionsAsync();
             }
             if (game is null)
             {
@@ -2323,6 +2430,7 @@ public sealed partial class MainViewModel : ObservableObject
         foreach (var session in sessions)
         {
             StopSessionLockMaintenance(session);
+            DisposeSessionEditorPages(session);
             session.Adapter = null;
             session.AdapterItems = [];
             session.AdapterCharacters = [];
@@ -2379,6 +2487,7 @@ public sealed partial class MainViewModel : ObservableObject
             {
                 foreach (var session in sessions)
                 {
+                    DisposeSessionEditorPages(session);
                     session.Adapter = null;
                     session.AdapterItems = [];
                     session.AdapterCharacters = [];
@@ -2394,13 +2503,13 @@ public sealed partial class MainViewModel : ObservableObject
                     _moduleRestartRequired = true;
                 }
                 else _adapterRegistry.Deactivate(moduleId);
-                ReloadAdaptersForSessions();
+                await ReloadAdaptersForSessionsAsync();
             }
             catch
             {
                 _moduleCatalogService.RestoreRegistration(removed);
                 _adapterRegistry.LoadInstalledModule(moduleId);
-                ReloadAdaptersForSessions();
+                await ReloadAdaptersForSessionsAsync();
                 throw;
             }
             return await _moduleCatalogService.DeletePackageAsync(moduleId);
@@ -2675,7 +2784,7 @@ public sealed partial class MainViewModel : ObservableObject
         ? _moduleCheckContext!
         : throw new InvalidOperationException("游戏、版本或连接已变化，请重新点击“查新”。");
 
-    private void ReloadAdaptersForSessions()
+    private async Task ReloadAdaptersForSessionsAsync()
     {
         RefreshLibraryModuleLoadStates();
         var sessions = _sessions.Values
@@ -2687,9 +2796,11 @@ public sealed partial class MainViewModel : ObservableObject
         foreach (var session in sessions)
         {
             var previousAdapterId = session.Adapter?.Id;
-            session.Adapter = session.Fingerprint is null
-                ? null
-                : _adapterRegistry.Resolve(session.Process, session.Fingerprint);
+            DisposeSessionEditorPages(session);
+            session.Adapter = null;
+            if (ReferenceEquals(_activeSession, session)) SetActiveAdapter(null);
+            await RefreshSessionAdapterAsync(session);
+            if (_isShuttingDown) return;
             if (string.Equals(previousAdapterId, session.Adapter?.Id, StringComparison.Ordinal)) continue;
             session.AdapterItems = [];
             session.AdapterCharacters = [];
@@ -2719,6 +2830,7 @@ public sealed partial class MainViewModel : ObservableObject
         {
             _activeAdapter = null;
             if (_activeSession is not null) _activeSession.Adapter = null;
+            if (_activeSession is not null) DisposeSessionEditorPages(_activeSession);
             DisposeEditorPages();
             throw;
         }
@@ -2738,14 +2850,32 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void RebuildEditorPages()
     {
-        var selectedEditorId = SelectedAdapterEditorPage?.Descriptor.Id;
+        var session = _activeSession;
+        var selectedEditorId = SelectedAdapterEditorPage is { } selected && session?.EditorPages.Contains(selected) == true
+            ? selected.Descriptor.Id : session?.SelectedEditorId;
+        if (session is not null) session.SelectedEditorId = selectedEditorId;
         DisposeEditorPages();
         _characterEditorPage = null;
         if (_activeAdapter is null)
         {
+            if (session is not null) DisposeSessionEditorPages(session);
             SelectedAdapterEditorPage = null;
             return;
         }
+        if (session is null) throw new InvalidOperationException("模块页面需要游戏连接会话。");
+        session.Adapter = _activeAdapter;
+        if (ReferenceEquals(session.PageAdapter, _activeAdapter) &&
+            SameProcessInstance(session.PageProcess, AttachedProcess) && session.PageBuild == _attachedFingerprint?.BuildSha256)
+        {
+            foreach (var page in session.EditorPages) AdapterEditorPages.Add(page);
+            _characterEditorPage = AdapterEditorPages.OfType<AdapterCharacterEditorPageState>().FirstOrDefault();
+            SelectEditorPage(selectedEditorId);
+            return;
+        }
+        DisposeSessionEditorPages(session);
+        session.PageAdapter = _activeAdapter;
+        session.PageProcess = AttachedProcess;
+        session.PageBuild = _attachedFingerprint?.BuildSha256;
 
         var descriptors = _activeAdapter.Editors.ToDictionary(editor => editor.Id, StringComparer.Ordinal);
         if (_activeAdapter is IGameEditorPageFactoryProvider factory)
@@ -2767,15 +2897,19 @@ public sealed partial class MainViewModel : ObservableObject
                             process.ToModuleContext(),
                             fingerprint.ToModuleIdentity(),
                             new ScopedGameEditorHostServices(host, lifetime.Token,
-                                () => !_isShuttingDown && ReferenceEquals(_activeAdapter, adapter) &&
-                                      ReferenceEquals(AttachedProcess, process) && ReferenceEquals(_attachedFingerprint, fingerprint),
+                                () => !_isShuttingDown && ReferenceEquals(session.Adapter, adapter) &&
+                                      SameProcessInstance(session.Process, process) && session.Fingerprint?.BuildSha256 == fingerprint.BuildSha256 &&
+                                      (ReferenceEquals(_activeSession, session) || _sessions.Values.Contains(session)),
                                 Dispatcher.CurrentDispatcher,
                                 (key, value, validate) => WriteAdapterFieldCoordinatedAsync(process, adapter, scope, key, value, validate),
-                                () => scope.CaptureModuleSnapshot(adapter.Id)),
+                                () => scope.CaptureModuleSnapshot(adapter.Id),
+                                () => ReferenceEquals(_activeSession, session)),
                             lifetime.Token);
                         modulePage = factory.CreateEditorPage(descriptor.Id, context)
                                      ?? throw new InvalidOperationException($"模块页面工厂没有创建 {descriptor.Id}。");
-                        AdapterEditorPages.Add(new AdapterModuleEditorPageState(descriptor, lifetime, modulePage));
+                        var page = new AdapterModuleEditorPageState(descriptor, lifetime, modulePage);
+                        session.EditorPages.Add(page);
+                        AdapterEditorPages.Add(page);
                         modulePage = null;
                     }
                     catch
@@ -2790,12 +2924,11 @@ public sealed partial class MainViewModel : ObservableObject
             }
             catch
             {
+                DisposeSessionEditorPages(session);
                 DisposeEditorPages();
                 throw;
             }
-            SelectedAdapterEditorPage = AdapterEditorPages.FirstOrDefault(page =>
-                                            string.Equals(page.Descriptor.Id, selectedEditorId, StringComparison.Ordinal))
-                                        ?? AdapterEditorPages.FirstOrDefault();
+            SelectEditorPage(selectedEditorId);
             return;
         }
 
@@ -2822,19 +2955,43 @@ public sealed partial class MainViewModel : ObservableObject
                 _ => null
             };
             if (page is null) continue;
+            session.EditorPages.Add(page);
             AdapterEditorPages.Add(page);
             if (page is AdapterCharacterEditorPageState characterPage) _characterEditorPage = characterPage;
         }
+        SelectEditorPage(selectedEditorId);
+    }
+
+    private void SelectEditorPage(string? selectedEditorId) =>
         SelectedAdapterEditorPage = AdapterEditorPages.FirstOrDefault(page =>
                                         string.Equals(page.Descriptor.Id, selectedEditorId, StringComparison.Ordinal))
                                     ?? AdapterEditorPages.FirstOrDefault();
-    }
 
     private void DisposeEditorPages()
     {
+        // Only detach the currently displayed collection. The connection owns its pages.
+        var owned = _sessions.Values.Append(_activeSession).Where(session => session is not null)
+            .SelectMany(session => session!.EditorPages).ToHashSet();
+        var orphaned = AdapterEditorPages.Where(page => !owned.Contains(page)).OfType<IDisposable>().ToArray();
         SelectedAdapterEditorPage = null;
-        var disposablePages = AdapterEditorPages.OfType<IDisposable>().ToArray();
         AdapterEditorPages.Clear();
+        foreach (var page in orphaned)
+        {
+            try { page.Dispose(); }
+            catch (Exception exception) { Debug.WriteLine(exception); }
+        }
+    }
+
+    private static bool SameProcessInstance(ProcessItem? first, ProcessItem? second) =>
+        first is not null && second is not null && first.ProcessId == second.ProcessId && first.StartTimeUtc == second.StartTimeUtc;
+
+    private static void DisposeSessionEditorPages(GameConnectionSession session)
+    {
+        var disposablePages = session.EditorPages.OfType<IDisposable>().ToArray();
+        session.EditorPages.Clear();
+        session.PageAdapter = null;
+        session.PageProcess = null;
+        session.PageBuild = null;
         foreach (var page in disposablePages)
         {
             try { page.Dispose(); }
@@ -3011,6 +3168,7 @@ public sealed partial class MainViewModel : ObservableObject
         session.ScaleMultiplier = ScaleMultiplier;
         session.SpeedMultiplierInput = SpeedMultiplier;
         session.IsSpeedActive = IsSpeedActive;
+        session.SelectedEditorId = SelectedAdapterEditorPage?.Descriptor.Id;
     }
 
     private void ActivateSelectedGameSession(GameProfile? game)
@@ -3102,6 +3260,7 @@ public sealed partial class MainViewModel : ObservableObject
             _scanCancellation?.Cancel();
         }
         StopSessionLockMaintenance(session);
+        DisposeSessionEditorPages(session);
         try { session.SpeedService.DetachSafely(); }
         catch (Exception exception) { Debug.WriteLine(exception); }
         session.SpeedService.Dispose();
@@ -3119,9 +3278,8 @@ public sealed partial class MainViewModel : ObservableObject
         session.SelectedAdapterFieldKey = null;
         session.SelectedCharacterId = null;
         session.SelectedCharacterAttributeKey = null;
-        session.Adapter = session.Fingerprint is null
-            ? null
-            : _adapterRegistry.Resolve(session.Process, session.Fingerprint);
+        session.Adapter = null;
+        _ = RefreshReboundSessionAdapterAsync(session);
 
         if (!wasActive) return;
         var game = session.GameId is Guid gameId ? Games.FirstOrDefault(item => item.Id == gameId) : SelectedGame;
@@ -3134,6 +3292,30 @@ public sealed partial class MainViewModel : ObservableObject
         session.ProcessGroup.Members.Count > 1
             ? $"已连接 · {session.ProcessGroup.RootProcess.ProcessName} · {session.ProcessGroup.Members.Count} 个关联进程 · 数据 PID {session.Process.ProcessId}"
             : $"已连接 · {session.Process.ProcessName} · PID {session.Process.ProcessId}";
+
+    private async Task<bool> RefreshSessionAdapterAsync(GameConnectionSession session)
+    {
+        var generation = ++session.AdapterCheckGeneration;
+        var process = session.Process;
+        var fingerprint = session.Fingerprint;
+        var adapter = fingerprint is null ? null : await _adapterRegistry.ResolveAsync(process, fingerprint);
+        if (_isShuttingDown || generation != session.AdapterCheckGeneration ||
+            !ReferenceEquals(process, session.Process) || !ReferenceEquals(fingerprint, session.Fingerprint) ||
+            !IsProcessRunning(process) ||
+            !ReferenceEquals(_activeSession, session) && !_sessions.Values.Contains(session)) return false;
+        session.Adapter = adapter;
+        return true;
+    }
+
+    private async Task RefreshReboundSessionAdapterAsync(GameConnectionSession session)
+    {
+        try
+        {
+            if (await RefreshSessionAdapterAsync(session) && ReferenceEquals(_activeSession, session))
+                SetActiveAdapter(session.Adapter);
+        }
+        catch (Exception exception) { Debug.WriteLine(exception); }
+    }
 
     private void ClearActiveView(GameProfile? selectedGame)
     {
@@ -3184,6 +3366,7 @@ public sealed partial class MainViewModel : ObservableObject
         try { session.SpeedService.DetachSafely(); }
         finally { session.SpeedService.Dispose(); }
         DisposeSessionScanState(session);
+        DisposeSessionEditorPages(session);
         if (session.GameId is Guid gameId)
         {
             _sessions.Remove(gameId);
@@ -3249,8 +3432,11 @@ public sealed partial class MainViewModel : ObservableObject
                            string.Equals(_adapterRegistry.FindById(item.ModuleId)?.Id, manifest.Id, StringComparison.Ordinal));
             if (game is null)
             {
-                var matches = Games.Where(item => string.IsNullOrWhiteSpace(item.ModuleId) && item.Versions.Any(version =>
-                    manifest.CompatibleBuilds.Any(build => GameIdentityResolver.MatchesInstalledBuild(build, version)))).Take(2).ToArray();
+                var names = new[] { manifest.GameDisplayName }.Concat(manifest.ProcessNames)
+                    .Select(GameIdentityResolver.NormalizeName).Where(name => name.Length > 0).ToHashSet();
+                var matches = Games.Where(item => string.IsNullOrWhiteSpace(item.ModuleId) &&
+                    new[] { item.Name, item.ProcessName, item.Identity?.ProductName ?? "" }
+                        .Select(GameIdentityResolver.NormalizeName).Any(names.Contains)).Take(2).ToArray();
                 if (matches.Length == 1) game = matches[0];
             }
             if (game is null)
@@ -3285,9 +3471,14 @@ public sealed partial class MainViewModel : ObservableObject
         game.Name.Contains(SearchText, StringComparison.CurrentCultureIgnoreCase) ||
         game.ProcessName.Contains(SearchText, StringComparison.OrdinalIgnoreCase);
 
-    private GameProfile? ResolveGameForProcess(ProcessItem process, VersionFingerprint? fingerprint = null, IGameAdapter? adapter = null)
-        => GameIdentityResolver.Resolve(Games, process, fingerprint,
-            adapter is null ? null : new[] { adapter.Id }.Concat(adapter.LegacyIds).ToArray());
+    private GameProfile? ResolveGameForProcess(ProcessItem process, VersionFingerprint? fingerprint = null, IGameAdapter? adapter = null,
+        LogicalGameProcessGroup? group = null)
+    {
+        group ??= SameProcessInstance(_activeSession?.Process, process) ? _activeSession?.ProcessGroup : null;
+        return GameIdentityResolver.Resolve(Games, process, fingerprint,
+            moduleNames: _adapterRegistry.GetGameNames, preferredGame: SelectedGame,
+            runningNames: group is null ? [] : [group.RootProcess.WindowTitle, group.RootProcess.ProcessName]);
+    }
 
     private void BindActiveSessionToGame(GameProfile game)
     {
@@ -3354,6 +3545,7 @@ public sealed partial class MainViewModel : ObservableObject
         version.BuildFingerprint = fingerprint.BuildSha256;
         version.GameAssemblySha256 = fingerprint.GameAssemblySha256;
         version.MetadataSha256 = fingerprint.MetadataSha256;
+        version.PackageSha256 = fingerprint.PackageSha256;
         version.PlatformName = fingerprint.PlatformName;
         version.PlatformAppId = fingerprint.PlatformAppId;
         version.PlatformBuildId = fingerprint.PlatformBuildId;
@@ -3363,26 +3555,44 @@ public sealed partial class MainViewModel : ObservableObject
         version.LastVerifiedUtc = DateTime.UtcNow;
     }
 
-    private bool ApplyGameDeclaredMetadata(GameVersionProfile version, ProcessItem process)
+    private static bool UpdateGameIdentity(GameProfile game, GameIdentityEvidence? evidence)
     {
-        if (_activeAdapter is not IGameVersionMetadataProvider provider) return false;
+        if (evidence is null) return false;
+        var identity = GameIdentityResolver.Merge(game.Identity, evidence);
+        if (Equals(game.Identity, identity)) return false;
+        game.Identity = identity;
+        return true;
+    }
+
+    private async Task<GameDeclaredVersionInfo?> ReadGameDeclaredMetadataAsync(GameOperationContext operation,
+        ProcessItem process, IGameAdapter? adapter)
+    {
+        if (adapter is not IGameVersionMetadataProvider provider) return null;
         try
         {
-            var metadata = provider.ReadGameVersionMetadata(process.ToModuleContext());
-            var changed = !string.Equals(version.GameDeclaredVersion, metadata.Version, StringComparison.Ordinal) ||
-                          !string.Equals(version.GameDeclaredProductName, metadata.ProductName, StringComparison.Ordinal) ||
-                          !string.Equals(version.GameDeclaredBuildGuid, metadata.BuildGuid, StringComparison.Ordinal);
-            version.GameDeclaredVersion = metadata.Version;
-            version.GameDeclaredProductName = metadata.ProductName;
-            version.GameDeclaredBuildGuid = metadata.BuildGuid;
-            version.NotifyChoiceChanged();
-            return changed;
+            var metadata = await AwaitGameOperationAsync(operation, Task.Run(() => provider.ReadGameVersionMetadata(process.ToModuleContext())));
+            return ReferenceEquals(_adapterRegistry.FindById(adapter.Id), adapter) ? metadata : null;
         }
+        catch (OperationCanceledException) { throw; }
         catch
         {
-            // Optional metadata must never prevent connecting to or editing a supported game build.
-            return false;
+            RequireCurrentGameOperation(operation);
+            // Optional metadata must never prevent connecting to a supported build.
+            return null;
         }
+    }
+
+    private static bool ApplyGameDeclaredMetadata(GameVersionProfile version, GameDeclaredVersionInfo? metadata)
+    {
+        if (metadata is null) return false;
+        var changed = !string.Equals(version.GameDeclaredVersion, metadata.Version, StringComparison.Ordinal) ||
+                      !string.Equals(version.GameDeclaredProductName, metadata.ProductName, StringComparison.Ordinal) ||
+                      !string.Equals(version.GameDeclaredBuildGuid, metadata.BuildGuid, StringComparison.Ordinal);
+        version.GameDeclaredVersion = metadata.Version;
+        version.GameDeclaredProductName = metadata.ProductName;
+        version.GameDeclaredBuildGuid = metadata.BuildGuid;
+        version.NotifyChoiceChanged();
+        return changed;
     }
 
     private static IEnumerable<SavedField> CloneAdapterFields(GameVersionProfile source, string adapterId) =>
@@ -3827,6 +4037,7 @@ public sealed partial class MainViewModel : ObservableObject
             Cleanup(() => StopSessionLockMaintenance(session));
             Cleanup(session.SpeedService.Dispose);
             Cleanup(() => DisposeSessionScanState(session));
+            Cleanup(() => DisposeSessionEditorPages(session));
         }
         _sessions.Clear();
         _activeAdapter = null;
