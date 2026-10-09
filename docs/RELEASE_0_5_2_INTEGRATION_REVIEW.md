@@ -47,3 +47,11 @@
 正式输入的完整离线包只留本地：`dist/GameValueEditor-v0.5.2-complete-offline-win-x64.zip`，98,469,164 字节，SHA-256 `88201849676BF059D805836AC37F5F399F6D2FA9FB419DDFE4BA71F84138D0DC`。包含主程序 0.5.2 / API 8，`game.fzzml` 2.1.4、`game.worldapart` 1.3.4、`game.last-epoch` 0.5.6、`game.play-again-expedition` 0.0.6。文件完整性、实际 DLL/页面、EXE 启动、冻结记录 VerifyOnly 均通过，损坏 DLL/错误页面登记两项负向集成被正确拒绝。工具的 LocalOnly=false 表示使用正式输入而非 review，并不表示离线 ZIP 上传了 GitHub；GitHub 主程序 Release 仍只有标准六文件 ZIP。
 
 旧完整测试 ZIP 的 SHA-256 仍为 `CEBDD98CE05E5114D75EC6DCFD3691443B18E3BA2A6AC5622639247CB4F47CA7`，没有覆盖。默认离线核验版本同步为 0.5.2；资产后的文档/工具提交不改变已冻结二进制源码号。未修改用户当前安装、游戏文件、启动设置或存档，也没有关机。
+
+## 2026-10-09 后续两模块发布的测试同步
+
+放置斩魔录 2.1.5 / 不问凡尘 1.3.5 改为名称识别和当前 IL2CPP 元数据定位，主程序生产代码和 SDK 未改，也不重建或发布主程序 0.5.2 资产。原宿主测试仍断言未知哈希或旧人物构建必须被拒绝，首次正式包集成检查因此停止，尚未上传模块。
+
+`StabilityRegressionTests.CheckModuleBuildDiagnostics` 已同步新规则：使用包内清单的进程别名和临时空运行库夹具，不再硬编码这两个游戏的历史哈希、游戏 ID 或旧诊断文本；检查名字相同而文件哈希变化仍归属同一游戏、无关进程被拒绝、静态诊断不把页面注册当成实机可用，以及真实读取不能对不存在的进程执行。夹具与检查只运行在测试目录，不访问原游戏或存档。
+
+正式模块资产、重跑集成检查及新完整离线包结果由模块仓库 `docs/RELEASE_FZZML_2_1_5_WORLDAPART_1_3_5.md` 记录。主程序仓库后续提交仅包含上述文档纠正与测试同步。

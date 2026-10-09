@@ -24,7 +24,7 @@ internal static class StabilityRegressionTests
         foreach (var scenario in new[] { "other-game", "return-game", "other-version", "reset", "disconnect", "shutdown" })
             CheckCompletedScanSwitch(Path.Combine(root, "stale-scan-" + scenario), scenario);
         await CheckCompatibilityAndRecoveryAsync(Path.Combine(root, "compatibility"));
-        CheckModuleBuildDiagnostics(args);
+        CheckModuleBuildDiagnostics(Path.Combine(root, "module-diagnostics"), args);
         Console.WriteLine("Stability regressions passed: stale operations, exact numeric encoding, scan identity/lease, durable storage, recovery gates and apply-time compatibility.");
     }
 
@@ -266,7 +266,7 @@ internal static class StabilityRegressionTests
         Check(!Directory.Exists(transaction) && !File.Exists(service.RecoveryRequiredPath), "Committed residue incorrectly blocked startup");
     }
 
-    private static void CheckModuleBuildDiagnostics(string[] args)
+    private static void CheckModuleBuildDiagnostics(string root, string[] args)
     {
         foreach (var path in args.Where(arg => arg.StartsWith("--verify-module-package=", StringComparison.Ordinal)).Select(arg => arg["--verify-module-package=".Length..]))
         {
@@ -278,12 +278,31 @@ internal static class StabilityRegressionTests
             if (type is null) continue;
             var adapter = (IGameAdapter)Activator.CreateInstance(type)!;
             var context = new GameProcessContext(int.MaxValue, "fixture", "missing.exe", DateTime.UtcNow);
-            if (adapter.Id == "game.worldapart")
+            var unknown = new GameBuildIdentity("unknown", "", "unknown", "unknown");
+            Check(!adapter.Supports(context, unknown), "Module accepts an unrelated process: " + adapter.Id);
+            if (assembly.GetType("GameValueEditor.Modules.Runtime.Il2CppRuntimeResolver") is not null)
             {
-                Check(!adapter.Supports(context, new GameBuildIdentity("unknown", "", "unknown", "unknown")), "WorldApart accepts unknown runtime pair");
-                Check(adapter.Supports(context, new GameBuildIdentity("changed-launcher", "", "EDE8A956051C0C831F79E0874AFF28297F41D3FA18C18AD2CA2FF16C33D0938D", "BBECA25F98CFC56BFE48A5BD6DC90B9AADFEB1A6BB8F0DC03CA8DA2EF26DBDBC")), "Known WorldApart runtime pair rejected after launcher-only change");
-                Check(!adapter.Supports(context, new GameBuildIdentity("changed-launcher", "", "E4BFA837BD5F43BF5FFBE3E28C80B40CD3E20B24CE63941CE2280874DF2FA056", "BBECA25F98CFC56BFE48A5BD6DC90B9AADFEB1A6BB8F0DC03CA8DA2EF26DBDBC")), "Cross-build runtime pair accepted");
-                try { ((IInventoryGameAdapter)adapter).ReadInventory(context); throw new Exception("WorldApart direct entry accepted an invalid process"); }
+                using var manifestSource = zip.GetEntry("module.json")!.Open();
+                using var manifest = JsonDocument.Parse(manifestSource);
+                Check(manifest.RootElement.GetProperty("supportsUnlistedBuildValidation").GetBoolean(),
+                    "Current-metadata module is not declared for small updates");
+                var name = manifest.RootElement.GetProperty("processNames")[0].GetString()!;
+                var directory = Path.Combine(root, Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(directory);
+                File.WriteAllBytes(Path.Combine(directory, "GameAssembly.dll"), []);
+                var named = context with { ProcessName = name, ExecutablePath = Path.Combine(directory, name + ".exe") };
+                // Identity is a cheap name check. This fixture is not a live process,
+                // and must never be treated as evidence that data is safe to read/write.
+                foreach (var identity in new[] { unknown, new GameBuildIdentity("changed-exe", "", "changed-assembly", "changed-metadata") })
+                    Check(adapter.Supports(named, identity), "Named small update rejected by historical hashes: " + adapter.Id);
+                foreach (var identity in new[] { unknown, new GameBuildIdentity("changed-exe", "", "changed-assembly", "changed-metadata") })
+                {
+                    var diagnostics = ((IGameCompatibilityDiagnosticsProvider)adapter).GetCompatibilityDiagnostics(named, identity);
+                    Check(diagnostics.Any(item => item.Status == GameCompatibilityDiagnosticStatus.Information) &&
+                          !diagnostics.Any(item => item.Status == GameCompatibilityDiagnosticStatus.Failed),
+                        "Static diagnostics reject a small update or assert all runtime data was validated");
+                }
+                try { ((IInventoryGameAdapter)adapter).ReadInventory(named); throw new Exception("Direct entry accepted a nonexistent process"); }
                 catch (ArgumentException) { }
                 catch (InvalidOperationException) { }
             }
@@ -294,12 +313,6 @@ internal static class StabilityRegressionTests
                     .Invoke(null, [items, adapter, new ProcessItem { ProcessId = int.MaxValue }]);
                 Check(items.Count == adapter.Editors.Count && items.All(item => item.Status == GameCompatibilityDiagnosticStatus.Information),
                     "Host reports self-owned page registration as runtime compatibility");
-            }
-            if (adapter.Id == "game.fzzml")
-            {
-                var identity = new GameBuildIdentity("8B476C50395ACF8B4BD32E3DB60E29AC136436A5FADAB0E8D0049CA87CE3AACD", "", "CEC90FD2CCEEBD51637BFAC90C86C6E45D68CC76E6FDB0FAB1430F2A198D7421", "EB4D7A29675EC35CDE1106D6AE3C0E22BCA0AEF5C50248C2D42FA139077E446F");
-                var diagnostics = ((IGameCompatibilityDiagnosticsProvider)adapter).GetCompatibilityDiagnostics(context, identity);
-                Check(diagnostics.Any(item => item.DisplayName == "人物属性构建支持" && item.Status == GameCompatibilityDiagnosticStatus.Warning), "Fzzml old build falsely reports character page compatible");
             }
         }
     }
