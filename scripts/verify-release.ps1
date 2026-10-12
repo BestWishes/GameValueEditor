@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidatePattern('^(0|[1-9][0-9]*)\.[0-9]\.[0-9]$')] [string]$Version = "0.5.2"
+    [ValidatePattern('^(0|[1-9][0-9]*)\.[0-9]\.[0-9]$')] [string]$Version = "0.5.3"
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,6 +8,7 @@ $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $archivePath = Join-Path $repoRoot "dist\GameValueEditor-v$Version-win-x64.zip"
 
 & (Join-Path $repoRoot "scripts\test-release-retention.ps1")
+& (Join-Path $repoRoot "scripts\test-release-infrastructure.ps1")
 & (Join-Path $repoRoot "scripts\test-application-package.ps1")
 & (Join-Path $repoRoot "scripts\test-offline-bundle.ps1")
 

@@ -154,21 +154,21 @@ public sealed class GameModuleCatalogService
                     ? "服务器暂无适用于当前游戏的专属模块。"
                     : $"服务器有当前游戏的专属模块，但没有兼容主程序 v{_currentHostVersion} 与 Host API {ModuleHostApi.CurrentVersion} 的版本。");
 
-        var exactCandidates = hostCompatibleCandidates.Where(module => MatchesBuild(module, buildFingerprint,
-                executableSha256, gameAssemblySha256, metadataSha256, packageSha256))
+        // A recorded build is evidence, not a reason to hide a newer runtime-resolving
+        // release. Downloads, updates and manual rollback use the same eligible set.
+        var candidates = hostCompatibleCandidates.Where(module =>
+                MatchesBuild(module, buildFingerprint, executableSha256, gameAssemblySha256,
+                    metadataSha256, packageSha256) ||
+                module.SupportsUnlistedBuildValidation && module.HostApiVersion >= 5)
             .ToList();
-        var exactBuildMatch = exactCandidates.Count > 0;
-        var candidates = exactBuildMatch
-            ? exactCandidates
-            : hostCompatibleCandidates
-                .Where(module => module.SupportsUnlistedBuildValidation && module.HostApiVersion >= 5)
-                .ToList();
         if (candidates.Count == 0)
             return new GameModuleCheckResult(GameModuleAvailability.NotAvailable, null, null,
                 "服务器有当前游戏的专属模块，但没有精确兼容当前构建的版本，模块也未声明可对未知构建执行本地安全验证。",
                 CatalogReferenceModule: hostCompatibleCandidates[0]);
 
         var compatible = candidates[0];
+        var exactBuildMatch = MatchesBuild(compatible, buildFingerprint, executableSha256,
+            gameAssemblySha256, metadataSha256, packageSha256);
         candidates = candidates.Where(module => string.Equals(module.Id, compatible.Id, StringComparison.Ordinal))
             .ToList();
 
@@ -181,9 +181,7 @@ public sealed class GameModuleCatalogService
                 exactBuildMatch, CatalogReferenceModule: compatible);
         var installedVersion = ParseVersion(installed.Version);
         var updateTarget = candidates.FirstOrDefault(module => ParseVersion(module.Version).CompareTo(installedVersion) > 0);
-        var rollbackTarget = exactBuildMatch
-            ? candidates.FirstOrDefault(module => ParseVersion(module.Version).CompareTo(installedVersion) < 0)
-            : null;
+        var rollbackTarget = candidates.FirstOrDefault(module => ParseVersion(module.Version).CompareTo(installedVersion) < 0);
         if (updateTarget is not null)
         {
             var updateExact = MatchesBuild(updateTarget, buildFingerprint, executableSha256,
@@ -198,6 +196,8 @@ public sealed class GameModuleCatalogService
         var currentEntry = candidates.FirstOrDefault(module =>
                                ParseVersion(module.Version).CompareTo(installedVersion) == 0)
                            ?? compatible;
+        exactBuildMatch = MatchesBuild(currentEntry, buildFingerprint, executableSha256,
+            gameAssemblySha256, metadataSha256, packageSha256);
         var rollbackSuffix = rollbackTarget is null ? string.Empty : $"；可手动回退到 v{rollbackTarget.Version}";
         return new GameModuleCheckResult(GameModuleAvailability.Current, currentEntry, installed,
             exactBuildMatch

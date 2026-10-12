@@ -22,7 +22,9 @@
 
 一个面向 Windows 离线单机游戏的本地数值扫描与管理工具。它不仅保存临时地址，还把玩家确认过的字段整理到按游戏、按版本隔离的本地游戏库中。
 
-> 最新版本：`v0.5.2`。项目只发布正式版本，不再设置预览版更新通道。
+> 最新版本：`v0.5.3`。项目只发布正式版本，不再设置预览版更新通道。
+
+v0.5.3 修复专属模块更新和手动回退的候选排序：旧构建精确匹配不再遮挡能动态解析小更新的新版，未登记构建也能从可用候选中手动回退。远征正式版 0.1.2 承接已交付的 0.0.7～0.1.1；本地交付与正式标签统一计数，禁止编号倒退。发布工具保留旧包、拒绝覆盖，目录/文档提交后仍能校验来源并补传原资产。Host API 8 不变。见[详细方案与三遍复核](docs/RELEASE_0_5_3_PLAN.md)。
 
 v0.5.2 汇总已测试的名称优先识别、通用启动器路由/倍速、专属页面会话保留和串行刷新。小更新不会因哈希变化把同名游戏变成另一个游戏；构建仍隔离旧地址，游戏专属动态定位留在模块中。Host API 8 不变，远征正式模块要求至少 0.5.2。见[发布集成方案与复核](docs/RELEASE_0_5_2_INTEGRATION_REVIEW.md)。
 
@@ -160,7 +162,7 @@ dotnet run --project tests/GameValueEditor.SmokeTests/GameValueEditor.SmokeTests
 验证最终 ZIP 中的程序能够正常启动：
 
 ```powershell
-./scripts/test-package-startup.ps1 -ArchivePath ./dist/GameValueEditor-v0.5.2-win-x64.zip
+./scripts/test-package-startup.ps1 -ArchivePath ./dist/GameValueEditor-v0.5.3-win-x64.zip
 ```
 
 官方游戏模块已迁移到独立仓库。在相邻目录克隆模块中心后，可按游戏目录名构建任意模块：
@@ -189,7 +191,7 @@ cd ../GameValueEditor-Modules
 完整的正式版验证使用本地脚本执行，不依赖 GitHub Actions：
 
 ```powershell
-./scripts/verify-release.ps1 -Version 0.5.2
+./scripts/verify-release.ps1 -Version 0.5.3
 ```
 
 该脚本依次执行 Release 构建、烟雾测试、自包含打包、发布包启动验证和更新器回滚验证。验证完成后使用 `scripts/publish-github-release.ps1` 推送标签、创建或恢复 GitHub Release、显示资产上传进度并校验线上 SHA-256；脚本支持显式代理、环境变量代理和 Windows 系统代理，具体见 [本地发布流程](docs/RELEASE.md)。

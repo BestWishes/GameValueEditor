@@ -139,7 +139,8 @@ if (args.FirstOrDefault(arg => arg.StartsWith("--instance-lease-target=", String
 if (args.Contains("--module-reliability-only", StringComparer.Ordinal) || args.Contains("--safety-boundaries-only", StringComparer.Ordinal) ||
     args.Contains("--game-lifecycle-only", StringComparer.Ordinal) || args.Contains("--background-boundaries-only", StringComparer.Ordinal) ||
     args.Contains("--field-order-only", StringComparer.Ordinal) || args.Contains("--shared-field-only", StringComparer.Ordinal) ||
-    args.Contains("--game-recognition-only", StringComparer.Ordinal) || args.Contains("--page-sessions-only", StringComparer.Ordinal))
+    args.Contains("--game-recognition-only", StringComparer.Ordinal) || args.Contains("--page-sessions-only", StringComparer.Ordinal) ||
+    args.Contains("--module-catalog-only", StringComparer.Ordinal))
 {
     await ModuleLifecycleRegressionTests.RunAsync(args);
     return 0;
@@ -885,8 +886,8 @@ try
             Path.Combine(serviceTestRoot, "modules-exact-priority"), exactPriorityClient);
         var exactPriorityResult = await exactPriorityService.CheckAsync("PriorityGame", transientFingerprint);
         Assert(exactPriorityResult.Availability == GameModuleAvailability.Available &&
-               exactPriorityResult.RemoteModule?.Version == "1.0.0" && exactPriorityResult.IsExactBuildMatch,
-            "A newer unlisted-build fallback displaced an older exact build candidate");
+               exactPriorityResult.RemoteModule?.Version == "1.1.0" && !exactPriorityResult.IsExactBuildMatch,
+             "An older exact build candidate hid a newer runtime-resolving release");
 
         var steamApps = Path.Combine(serviceTestRoot, "Steam", "steamapps");
         var steamGameDirectory = Path.Combine(steamApps, "common", "A1");

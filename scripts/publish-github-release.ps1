@@ -41,6 +41,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'release-ref-validation.ps1')
 
 if ($DisableProxy -and -not [string]::IsNullOrWhiteSpace($ProxyUrl)) {
     throw 'ProxyUrl and DisableProxy cannot be used together.'
@@ -225,20 +226,7 @@ function Resolve-GitHubRepository {
 }
 
 function Assert-LocalReleaseRefs {
-    $branchRef = "refs/heads/$TargetCommitish"
-    $tagRef = "refs/tags/$Tag"
-    $branchCommit = (& git rev-parse --verify "$branchRef^{commit}").Trim()
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($branchCommit)) {
-        throw "Local branch does not exist: $TargetCommitish"
-    }
-    $tagType = (& git cat-file -t $tagRef).Trim()
-    if ($LASTEXITCODE -ne 0 -or $tagType -ne 'tag') {
-        throw "Local tag $Tag must be an annotated tag."
-    }
-    $tagCommit = (& git rev-list -n 1 $tagRef).Trim()
-    if ($LASTEXITCODE -ne 0 -or $tagCommit -ne $branchCommit) {
-        throw "Local tag $Tag does not point to $TargetCommitish."
-    }
+    Assert-AnnotatedReleaseAncestry -RepositoryRoot $repoRoot -Tag $Tag -TargetCommitish $TargetCommitish
 }
 
 function Push-ReleaseRefs {
@@ -293,6 +281,7 @@ if ($tagResponse.Status -eq 404) {
 if ($tagResponse.Status -ne 200) {
     throw "Unable to read remote tag $Tag (HTTP $($tagResponse.Status))."
 }
+Assert-MatchingRemoteReleaseTag -RepositoryRoot $repoRoot -Tag $Tag -RemoteObject $tagResponse.Body.object
 
 $releaseResponse = Invoke-GitHubApi -Method Get -Uri "$apiRoot/releases/tags/$encodedTag" -Headers $headers
 if ($releaseResponse.Status -eq 404) {

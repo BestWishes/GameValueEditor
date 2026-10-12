@@ -1,16 +1,16 @@
 # 本地发布流程
 
-GitHub Actions 不是发布前提。正式版本先完成源码级构建与测试并经过复核，然后提交源码；最终发布包必须从干净的已提交工作树重新构建和验证，再推送指向同一提交的带注释标签并上传不可变资产。二进制 `ProductVersion` 中的源码提交号必须等于 `HEAD`。
+GitHub Actions 不是发布前提。正式版本先完成源码级构建与测试并经过复核，然后提交源码；最终发布包必须从干净的已提交工作树重新构建和验证，再推送指向该源码提交的带注释标签并上传不可变资产。构建时二进制 `ProductVersion` 中的源码提交号必须等于 `HEAD`；补传时必须等于标签提交。目录/文档提交可以推进 main，但标签提交必须仍在目标分支历史内，远端注释标签对象必须与本地一致；不要求补传时标签等于 main 最新提交。
 
 递增版本时须同步主程序、更新器和 `tests/GameValueEditor.SmokeTests/GameValueEditor.SmokeTests.csproj` 的项目版本，以及正式入口默认版本和当前文档示例。离线页面核验报告读取测试入口程序集版本，未同步核验器版本会安全拒绝组包；历史升级场景的夹具版本不随当前版本机械替换。
 
 ## 1. 验证标准包
 
 ```powershell
-./scripts/verify-release.ps1 -Version 0.5.2
+./scripts/verify-release.ps1 -Version 0.5.3
 ```
 
-记录脚本输出的标准 ZIP 路径与 SHA-256。正式发布版本是独立的十进制计数器：每次只加 `0.0.1`，`0.4.9` 的下一版是 `0.5.0`，`0.9.9` 的下一版是 `1.0.0`。发布脚本从最新正式标签计算唯一下一版本并拒绝跳号；预览标签和 `complete-offline` 完整离线包均不能上传 GitHub Release，完整离线包只供本地或 QQ 分发。Host API 与 Schema 是独立整数协议号，不参与此进位。
+记录脚本输出的标准 ZIP 路径与 SHA-256。主程序和每个模块是独立的十进制计数器：每次只加 `0.0.1`，`0.4.9` 的下一版是 `0.5.0`，`0.9.9` 的下一版是 `1.0.0`。发布脚本合并正式标签与可选 `delivery-versions.json` 中已交付的本地版本，计算唯一下一版本并拒绝跳号、倒退及复用已交付编号；历史本地证据不伪造成正式标签。已有标签的复核/补传仍允许，不能改包字节。预览标签和 `complete-offline` 完整离线包均不能上传 GitHub Release，完整离线包只供本地或 QQ 分发。Host API 与 Schema 是独立整数协议号，不参与此进位。
 
 `publish.ps1` 要求 PowerShell 7.4+，调用共享 `application-package.ps1` 在独立工作目录生成候选包，严格验证六个标准文件、二进制版本/提交、真实启动和候选更新器后才原子提升。已有同名 ZIP 不覆盖；构建或验证失败不删除任何旧包，成功也不顺手删除其他本地 ZIP。服务器三个版本的保留策略仍由后续保留脚本执行。`test-application-package.ps1` 覆盖这些失败边界并已接入正式验证入口。
 
@@ -37,7 +37,7 @@ v0.5.2 集成用户确认的名称优先识别、启动器通用路由/倍速、
 确认工作树、差异和远端状态后提交，在已验证的提交上创建带注释标签：
 
 ```powershell
-git tag -a v0.5.2 -m "GameValueEditor v0.5.2"
+git tag -a v0.5.3 -m "GameValueEditor v0.5.3"
 ```
 
 发布脚本从 `origin`（或 `-RemoteName` 指定的远端）解析 GitHub 仓库，避免手工填写错误的所有者或仓库名。可用 `-PushRefs` 同时推送当前分支和标签；脚本先使用配置的 Git 远端，HTTPS 失败时自动通过 GitHub SSH 443 重试。
@@ -46,9 +46,9 @@ git tag -a v0.5.2 -m "GameValueEditor v0.5.2"
 
 ```powershell
 ./scripts/publish-github-release.ps1 `
-  -Tag v0.5.2 `
-  -ReleaseName "肝肾大圣 v0.5.2" `
-  -AssetPath ./dist/GameValueEditor-v0.5.2-win-x64.zip `
+  -Tag v0.5.3 `
+  -ReleaseName "肝肾大圣 v0.5.3" `
+  -AssetPath ./dist/GameValueEditor-v0.5.3-win-x64.zip `
   -PushRefs
 ```
 
@@ -70,9 +70,9 @@ git tag -a v0.5.2 -m "GameValueEditor v0.5.2"
 
 ```powershell
 ./scripts/publish-github-release.ps1 `
-  -Tag v0.5.2 `
-  -ReleaseName "肝肾大圣 v0.5.2" `
-  -AssetPath ./dist/GameValueEditor-v0.5.2-win-x64.zip `
+  -Tag v0.5.3 `
+  -ReleaseName "肝肾大圣 v0.5.3" `
+  -AssetPath ./dist/GameValueEditor-v0.5.3-win-x64.zip `
   -VerifyOnly
 ```
 
@@ -84,6 +84,8 @@ git tag -a v0.5.2 -m "GameValueEditor v0.5.2"
 
 主程序和各模块的版本号独立；兼容关系不靠版本号相等，而由主程序索引中的 Host API 范围，以及模块发布快照中的 `hostApiVersion`、`minimumHostVersion`、`maximumHostVersion` 共同确定。应用中的“回退”始终由用户显式确认；保留脚本和检查版本流程都不得触发自动回退。
 
+模块查新、更新、回退共用按版本降序排列的可用候选：先筛选宿主/API，再保留精确构建匹配或声明动态解析能力的包。精确匹配旧包不优先于动态新版，手动回退也不要求整个游戏必须存在精确匹配包。未知构建的实际字段/方法解析仍由模块负责；没有动态解析声明的未知旧包不开放。定向回归可运行 `GameValueEditor.SmokeTests.exe --module-catalog-only`；版本/标签负向回归为 `scripts/test-release-infrastructure.ps1`。
+
 ## 本地完整离线包（不要求提交或发布）
 
 这是组合已有已验证产物的独立流程，不重新编译应用、不提升版本、不提交、推送、打标签、上传或清理 GitHub。要求 PowerShell 7.4+，首次组包需要主程序仓库 `dist` 中已有标准 ZIP，相邻模块仓库包含当前 Schema 5 目录、本地 JSON Schema 和目录引用的模块 ZIP。先用 `dotnet build GameValueEditor.sln -c Release` 准备与目标宿主语义版本一致的模块页面核验器；组合命令本身不会隐式构建或下载依赖。
@@ -91,7 +93,7 @@ git tag -a v0.5.2 -m "GameValueEditor v0.5.2"
 ```powershell
 ./scripts/build-complete-offline-bundle.ps1
 # 版本默认读取宿主项目，也可显式指定；模块仓库可以在别的位置：
-./scripts/build-complete-offline-bundle.ps1 -ApplicationVersion 0.5.2 `
+./scripts/build-complete-offline-bundle.ps1 -ApplicationVersion 0.5.3 `
   -ModuleRepository D:/MyOtherProjects/GameValueEditor-Modules
 ./scripts/build-complete-offline-bundle.ps1 -VerifyOnly
 ./scripts/test-offline-bundle.ps1
