@@ -35,3 +35,17 @@
 - 标准包 `GameValueEditor-v0.5.3-win-x64.zip`：98,135,923 字节；SHA-256 `35DAD35A0F6C2ADFEDD9B43F4AD69D6AB730DB69D12153F61E80CE06F8A8582F`。
 - 远征 `GameValueEditor.Module.PlayAgainExpedition-v0.1.2.zip`：221,893 字节；SHA-256 `BA49547B89EC5F634D3585654F3C925E2A3B471EB513AEAF144C45B49BC1F4F2`；源码提交 `efe2dd2407ba0e953b35a60c6363f23c1c6bce0d`。
 - 原主程序 0.5.2、远征 0.0.7 和另外三个原正式模块包的散列与发布前基线一致，未被覆盖或删除。
+
+## 发布后复验与交付
+
+2026-10-12 实际结果：
+
+- [主程序 0.5.3](https://github.com/BestWishes/GameValueEditor/releases/tag/v0.5.3) 和 [远征 0.1.2](https://github.com/BestWishes/GameValueEditor-Modules/releases/tag/play-again-expedition-v0.1.2) 都通过代理上传，独立 `VerifyOnly` 返回 `Verified=true`；线上大小/SHA-256 等于上述正式构建。只上传标准主程序 ZIP 和两文件模块 ZIP。
+- 注释标签指向二进制源码提交。上传前先推送构建证据文档，main 已不同于标签；上传成功。随后主程序索引提交 `9377bd5`、模块目录提交 `a6ce9b0` 推进 main，再执行同一发布入口成功复用既有资产，没有重复上传或覆盖。两个真实流程均验证祖先标签补传修复，而不只依赖隔离模拟。
+- 已读取公开 raw 索引/目录，与本地完整结构相同。索引为 0.5.3/0.5.2/0.5.1；远征快照为 0.1.2/0.0.7/0.0.6，其余三个模块条目与发布前逐项相同。带目录 `verify-release.ps1 -VerifyReleasedVersions` 完整通过：四模块编译、源/目录约束、全部宿主冒烟及原正式 ZIP 的 14 页加载。
+- 保留策略先 WhatIf 再执行：只删除 v0.5.0 的 GitHub Release/资产；源码 Git 标签与本地 ZIP 保留。远征正好三版，无需删除；其它游戏分别保持三版。认证 API 复查共 15 个正式资产，所有大小/SHA-256 与索引/目录匹配。
+- 完整离线包：[GameValueEditor-v0.5.3-202610121.zip](../dist/GameValueEditor-v0.5.3-202610121.zip)，99,505,851 字节；SHA-256 `E5DF370B125DCEFC2EA942C3DF30452B4CC40E3DC80905AFBBA6FC0132CBAF25`。宿主 0.5.3、放置斩魔录 2.1.5、不问凡尘 1.3.5、最后纪元 0.5.6、远征 0.1.2，四个正式输入均校验，实际 DLL/14 页和 EXE 启动通过。独立短名 `VerifyOnly` 返回 `IntegrityVerified / ModulesVerified / StartupVerified / IsLatest=true`、`LatestStatus=Current`。
+- 完整包外部冻结记录为 `artifacts/offline-bundle-receipts/E5DF370B125DCEFC2EA942C3DF30452B4CC40E3DC80905AFBBA6FC0132CBAF25.json`。默认长名是同字节核验输入，短名供交付；都不上传 GitHub。`LocalOnly=false` 只说明正式资产输入，不表示完整 ZIP 已上传。
+- 实际离线核验器对损坏 DLL 和错误页面注册两种候选均拒绝，2 项负向集成通过；112 项离线组合回归此前已通过。
+
+本轮没有操作原游戏、改存档、改 Steam/启动配置、覆盖当前安装或关机。建议用户先更新主程序至 0.5.3，再在远征页查新更新至 0.1.2；其它模块无需更新。未知小版本的具体字段/方法仍由模块按当前运行时解析，本次没有取消目标身份/写入事务保护，也不新增游戏固定代码进宿主。
