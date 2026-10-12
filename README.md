@@ -22,7 +22,9 @@
 
 一个面向 Windows 离线单机游戏的本地数值扫描与管理工具。它不仅保存临时地址，还把玩家确认过的字段整理到按游戏、按版本隔离的本地游戏库中。
 
-> 最新版本：`v0.5.3`。项目只发布正式版本，不再设置预览版更新通道。
+> 最新版本：`v0.5.4`。项目只发布正式版本，不再设置预览版更新通道。
+
+v0.5.4 修复 Steam 详情页等公共窗口与游戏同名时被误认作第二个游戏实例的问题。识别用游戏实际原名和明确别名，不用玩家可编辑的库备注；小更新不因文件哈希变化重新关联。新增默认只预览的本地历史 ZIP 维护工具，保留发布/目录输入和最近三份不同离线内容，未知文件不猜删。Host API 8 和四个游戏模块均不变。见[发布方案与复核](docs/RELEASE_0_5_4_PLAN.md)。
 
 v0.5.3 修复专属模块更新和手动回退的候选排序：旧构建精确匹配不再遮挡能动态解析小更新的新版，未登记构建也能从可用候选中手动回退。远征正式版 0.1.2 承接已交付的 0.0.7～0.1.1；本地交付与正式标签统一计数，禁止编号倒退。发布工具保留旧包、拒绝覆盖，目录/文档提交后仍能校验来源并补传原资产。Host API 8 不变。见[详细方案与三遍复核](docs/RELEASE_0_5_3_PLAN.md)。
 
@@ -105,7 +107,7 @@ GameValueEditor.exe
 
 同一个游戏可以保存多个版本档案。普通游戏使用 EXE 的 SHA-256；Unity IL2CPP 游戏还会组合 `GameAssembly.dll` 与 `global-metadata.dat` 的 SHA-256。游戏平台 Build ID、游戏自身声明版本和引擎文件版本会分开显示，方便玩家辨认，但不会代替安全构建指纹。游戏换安装目录或 Steam 库后，重新连接会刷新路径与平台信息，不会因此失去游戏库身份。
 
-当前本地实现先按规范化游戏名称及别名关联游戏库条目，文件指纹、安装路径和模块 Supports 不再否决同名游戏。只有多个条目或多个运行实例无法唯一选择时才需要选择实际条目/进程；不会因为小更新就要求用户重新关联。通用运行程序名（如 Electron、Game）本身不是游戏名称，使用实际游戏窗口/产品名或模块别名。此修改尚未提交或发布。
+当前实现先按规范化游戏原始名称及明确别名关联游戏库条目，文件指纹、安装路径和模块 Supports 不再否决同名游戏。只有多个条目或多个真实运行实例无法唯一选择时才需要选择实际条目/进程；不会因为小更新就要求用户重新关联。通用运行程序名（如 Electron、Game）本身不是游戏名称，使用实际游戏窗口/产品名或模块别名。Steam 详情页、浏览器等公共程序的同名标题不是游戏实例，玩家可编辑的库备注不作身份凭据。
 
 ```text
 游戏
@@ -162,7 +164,7 @@ dotnet run --project tests/GameValueEditor.SmokeTests/GameValueEditor.SmokeTests
 验证最终 ZIP 中的程序能够正常启动：
 
 ```powershell
-./scripts/test-package-startup.ps1 -ArchivePath ./dist/GameValueEditor-v0.5.3-win-x64.zip
+./scripts/test-package-startup.ps1 -ArchivePath ./dist/GameValueEditor-v0.5.4-win-x64.zip
 ```
 
 官方游戏模块已迁移到独立仓库。在相邻目录克隆模块中心后，可按游戏目录名构建任意模块：
@@ -188,10 +190,25 @@ cd ../GameValueEditor-Modules
 
 核验记录位于 `artifacts/offline-bundle-receipts/<SHA256>.json`，应和包单独保留。`VerifyOnly` 将包的完整性与目录下是否最新分别报告；有更新不代表旧包损坏，目录不可用只让新旧状态变为未知。记录存在时无需原始模块 ZIP；无记录则需要包内对应版本的原输入证据。下载支持用户取消、平均速率和等待提示，原有超时保护保持不变，校验/安装阶段不可取消。
 
+本地历史生成包统一使用维护工具清理，不需手工挑选版本：
+
+```powershell
+./scripts/clean-local-artifacts.ps1       # 默认只预览，绝不删除
+./scripts/clean-local-artifacts.ps1 -Apply -WhatIf
+./scripts/clean-local-artifacts.ps1 -Apply # 显式删除预览中的旧生成 ZIP，永久删除
+# 也清理模块仓库时必须明确指定范围：
+./scripts/clean-local-artifacts.ps1 -ModuleRepository ../GameValueEditor-Modules -IncludeModuleArchives
+./scripts/test-local-artifact-cleanup.ps1
+# 模块核验负向集成测试默认选最新完整包，也可显式指定 BundlePath：
+./scripts/test-offline-module-verifier.ps1
+```
+
+工具保护发布索引中的标准主程序包（通常 3 版），离线包保留 3 个不同内容并确保保留最新完整包；重复内容仅占一个名额。可选模块范围保护目录中的各模块保留快照。只枚举指定 dist 根目录及两个已知旧工具目录，不递归遍历任意目录；个人数据、非 ZIP、核验记录、未知包和待发布版本不删。删除前重新核对方案及文件内容，`-Apply` 不会绕过操作系统/执行环境策略，也不会自动挂入打包发布流程。详见[维护工具与识别修复](docs/LOCAL_ARTIFACT_CLEANUP_AND_NAME_CANDIDATE_FIX.md)。
+
 完整的正式版验证使用本地脚本执行，不依赖 GitHub Actions：
 
 ```powershell
-./scripts/verify-release.ps1 -Version 0.5.3
+./scripts/verify-release.ps1 -Version 0.5.4
 ```
 
 该脚本依次执行 Release 构建、烟雾测试、自包含打包、发布包启动验证和更新器回滚验证。验证完成后使用 `scripts/publish-github-release.ps1` 推送标签、创建或恢复 GitHub Release、显示资产上传进度并校验线上 SHA-256；脚本支持显式代理、环境变量代理和 Windows 系统代理，具体见 [本地发布流程](docs/RELEASE.md)。
@@ -203,6 +220,8 @@ cd ../GameValueEditor-Modules
 如果游戏的真实数值只能通过其运行时对象和自身保存函数修改，则使用可选游戏模块。游戏归属先按名称识别，模块再检查自身功能所需的运行时结构；模块不支持某项操作不影响认出同一个游戏。Last Epoch 的本地修改不再以历史文件哈希白名单停用整个模块，而是按当前 IL2CPP 类/字段/方法重新定位，个别可选功能变化只影响该功能。其它模块的构建要求由模块自行维护，短函数序言不能证明固定布局兼容。页面注册与各页面的运行支持分别报告。游戏专属模块代表整个游戏，并自行声明页面、稳定编辑器 ID、字段生命周期和操作能力；页面结构、分组和交互由模块自由实现，主程序只提供导航容器、统一主题资源、控件样式、间距、弹框、生命周期和保存字段服务。
 
 扩展新游戏前请阅读 [新游戏搜索套路与专属模块扩展指南](docs/GAME_EXTENSION_GUIDE.md)；模块实现细则和脚手架位于模块仓库。
+
+v0.5.4：库条目的名称是用户备注，不再作为游戏归属依据；实际采集的原始识别名称、产品/进程名称与明确模块别名独立保存，重命名不影响识别。Steam 详情页、浏览器等公共窗口的同名标题不会冒充游戏进程。指纹只区分历史构建数据，不决定同名小更新是否属于同一游戏。
 
 ## 当前限制
 

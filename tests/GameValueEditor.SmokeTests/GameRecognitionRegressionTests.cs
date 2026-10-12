@@ -46,7 +46,9 @@ internal static class GameRecognitionRegressionTests
     {
         Directory.CreateDirectory(root);
         CheckRules(root);
+        CheckPublicWindowTitles();
         CheckNamesWithoutAdapter(Path.Combine(root, "names-only"));
+        await CheckStoredNameRenameAsync(Path.Combine(root, "stored-name"));
         CheckSourcesAndDiscovery();
         await CheckPackagesAsync(Path.Combine(root, "packages"));
         await CheckModulePackageContractsAsync(Path.Combine(root, "module-package"));
@@ -70,6 +72,62 @@ internal static class GameRecognitionRegressionTests
         Check(registry.FindById(game.ModuleId) is null && registry.LoadErrors.Count == 1, "Invalid optional module unexpectedly loaded");
         Check(GameIdentityResolver.Resolve([game], Item(10, 0, @"C:\games\AliasGame.exe"), moduleNames: registry.GetGameNames) == game,
             "Game name recognition depended on a successfully loaded optional DLL");
+    }
+
+    private static void CheckPublicWindowTitles()
+    {
+        var game = new GameProfile { Name = "任意备注", Identity = new() { GameName = "别名游戏" }, ProcessName = "ActualGame", ModuleId = "game.fixture" };
+        var actual = new ProcessItem { ProcessId = 101, ExecutablePath = @"C:\games\ActualGame.exe",
+            ProcessName = "ActualGame", WindowTitle = "ActualGame", StartTimeUtc = DateTime.UnixEpoch };
+        foreach (var name in new[] { "steam", "steamwebhelper", "chrome", "msedge", "firefox", "explorer", "EpicGamesLauncher", "GameValueEditor" })
+        {
+            var publicWindow = new ProcessItem { ProcessId = 102, ExecutablePath = @"C:\common\" + name + ".exe",
+                ProcessName = name, WindowTitle = game.Identity.GameName, StartTimeUtc = DateTime.UnixEpoch };
+            Check(GameIdentityResolver.Resolve([game], publicWindow) is null, "A public window title claimed a game: " + name);
+            Check(new ProcessService().FindGameCandidates(game, [actual, publicWindow]).SequenceEqual([actual]),
+                "A public details page made a real game ambiguous: " + name);
+            Check(ProcessService.FindRunningGame(game, [actual, publicWindow]) == actual, "A public window blocked auto recognition: " + name);
+            Check(new ProcessService().FindGameCandidates(game, [publicWindow]).Count == 0,
+                "A details page was connected when the real game was not running: " + name);
+        }
+        var second = new ProcessItem { ProcessId = 103, ExecutablePath = actual.ExecutablePath,
+            ProcessName = actual.ProcessName, WindowTitle = actual.WindowTitle, StartTimeUtc = DateTime.UnixEpoch.AddSeconds(1) };
+        Check(ProcessService.FindRunningGame(game, [actual, second]) is null, "Two real instances were silently guessed.");
+        Check(new ProcessService().FindGameCandidates(game, [actual, second]).Count == 2, "A real second game instance disappeared.");
+        foreach (var runtime in new[] { "Game", "Electron", "nw" })
+        {
+            var webGame = new ProcessItem { ProcessId = 104, ExecutablePath = @"C:\games\" + runtime + ".exe",
+                ProcessName = runtime, WindowTitle = game.Identity.GameName, StartTimeUtc = DateTime.UnixEpoch };
+            Check(GameIdentityResolver.Resolve([game], webGame) == game, "A game using a common engine lost title recognition: " + runtime);
+        }
+        var generic = new ProcessItem { ProcessId = 105, ExecutablePath = @"C:\missing-fixture\Game.exe",
+            ProcessName = "Game", WindowTitle = "真实原始游戏名", StartTimeUtc = DateTime.UnixEpoch };
+        var evidence = new GameIdentityEvidenceService().Read(new ProcessService().ResolveLogicalGame(generic, [generic]), [generic]);
+        Check(evidence.GameName == generic.WindowTitle, "A generic engine failed to capture the actual game name.");
+        var named = new GameProfile { Name = "任意备注", ProcessName = "Game", Identity = evidence };
+        Check(GameIdentityResolver.Resolve([named], generic) == named, "Captured generic game identity depended on its label.");
+        named.Name = "另一个备注";
+        Check(GameIdentityResolver.Resolve([named], generic) == named, "Renaming a generic game broke identity.");
+    }
+
+    private static async Task CheckStoredNameRenameAsync(string root)
+    {
+        using var registry = new GameAdapterRegistry(Path.Combine(root, "modules"));
+        var vm = ModuleLifecycleRegressionTests.CreateViewModel(root, new GameModuleCatalogService(Path.Combine(root, "modules")), registry);
+        var original = new GameIdentityEvidence { GameName = "OriginalGame" };
+        var game = new GameProfile { Name = "任意备注", ProcessName = "Game", Identity = original };
+        try
+        {
+            vm.Games.Add(game); vm.SelectedGame = game;
+            await vm.RenameSelectedGameAsync("AnotherGame");
+            Check(game.Name == "AnotherGame" && ReferenceEquals(game.Identity, original), "Production rename modified game recognition identity.");
+            var restored = (await new ProfileStore(root).LoadAsync()).Games.Single();
+            Check(restored.Name == "AnotherGame" && restored.Identity!.GameName == "OriginalGame", "A persisted rename replaced the original game name.");
+            var process = new ProcessItem { ProcessName = "Game", WindowTitle = "OriginalGame" };
+            Check(GameIdentityResolver.Resolve([restored], process) == restored, "Stored recognition broke after rename and reload.");
+            Check(GameIdentityResolver.Resolve([restored], new() { ProcessName = "AnotherGame" }) is null, "Reloaded user label claimed another game.");
+        }
+        finally { vm.Shutdown(); }
     }
     internal static void CheckDialog()
     {
@@ -170,7 +228,7 @@ internal static class GameRecognitionRegressionTests
             "Chinese seeded profile failed its declared English alias without a historical path/build.");
         Check(GameIdentityResolver.Resolve([seeded], epoch, confirmedModuleIds: ["unrelated"], moduleNames: Aliases) == seeded,
             "Optional adapter compatibility vetoed name recognition.");
-        var expedition = new GameProfile { Name = "再刷一把·远征" };
+        var expedition = new GameProfile { Name = "我的角色", Identity = new() { GameName = "再刷一把·远征" } };
         var title = new ProcessItem { ProcessName = "Game", WindowTitle = "再刷一把：远征" };
         Check(GameIdentityResolver.Resolve([expedition], title) == expedition, "Equivalent punctuation in a game name did not normalize.");
         Check(GameIdentityResolver.Resolve([expedition], new() { ProcessName = "Game", Role = GameProcessRole.Renderer },
@@ -179,6 +237,17 @@ internal static class GameRecognitionRegressionTests
             "Substring matching confused a sequel with its predecessor.");
         Check(GameIdentityResolver.NormalizeName("Last Epoch.exe") == GameIdentityResolver.NormalizeName("last epoch"),
             "Executable suffix/case/spacing normalization differed.");
+        game.Name = "Different";
+        Check(GameIdentityResolver.Resolve([game], process) == game, "Renaming a library label broke the original game identity.");
+        Check(GameIdentityResolver.Resolve([game], Item(9, 0, @"C:\games\Different.exe")) is null,
+            "A user-editable label claimed a different game.");
+        Check(GameIdentityResolver.Resolve([new() { Name = "Adventure" }], process) is null,
+            "An editable label alone authorized game identity.");
+        seeded.Name = "随便取的备注";
+        Check(GameIdentityResolver.Resolve([seeded], epoch, moduleNames: Aliases) == seeded,
+            "Renaming a module-backed game changed its declared name aliases.");
+        var stable = GameIdentityResolver.Merge(new() { GameName = "Original" }, new() { GameName = "Changed" });
+        Check(stable.GameName == "Original", "A later connection replaced the captured original game name.");
         Check(game.Versions.Count == 1 && game.Versions[0].Fields.Count == 2 && game.ExecutablePath == old.InstallationExecutablePath,
             "Pure recognition mutated historical data.");
         Check(!GameIdentityResolver.MatchesVersion(game.Versions[0], fingerprint),
@@ -248,10 +317,12 @@ internal static class GameRecognitionRegressionTests
         var nw = await service.CreateAsync(nwExe);
         Check(nw.Identity!.PackageId == "download-nw-game" && nw.PackageSha256.Length == 64 && nw.BuildSha256 != nw.Sha256, "Packaged NW.js was not covered.");
         var store = new ProfileStore(Path.Combine(root, "store"));
-        await store.SaveAsync(new() { Games = [new() { Identity = Evidence(@"C:\download\Launch.exe"), Versions = [new() { PackageSha256 = second.PackageSha256 }] }] });
+        await store.SaveAsync(new() { Games = [new() { Name = "任意备注", Identity = Evidence(@"C:\download\Launch.exe") with { GameName = "真实游戏原名" }, Versions = [new() { PackageSha256 = second.PackageSha256 }] }] });
         var restored = await store.LoadAsync();
         Check(restored.SchemaVersion == 7 && restored.Games[0].Identity!.PackageId == "adventure-pc" && restored.Games[0].Versions[0].PackageSha256 == second.PackageSha256,
             "Optional identity/build evidence did not round-trip through existing schema.");
+        Check(restored.Games[0].Identity!.GameName == "真实游戏原名" && restored.Games[0].Name == "任意备注",
+            "The stored recognition name and editable library label were not independent.");
     }
 
     private static async Task CheckManualAssociationAsync(string root)

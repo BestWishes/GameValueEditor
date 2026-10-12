@@ -14,6 +14,9 @@ internal static class GameIdentityResolver
     {
         // Game identity is a name, not a build or an adapter's Supports result.
         // Build hashes remain useful below ONLY for isolating version-bound scan addresses.
+        // A launcher's details page or browser tab can have exactly the game's title.
+        // It is not a second running game, nor a fallback when the real game is closed.
+        if (GameIdentityEvidenceService.IsCommonExecutable(process.ExecutablePath)) return null;
         var names = new[] { process.WindowTitle, process.ProcessName, fingerprint?.Identity?.ProductName ?? "" }
             .Concat(runningNames ?? [])
             .Select(NormalizeName).Where(IsGameName).ToHashSet(StringComparer.Ordinal);
@@ -23,7 +26,8 @@ internal static class GameIdentityResolver
     }
 
     private static IEnumerable<string> Names(GameProfile game, Func<string, IReadOnlyList<string>>? moduleNames) =>
-        new[] { game.Name, game.ProcessName, game.Identity?.ProductName ?? "" }
+        new[] { game.Identity?.GameName ?? "", game.ProcessName, game.Identity?.ProductName ?? "" }
+            .Concat(game.Versions.Select(version => version.GameDeclaredProductName))
             .Concat(moduleNames?.Invoke(game.ModuleId) ?? []).Select(NormalizeName).Where(IsGameName);
 
     internal static string NormalizeName(string name)
@@ -35,7 +39,7 @@ internal static class GameIdentityResolver
 
     // These are runtime executable names, not names of games. An actual window title,
     // product name or declared alias still identifies a game using these runtimes.
-    private static bool IsGameName(string name) => name.Length > 0 &&
+    internal static bool IsGameName(string name) => name.Length > 0 &&
         name is not ("GAME" or "ELECTRON" or "NW" or "NWJS" or "UNITYPLAYER");
 
     internal static bool MatchesVersion(GameVersionProfile version, VersionFingerprint fingerprint)
@@ -77,6 +81,7 @@ internal static class GameIdentityResolver
         InstallationExecutablePath = Keep(current.InstallationExecutablePath, saved?.InstallationExecutablePath),
         ExecutableName = Keep(current.ExecutableName, saved?.ExecutableName),
         ProductName = Keep(current.ProductName, saved?.ProductName), PackageId = Keep(current.PackageId, saved?.PackageId),
+        GameName = Keep(saved?.GameName ?? "", current.GameName),
         PlatformName = current.PlatformName.Length > 0 && current.PlatformAppId.Length > 0 ? current.PlatformName : saved?.PlatformName ?? "",
         PlatformAppId = current.PlatformName.Length > 0 && current.PlatformAppId.Length > 0 ? current.PlatformAppId : saved?.PlatformAppId ?? ""
     };

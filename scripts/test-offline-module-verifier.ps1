@@ -1,15 +1,30 @@
 #Requires -Version 7.4
 [CmdletBinding()]
-param([string]$ApplicationVersion = '0.5.3')
+param([string]$ApplicationVersion = '', [string]$BundlePath = '')
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'offline-bundle.ps1')
+. (Join-Path $PSScriptRoot 'local-artifact-cleanup.ps1')
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if (-not $BundlePath) {
+    $plan = Get-LocalArtifactCleanupPlan -ApplicationRepository $root
+    $candidates = @($plan.Rows | Where-Object { $_.Category -eq 'OfflineBundle' -and $_.Complete -and $_.Action -eq 'Keep' -and
+        (-not $ApplicationVersion -or $_.Version -eq [version]$ApplicationVersion) } | Sort-Object `
+        @{Expression = { $_.Version }; Descending = $true}, @{Expression = { [long]$_.ModifiedTicks }; Descending = $true}, Path)
+    if ($candidates.Count -eq 0) { throw 'No verified complete offline bundle is available. Supply BundlePath explicitly.' }
+    $BundlePath = $candidates[0].Path
+    $ApplicationVersion = $candidates[0].Version.ToString()
+}
+if (-not $ApplicationVersion) {
+    $inputHash = (Get-FileHash -LiteralPath $BundlePath).Hash
+    $inputReceipt = (Read-OfflineJsonFile (Get-OfflineReceiptPath $root $inputHash)) | ConvertFrom-Json -AsHashtable
+    $ApplicationVersion = $inputReceipt.ApplicationVersion
+}
 $null = Assert-OfflineVersion $ApplicationVersion
 $source = $null
 $candidate = $null
 $work = Assert-OfflinePath (Join-Path $root ('artifacts/module-verifier-tests-' + [guid]::NewGuid().ToString('N'))) (Join-Path $root 'artifacts')
 try {
-    $source = Open-OfflineArchive (Join-Path $root "dist/GameValueEditor-v$ApplicationVersion-complete-offline-win-x64.zip")
+    $source = Open-OfflineArchive (Assert-OfflinePath $BundlePath (Join-Path $root 'dist'))
     $receipt = (Read-OfflineJsonFile (Get-OfflineReceiptPath $root $source.Hash)) | ConvertFrom-Json -AsHashtable
     if ($receipt.Sha256 -cne $source.Hash -or $receipt.SchemaVersion -ne 1) { throw 'This integration test requires a previously verified bundle receipt.' }
     Assert-OfflineEntries $source @($receipt.Files.Keys)

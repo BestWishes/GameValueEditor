@@ -7,7 +7,7 @@ GitHub Actions 不是发布前提。正式版本先完成源码级构建与测�
 ## 1. 验证标准包
 
 ```powershell
-./scripts/verify-release.ps1 -Version 0.5.3
+./scripts/verify-release.ps1 -Version 0.5.4
 ```
 
 记录脚本输出的标准 ZIP 路径与 SHA-256。主程序和每个模块是独立的十进制计数器：每次只加 `0.0.1`，`0.4.9` 的下一版是 `0.5.0`，`0.9.9` 的下一版是 `1.0.0`。发布脚本合并正式标签与可选 `delivery-versions.json` 中已交付的本地版本，计算唯一下一版本并拒绝跳号、倒退及复用已交付编号；历史本地证据不伪造成正式标签。已有标签的复核/补传仍允许，不能改包字节。预览标签和 `complete-offline` 完整离线包均不能上传 GitHub Release，完整离线包只供本地或 QQ 分发。Host API 与 Schema 是独立整数协议号，不参与此进位。
@@ -37,7 +37,7 @@ v0.5.2 集成用户确认的名称优先识别、启动器通用路由/倍速、
 确认工作树、差异和远端状态后提交，在已验证的提交上创建带注释标签：
 
 ```powershell
-git tag -a v0.5.3 -m "GameValueEditor v0.5.3"
+git tag -a v0.5.4 -m "GameValueEditor v0.5.4"
 ```
 
 发布脚本从 `origin`（或 `-RemoteName` 指定的远端）解析 GitHub 仓库，避免手工填写错误的所有者或仓库名。可用 `-PushRefs` 同时推送当前分支和标签；脚本先使用配置的 Git 远端，HTTPS 失败时自动通过 GitHub SSH 443 重试。
@@ -46,9 +46,9 @@ git tag -a v0.5.3 -m "GameValueEditor v0.5.3"
 
 ```powershell
 ./scripts/publish-github-release.ps1 `
-  -Tag v0.5.3 `
-  -ReleaseName "肝肾大圣 v0.5.3" `
-  -AssetPath ./dist/GameValueEditor-v0.5.3-win-x64.zip `
+  -Tag v0.5.4 `
+  -ReleaseName "肝肾大圣 v0.5.4" `
+  -AssetPath ./dist/GameValueEditor-v0.5.4-win-x64.zip `
   -PushRefs
 ```
 
@@ -70,9 +70,9 @@ git tag -a v0.5.3 -m "GameValueEditor v0.5.3"
 
 ```powershell
 ./scripts/publish-github-release.ps1 `
-  -Tag v0.5.3 `
-  -ReleaseName "肝肾大圣 v0.5.3" `
-  -AssetPath ./dist/GameValueEditor-v0.5.3-win-x64.zip `
+  -Tag v0.5.4 `
+  -ReleaseName "肝肾大圣 v0.5.4" `
+  -AssetPath ./dist/GameValueEditor-v0.5.4-win-x64.zip `
   -VerifyOnly
 ```
 
@@ -81,6 +81,8 @@ git tag -a v0.5.3 -m "GameValueEditor v0.5.3"
 ## 4. 更新索引并执行保留策略
 
 远端资产验证完成后，用 `scripts/update-release-index.ps1` 把新版本加入 `release-index.json`，最多保留 3 个快照；提交并推送索引后，复核公开 raw 文件与 Release 一致。最后运行 `scripts/prune-github-releases.ps1`，它只删除第 4 个及更旧的正式 Release/资产并保留标签。主程序的每次发布必须在模块目录所需 Schema 不超过该版本声明上限的前提下更新索引。
+
+如果用户要求先看清理清单再决定删除，索引仍按三份可用快照更新，但本地清理及远端保留脚本都只预览，未确认前不执行删除。v0.5.4 本轮适用此授权范围；不以发布流程的默认保留要求覆盖用户明确的删除限制。
 
 主程序和各模块的版本号独立；兼容关系不靠版本号相等，而由主程序索引中的 Host API 范围，以及模块发布快照中的 `hostApiVersion`、`minimumHostVersion`、`maximumHostVersion` 共同确定。应用中的“回退”始终由用户显式确认；保留脚本和检查版本流程都不得触发自动回退。
 
@@ -93,7 +95,7 @@ git tag -a v0.5.3 -m "GameValueEditor v0.5.3"
 ```powershell
 ./scripts/build-complete-offline-bundle.ps1
 # 版本默认读取宿主项目，也可显式指定；模块仓库可以在别的位置：
-./scripts/build-complete-offline-bundle.ps1 -ApplicationVersion 0.5.3 `
+./scripts/build-complete-offline-bundle.ps1 -ApplicationVersion 0.5.4 `
   -ModuleRepository D:/MyOtherProjects/GameValueEditor-Modules
 ./scripts/build-complete-offline-bundle.ps1 -VerifyOnly
 ./scripts/test-offline-bundle.ps1
@@ -104,6 +106,8 @@ git tag -a v0.5.3 -m "GameValueEditor v0.5.3"
 包含未提交源码或尚未发布模块的完整测试包也使用同一入口，但显式指定 `-LocalHostArchivePath <review ZIP>` 与 `-ExpectedHostSha256 <SHA256>`。宿主输入只接受 artifacts 下由 review 工具生成、带同哈希 LOCAL-REVIEW.txt 的六文件包，不接受标准发布 ZIP。本地模块用 `-LocalModuleArchivePaths <ZIP>` 与一一对应的 `-LocalModuleSha256 <SHA256>`，路径限模块 artifacts 下，逐包核验 schema/宿主边界/文件图并实际创建页面；不能与本次已选择的目录模块 ID 重复。测试已发布模块的本地修改时，用 `-ModuleIds` 只选择仍复用的目录模块，再显式加入修改后的本地模块，最终每个 ID 只安装一份；不修改 catalog 或正式 ZIP。
 
 本地模式必须显式提供带 `-local-review-` 的新 `-OutputPath`，不允许 Force；未指定 ModuleIds 时选择全部目录模块，指定时精确选择并由维护者核对最终模块集合。包内说明与 ZIP 外核验记录写入 LocalOnly，源码提交号仅表示构建基线，不宣称工作树已提交；新旧状态为 LocalReview 而非“已是服务器最新”。二次核验仅需同一 OutputPath 加 VerifyOnly，优先使用冻结记录，无须仍保有本地输入。正式发布入口、索引和目录完全不改，不能把该同版本包上传替换正式包。
+
+历史本地包维护使用 `scripts/clean-local-artifacts.ps1`，默认预览，显式 `-Apply` 永久删除；不在构建或发布失败时自动清理。保护发布索引标准输入与可选模块目录保留输入，离线包默认保留 3 个不同内容（最新完整包优先），未知/未核验文件保留。`scripts/test-local-artifact-cleanup.ps1` 仅操作独立小型夹具。`test-offline-module-verifier.ps1` 默认选有外部记录的最新完整包，或显式 `-BundlePath`，不再要求固定旧别名存在。规则见[维护设计](LOCAL_ARTIFACT_CLEANUP_AND_NAME_CANDIDATE_FIX.md)。
 
 默认包含每个模块版本列表中与宿主 API 范围和主程序版本边界兼容的最新快照；没有兼容项、缺少本地 ZIP、清单/目录不一致或哈希错误时停止，不能静默漏装。未知目录协议也停止，不自动放宽兼容边界。工具不连接 GitHub；先准备所需模块原始 ZIP，不用应用下载缓存代替。
 

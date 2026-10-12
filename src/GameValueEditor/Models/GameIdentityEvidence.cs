@@ -6,6 +6,8 @@ public sealed record GameIdentityEvidence
     public string InstallationExecutablePath { get; init; } = string.Empty;
     public string ExecutableName { get; init; } = string.Empty;
     public string ProductName { get; init; } = string.Empty;
+    // Captured from the actual game, never from the user's editable library label.
+    public string GameName { get; init; } = string.Empty;
     public string PackageId { get; init; } = string.Empty;
     public string PlatformName { get; init; } = string.Empty;
     public string PlatformAppId { get; init; } = string.Empty;

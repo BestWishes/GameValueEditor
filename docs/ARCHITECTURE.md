@@ -38,6 +38,7 @@ LibraryDocument
 ```
 
 - `GameProfile` 保存玩家看到的游戏条目、安装路径、置顶、锁定和可选模块 ID。当前本地实现新增可选 Identity：固定来源、程序/包标识和平台身份，缺失线索不擦掉已学习信息；不依赖 Steam、不把临时解压目录或公共启动程序当固定安装身份。
+- v0.5.4：`GameProfile.Name` 仅为用户备注，不参加游戏身份及模块归属匹配。`Identity.GameName` 是从真实游戏采集的原始名称，首次采集后保留，不被重命名或后续连接覆盖；旧条目仍使用原进程名、产品名、游戏实际声明名称及模块别名。模块 ID 只管理包及查找其声明，不作为进程身份凭据。公共启动器/浏览器标题不作游戏名称证据，通用游戏引擎仍可用实际游戏窗口名。详见[维护与识别方案](LOCAL_ARTIFACT_CLEANUP_AND_NAME_CANDIDATE_FIX.md)。
 - `GameVersionProfile` 保存确定构建；普通游戏使用 EXE SHA-256，IL2CPP 游戏还组合 `GameAssembly.dll` 与 metadata；当前本地实现为 Electron/NW.js 打包游戏组合 `app.asar`/`package.nw` SHA-256。旧 EXE-only 记录不能证明包构建，保留历史数据并建立新版本。
 - `SavedField` 保存玩家备注、分组、类型、定位器和模块语义键；显示名称从不作为内部身份。
 

@@ -32,6 +32,7 @@ internal sealed class GameIdentityEvidenceService
         {
             InstallationExecutablePath = temporary || shared ? "" : executablePath,
             ExecutableName = Path.GetFileName(executablePath), ProductName = product,
+            GameName = shared ? "" : product,
             PackageId = ReadPackageId(executablePath), IsTemporaryExecutable = temporary, IsSharedExecutable = shared,
             PlatformName = platform.PlatformName, PlatformAppId = platform.AppId
         };
@@ -40,6 +41,8 @@ internal sealed class GameIdentityEvidenceService
     internal GameIdentityEvidence Read(LogicalGameProcessGroup group, IReadOnlyCollection<ProcessItem> processes)
     {
         var evidence = Read(group.DataProcess.ExecutablePath);
+        if (!evidence.IsSharedExecutable && string.IsNullOrWhiteSpace(evidence.GameName))
+            evidence = evidence with { GameName = group.RootProcess.WindowTitle.Trim() };
         if (!evidence.IsTemporaryExecutable) return evidence;
         var source = FindLaunchSource(group.RootProcess, processes);
         if (source is null) return evidence;
@@ -71,7 +74,7 @@ internal sealed class GameIdentityEvidenceService
         return null;
     }
 
-    private static bool IsCommonExecutable(string path) => Path.GetExtension(path).Equals(".exe", StringComparison.OrdinalIgnoreCase) &&
+    internal static bool IsCommonExecutable(string path) => Path.GetExtension(path).Equals(".exe", StringComparison.OrdinalIgnoreCase) &&
         CommonLaunchers.Contains(Path.GetFileNameWithoutExtension(path));
 
     internal static bool IsTemporaryPath(string path)

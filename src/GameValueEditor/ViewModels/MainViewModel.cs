@@ -3433,10 +3433,11 @@ public sealed partial class MainViewModel : ObservableObject
             if (game is null)
             {
                 var names = new[] { manifest.GameDisplayName }.Concat(manifest.ProcessNames)
-                    .Select(GameIdentityResolver.NormalizeName).Where(name => name.Length > 0).ToHashSet();
+                    .Select(GameIdentityResolver.NormalizeName).Where(GameIdentityResolver.IsGameName).ToHashSet();
                 var matches = Games.Where(item => string.IsNullOrWhiteSpace(item.ModuleId) &&
-                    new[] { item.Name, item.ProcessName, item.Identity?.ProductName ?? "" }
-                        .Select(GameIdentityResolver.NormalizeName).Any(names.Contains)).Take(2).ToArray();
+                    new[] { item.Identity?.GameName ?? "", item.ProcessName, item.Identity?.ProductName ?? "" }
+                        .Concat(item.Versions.Select(version => version.GameDeclaredProductName))
+                        .Select(GameIdentityResolver.NormalizeName).Where(GameIdentityResolver.IsGameName).Any(names.Contains)).Take(2).ToArray();
                 if (matches.Length == 1) game = matches[0];
             }
             if (game is null)
