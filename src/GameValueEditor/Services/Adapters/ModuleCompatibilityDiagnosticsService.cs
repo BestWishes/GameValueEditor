@@ -37,8 +37,10 @@ internal sealed record ModuleCompatibilityReport(IReadOnlyList<ModuleCompatibili
 
 internal static partial class ModuleCompatibilityDiagnosticsService
 {
-    public static ModuleCompatibilityReport Create(ModuleCompatibilityDiagnosticContext context)
+    public static ModuleCompatibilityReport Create(ModuleCompatibilityDiagnosticContext context,
+        CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var items = new List<ModuleCompatibilityReportItem>();
         Add(items, "宿主", "主程序", GameCompatibilityDiagnosticStatus.Passed,
             $"肝肾大圣 v{context.ApplicationVersion}");
@@ -46,8 +48,9 @@ internal static partial class ModuleCompatibilityDiagnosticsService
             ModuleHostApi.CurrentVersion.ToString());
 
         AddBuildItems(items, context);
-        AddModuleItems(items, context);
+        AddModuleItems(items, context, cancellationToken);
 
+        cancellationToken.ThrowIfCancellationRequested();
         var text = BuildText(items);
         return new ModuleCompatibilityReport(items, text);
     }
@@ -95,7 +98,8 @@ internal static partial class ModuleCompatibilityDiagnosticsService
 
     private static void AddModuleItems(
         ICollection<ModuleCompatibilityReportItem> items,
-        ModuleCompatibilityDiagnosticContext context)
+        ModuleCompatibilityDiagnosticContext context,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(context.ModuleId))
         {
@@ -213,6 +217,7 @@ internal static partial class ModuleCompatibilityDiagnosticsService
             return;
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         bool supported;
         try
         {
@@ -229,14 +234,17 @@ internal static partial class ModuleCompatibilityDiagnosticsService
                 $"兼容检查发生异常：{exception.Message}");
         }
 
-        if (supported) AddEditorItems(items, context.Adapter, context.Process);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (supported) AddEditorItems(items, context.Adapter, context.Process, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
         AddProviderItems(items, context.Adapter, context.Process, context.Fingerprint);
     }
 
     private static void AddEditorItems(
         ICollection<ModuleCompatibilityReportItem> items,
         IGameAdapter adapter,
-        ProcessItem process)
+        ProcessItem process,
+        CancellationToken cancellationToken)
     {
         if (adapter is IGameEditorPageFactoryProvider)
         {
@@ -250,6 +258,7 @@ internal static partial class ModuleCompatibilityDiagnosticsService
             .ToDictionary(page => page.EditorId, StringComparer.Ordinal);
         foreach (var editor in adapter.Editors.OrderBy(editor => editor.Order))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 if (!registrations.TryGetValue(editor.Id, out var page))

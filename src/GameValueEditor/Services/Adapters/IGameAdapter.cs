@@ -80,14 +80,24 @@ public sealed class GameAdapterRegistry : IDisposable
         var adapters = _adapters.ToArray();
         var context = process.ToModuleContext();
         var identity = fingerprint.ToModuleIdentity();
-        var match = await Task.Run(async () =>
-        {
-            await _supportGate.WaitAsync().ConfigureAwait(false);
-            try { return adapters.FirstOrDefault(adapter => Supports(adapter, context, identity)); }
-            finally { _supportGate.Release(); }
-        });
+        var match = await RunCompatibilityCheckAsync(() =>
+            adapters.FirstOrDefault(adapter => Supports(adapter, context, identity)));
         return match is not null && _adapters.Contains(match) ? match : null;
     }
+
+    // Diagnosis shares the connection check gate. Cancellation can skip queued
+    // work, but must not release this gate while a synchronous module call runs.
+    internal Task<T> RunCompatibilityCheckAsync<T>(Func<T> check, CancellationToken cancellationToken = default) =>
+        Task.Run(async () =>
+        {
+            await _supportGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return check();
+            }
+            finally { _supportGate.Release(); }
+        }, cancellationToken);
 
     public IGameAdapter? FindById(string id) =>
         _adapters.FirstOrDefault(adapter =>

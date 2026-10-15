@@ -284,8 +284,8 @@ internal static class StabilityRegressionTests
             {
                 using var manifestSource = zip.GetEntry("module.json")!.Open();
                 using var manifest = JsonDocument.Parse(manifestSource);
-                Check(manifest.RootElement.GetProperty("supportsUnlistedBuildValidation").GetBoolean(),
-                    "Current-metadata module is not declared for small updates");
+                var supportsUnlisted = manifest.RootElement.TryGetProperty("supportsUnlistedBuildValidation", out var declaration)
+                    && declaration.GetBoolean();
                 var name = manifest.RootElement.GetProperty("processNames")[0].GetString()!;
                 var directory = Path.Combine(root, Guid.NewGuid().ToString("N"));
                 Directory.CreateDirectory(directory);
@@ -294,13 +294,18 @@ internal static class StabilityRegressionTests
                 // Identity is a cheap name check. This fixture is not a live process,
                 // and must never be treated as evidence that data is safe to read/write.
                 foreach (var identity in new[] { unknown, new GameBuildIdentity("changed-exe", "", "changed-assembly", "changed-metadata") })
-                    Check(adapter.Supports(named, identity), "Named small update rejected by historical hashes: " + adapter.Id);
+                    Check(adapter.Supports(named, identity) == supportsUnlisted,
+                        "Unknown build support differs from the module declaration: " + adapter.Id);
                 foreach (var identity in new[] { unknown, new GameBuildIdentity("changed-exe", "", "changed-assembly", "changed-metadata") })
                 {
                     var diagnostics = ((IGameCompatibilityDiagnosticsProvider)adapter).GetCompatibilityDiagnostics(named, identity);
-                    Check(diagnostics.Any(item => item.Status == GameCompatibilityDiagnosticStatus.Information) &&
-                          !diagnostics.Any(item => item.Status == GameCompatibilityDiagnosticStatus.Failed),
-                        "Static diagnostics reject a small update or assert all runtime data was validated");
+                    if (supportsUnlisted)
+                        Check(diagnostics.Any(item => item.Status == GameCompatibilityDiagnosticStatus.Information) &&
+                              !diagnostics.Any(item => item.Status == GameCompatibilityDiagnosticStatus.Failed),
+                            "Dynamic module static diagnostics reject a small update or assert runtime validation");
+                    else
+                        Check(diagnostics.Any(item => item.Status == GameCompatibilityDiagnosticStatus.Failed),
+                            "Exact-build module did not reject an unknown build in diagnostics: " + adapter.Id);
                 }
                 try { ((IInventoryGameAdapter)adapter).ReadInventory(named); throw new Exception("Direct entry accepted a nonexistent process"); }
                 catch (ArgumentException) { }
@@ -310,7 +315,7 @@ internal static class StabilityRegressionTests
             {
                 var items = new List<ModuleCompatibilityReportItem>();
                 typeof(ModuleCompatibilityDiagnosticsService).GetMethod("AddEditorItems", BindingFlags.NonPublic | BindingFlags.Static)!
-                    .Invoke(null, [items, adapter, new ProcessItem { ProcessId = int.MaxValue }]);
+                    .Invoke(null, [items, adapter, new ProcessItem { ProcessId = int.MaxValue }, CancellationToken.None]);
                 Check(items.Count == adapter.Editors.Count && items.All(item => item.Status == GameCompatibilityDiagnosticStatus.Information),
                     "Host reports self-owned page registration as runtime compatibility");
             }

@@ -27,6 +27,8 @@ internal static class ModuleLifecycleRegressionTests
                 {
                     if (args.Contains("--module-catalog-only", StringComparer.Ordinal))
                     { await ModuleCatalogSelectionRegressionTests.RunAsync(Path.Combine(root, "catalog")); completion.SetResult(); return; }
+                    if (args.Contains("--module-diagnostics-only", StringComparer.Ordinal))
+                    { await ModuleDiagnosticsRegressionTests.RunAsync(Path.Combine(root, "module-diagnostics")); completion.SetResult(); return; }
                     if (args.Contains("--page-sessions-only", StringComparer.Ordinal))
                     { await PageSessionRegressionTests.RunAsync(Path.Combine(root, "page-sessions")); completion.SetResult(); return; }
                     if (args.Contains("--game-recognition-only", StringComparer.Ordinal))
@@ -44,6 +46,7 @@ internal static class ModuleLifecycleRegressionTests
                     await ModuleReliabilityRegressionTests.RunAsync(Path.Combine(root, "module-reliability"));
                     if (args.Contains("--module-reliability-only", StringComparer.Ordinal)) { completion.SetResult(); return; }
                     await ModuleCatalogSelectionRegressionTests.RunAsync(Path.Combine(root, "catalog"));
+                    await ModuleDiagnosticsRegressionTests.RunAsync(Path.Combine(root, "module-diagnostics"));
                     await SafetyBoundaryRegressionTests.RunAsync(Path.Combine(root, "safety-boundaries"));
                     await GameLifecycleRegressionTests.RunAsync(Path.Combine(root, "game-lifecycle"));
                     await GameRecognitionRegressionTests.RunAsync(Path.Combine(root, "game-recognition"));

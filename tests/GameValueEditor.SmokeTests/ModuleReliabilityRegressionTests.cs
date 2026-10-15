@@ -22,7 +22,7 @@ internal static class ModuleReliabilityRegressionTests
         CheckState(Path.Combine(root, "records"));
         CheckTransactionFailures(Path.Combine(root, "failures"));
         await CheckInterruptedTransactionsAsync(Path.Combine(root, "interruptions"));
-        CheckDiagnostics(Path.Combine(root, "diagnostics"));
+        await CheckDiagnosticsAsync(Path.Combine(root, "diagnostics"));
         await CheckInstancesAsync(Path.Combine(root, "instances"));
         Console.WriteLine($"Module/instance reliability regressions passed: {_assertions} assertions, including killed child processes.");
     }
@@ -280,7 +280,7 @@ internal static class ModuleReliabilityRegressionTests
         }
     }
 
-    private static void CheckDiagnostics(string root)
+    private static async Task CheckDiagnosticsAsync(string root)
     {
         var store = new ModuleStateStore(root);
         store.SaveInstalled(Records());
@@ -312,8 +312,10 @@ internal static class ModuleReliabilityRegressionTests
         {
             var game = new GameProfile { ModuleId = "game.test", Versions = [new()] };
             vm.Games.Add(game); vm.SelectedGame = game; vm.SelectedVersion = game.Versions[0];
-            var report = vm.CreateModuleCompatibilityReport();
-            Check(report.Items.Any(item => item.DisplayName == "本地安装" && item.Status == GameCompatibilityDiagnosticStatus.Failed) &&
+            ModuleCompatibilityReport? report = null;
+            await vm.ShowModuleCompatibilityReportAsync(value => report = value);
+            Check(report is not null, "Current diagnostics were not presented.");
+            Check(report!.Items.Any(item => item.DisplayName == "本地安装" && item.Status == GameCompatibilityDiagnosticStatus.Failed) &&
                   report.Items.Any(item => item.DisplayName == "模块加载" && item.Status == GameCompatibilityDiagnosticStatus.Failed),
                 "Global storage error was filtered out of the report.");
             Check(!vm.CanInstallGameModule && !vm.CanRollbackGameModule && !vm.CanUninstallGameModule && vm.CanViewModuleCompatibilityDiagnostics &&

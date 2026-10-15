@@ -140,7 +140,7 @@ if (args.Contains("--module-reliability-only", StringComparer.Ordinal) || args.C
     args.Contains("--game-lifecycle-only", StringComparer.Ordinal) || args.Contains("--background-boundaries-only", StringComparer.Ordinal) ||
     args.Contains("--field-order-only", StringComparer.Ordinal) || args.Contains("--shared-field-only", StringComparer.Ordinal) ||
     args.Contains("--game-recognition-only", StringComparer.Ordinal) || args.Contains("--page-sessions-only", StringComparer.Ordinal) ||
-    args.Contains("--module-catalog-only", StringComparer.Ordinal))
+    args.Contains("--module-catalog-only", StringComparer.Ordinal) || args.Contains("--module-diagnostics-only", StringComparer.Ordinal))
 {
     await ModuleLifecycleRegressionTests.RunAsync(args);
     return 0;
@@ -1726,7 +1726,7 @@ static void VerifyPackagedModule(string archivePath, bool requireContributors = 
                 .Select(editor => editor.GetProperty("id").GetString() ?? string.Empty).ToArray();
             contributorCount = root.TryGetProperty("contributors", out var contributors)
                 ? contributors.GetArrayLength()
-                : 0;
+                : -1;
         }
 
         Assert(!string.IsNullOrWhiteSpace(moduleId) && !string.IsNullOrWhiteSpace(version),
@@ -1762,7 +1762,9 @@ static void VerifyPackagedModule(string archivePath, bool requireContributors = 
         };
         File.WriteAllText(Path.Combine(verificationRoot, "installed.json"), JsonSerializer.Serialize(installed));
         LoadAndVerifyPackagedModule(verificationRoot, moduleId, hostApiVersion, editorIds);
-        if (requireContributors) Assert(contributorCount > 0, "Official packaged module has no contributor metadata.");
+        // A module with no merged contributor PRs may legitimately have an empty
+        // generated array. Official packages must still include the array itself.
+        if (requireContributors) Assert(contributorCount >= 0, "Official packaged module has no contributor metadata.");
         Console.WriteLine($"Verified packaged module: {moduleId} v{version}, {editorIds.Length} pages.");
     }
     finally
@@ -1896,6 +1898,9 @@ public sealed class SmokeTestModuleAdapter :
     internal BackgroundOperationRegressionTests.ProbeAdapter? BoundaryProbe { get; init; }
     internal Func<GameProcessContext, string, AdapterFieldValue>? ReadFieldOverride { get; init; }
     internal Func<bool>? SupportsOverride { get; init; }
+    internal Func<string>? DisplayNameOverride { get; init; }
+    internal Func<IReadOnlyList<GameCompatibilityDiagnostic>>? DiagnosticsOverride { get; init; }
+    internal Func<bool>? CharacterSupportOverride { get; init; }
     internal Func<GameDeclaredVersionInfo>? MetadataOverride { get; init; }
     internal Func<GameProcessContext, string, string, AdapterFieldValue>? WriteFieldOverride { get; init; }
     public bool ThrowCompatibilityDiagnostics { get; init; }
@@ -1904,7 +1909,7 @@ public sealed class SmokeTestModuleAdapter :
     public IReadOnlyList<string> IdentityLegacyIds { get; init; } = [];
     public string Id => BoundaryProbe?.Id ?? IdentityId ?? "game.test.multi-editor";
     public IReadOnlyList<string> LegacyIds => BoundaryProbe?.Aliases ?? IdentityLegacyIds;
-    public string DisplayName => "测试多编辑器游戏模块";
+    public string DisplayName => DisplayNameOverride?.Invoke() ?? "测试多编辑器游戏模块";
     public string Description => "仅用于宿主接口冒烟测试。";
     public IReadOnlyList<GameEditorDescriptor> Editors => IdentityOnly || BoundaryProbe is not null ? [] :
     [
@@ -1925,6 +1930,7 @@ public sealed class SmokeTestModuleAdapter :
         GameProcessContext process,
         GameBuildIdentity fingerprint)
     {
+        if (DiagnosticsOverride is { } diagnostics) return diagnostics();
         if (ThrowCompatibilityDiagnostics)
             throw new InvalidOperationException("诊断提供器模拟失败。");
         return
@@ -1943,7 +1949,7 @@ public sealed class SmokeTestModuleAdapter :
         ? probe.WriteField(fieldKey, displayValue) : IdentityOnly
             ? throw new InvalidOperationException("Identity tests must not write game data.") : new(fieldKey, displayValue, "测试");
     public IReadOnlyList<AdapterInventoryItem> ReadInventory(GameProcessContext process) => [new("test", "测试物品", 1)];
-    public bool SupportsCharacterAttributes(GameProcessContext process) => true;
+    public bool SupportsCharacterAttributes(GameProcessContext process) => CharacterSupportOverride?.Invoke() ?? true;
     public IReadOnlyList<AdapterCharacterItem> ReadCharacters(GameProcessContext process) =>
         [new("test", "测试人物", 1, [new("strength", "力道", 1, 1, 1f)])];
     public AdapterCharacterItem WriteCharacterAttribute(GameProcessContext process, string characterId, string attributeKey, int targetValue) =>

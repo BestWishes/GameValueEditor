@@ -108,6 +108,7 @@ public sealed partial class MainViewModel : ObservableObject
     private bool _suppressGameActivation;
     private string _moduleStatusText = "尚未检查当前游戏的专属模块";
     private bool _isModuleControlBlocked;
+    private CancellationTokenSource? _moduleDiagnosticsCancellation;
     private GameModuleCheckResult? _moduleCheckResult;
     private long _moduleViewGeneration;
     private ModuleOperationContext? _moduleCheckContext;
@@ -478,7 +479,8 @@ public sealed partial class MainViewModel : ObservableObject
     public bool CanUninstallGameModule => _moduleCatalogService.StorageErrors.Count == 0 && !_isModuleControlBlocked &&
         !string.IsNullOrWhiteSpace(ResolveActiveModuleId()) &&
         _moduleCatalogService.FindInstalled(ResolveActiveModuleId()) is not null;
-    public bool CanViewModuleCompatibilityDiagnostics => !_isModuleControlBlocked &&
+    public bool CanViewModuleCompatibilityDiagnostics => !_isShuttingDown && !_isModuleControlBlocked &&
+        _moduleDiagnosticsCancellation is null &&
         ((AttachedProcess is not null && _attachedFingerprint is not null) || SelectedVersion is not null);
     public bool CanViewModuleContributors => !_isModuleControlBlocked && GetModuleContributors().Count > 0;
     public string ApplicationUpdateStatusText
@@ -2538,11 +2540,47 @@ public sealed partial class MainViewModel : ObservableObject
         return _moduleCheckResult?.RemoteModule?.Contributors.Where(IsSafeContributor).ToList() ?? [];
     }
 
-    internal ModuleCompatibilityReport CreateModuleCompatibilityReport()
+    internal async Task ShowModuleCompatibilityReportAsync(Action<ModuleCompatibilityReport> showReport)
     {
+        ArgumentNullException.ThrowIfNull(showReport);
+        if (_isShuttingDown || _moduleDiagnosticsCancellation is not null) return;
         if (!CanViewModuleCompatibilityDiagnostics)
             throw new InvalidOperationException("请先连接一个游戏，或选择带有版本信息的游戏库条目。");
 
+        var operation = CaptureModuleContext();
+        var requestedModuleId = ResolveActiveModuleId();
+        var activeAdapter = _activeAdapter;
+        using var cancellation = new CancellationTokenSource();
+        _moduleDiagnosticsCancellation = cancellation;
+        OnPropertyChanged(nameof(CanViewModuleCompatibilityDiagnostics));
+        ModuleCompatibilityDiagnosticContext? snapshot = null;
+        bool IsCurrent() => !cancellation.IsCancellationRequested && !_isShuttingDown &&
+            IsModuleContextCurrent(operation) && ReferenceEquals(activeAdapter, _activeAdapter) &&
+            string.Equals(requestedModuleId, ResolveActiveModuleId(), StringComparison.Ordinal) &&
+            (snapshot is null || ReferenceEquals(snapshot.Adapter,
+                string.IsNullOrWhiteSpace(snapshot.ModuleId) ? _activeAdapter : _adapterRegistry.FindById(snapshot.ModuleId)));
+        try
+        {
+            snapshot = CaptureModuleCompatibilityDiagnosticContext();
+            var report = await _adapterRegistry.RunCompatibilityCheckAsync(() =>
+                ModuleCompatibilityDiagnosticsService.Create(snapshot, cancellation.Token), cancellation.Token);
+            // Validate and present in one UI continuation. Returning a report for
+            // another async continuation would reopen the selection/close race.
+            if (IsCurrent()) showReport(report);
+        }
+        catch (Exception) when (!IsCurrent())
+        {
+            // An obsolete read (including a late failure) belongs to its old view.
+        }
+        finally
+        {
+            _moduleDiagnosticsCancellation = null;
+            OnPropertyChanged(nameof(CanViewModuleCompatibilityDiagnostics));
+        }
+    }
+
+    private ModuleCompatibilityDiagnosticContext CaptureModuleCompatibilityDiagnosticContext()
+    {
         var process = AttachedProcess;
         var moduleId = ResolveActiveModuleId();
         InstalledModuleManifest? manifest = null;
@@ -2575,9 +2613,9 @@ public sealed partial class MainViewModel : ObservableObject
             !string.Equals(checkResult.RemoteModule.Id, moduleId, StringComparison.Ordinal))
             checkResult = null;
 
-        return ModuleCompatibilityDiagnosticsService.Create(new(
+        return new(
             ApplicationVersion.Current,
-            SelectedVersion,
+            SnapshotDiagnosticVersion(SelectedVersion),
             process,
             _attachedFingerprint,
             moduleId,
@@ -2585,9 +2623,29 @@ public sealed partial class MainViewModel : ObservableObject
             manifest,
             checkResult,
             adapter,
-            _adapterRegistry.LoadErrors,
-            _moduleCatalogService.StorageErrors));
+            _adapterRegistry.LoadErrors.ToArray(),
+            _moduleCatalogService.StorageErrors.ToArray());
     }
+
+    // Only report metadata is copied; never enumerate UI fields or copy addresses.
+    private static GameVersionProfile? SnapshotDiagnosticVersion(GameVersionProfile? version) => version is null ? null : new()
+    {
+        GameDeclaredVersion = version.GameDeclaredVersion,
+        GameDeclaredProductName = version.GameDeclaredProductName,
+        GameDeclaredBuildGuid = version.GameDeclaredBuildGuid,
+        PlatformName = version.PlatformName,
+        PlatformAppId = version.PlatformAppId,
+        PlatformBuildId = version.PlatformBuildId,
+        PlatformDisplayName = version.PlatformDisplayName,
+        FileVersion = version.FileVersion,
+        ProductVersion = version.ProductVersion,
+        Architecture = version.Architecture,
+        ExecutableSha256 = version.ExecutableSha256,
+        BuildFingerprint = version.BuildFingerprint,
+        GameAssemblySha256 = version.GameAssemblySha256,
+        MetadataSha256 = version.MetadataSha256,
+        PackageSha256 = version.PackageSha256
+    };
 
     private static bool IsSafeContributor(GameModuleContributor contributor) =>
         contributor.GithubId > 0 &&
@@ -2748,6 +2806,7 @@ public sealed partial class MainViewModel : ObservableObject
     private void ResetModuleCheckState()
     {
         _moduleViewGeneration++;
+        _moduleDiagnosticsCancellation?.Cancel();
         _moduleCheckContext = null;
         _moduleCheckResult = null;
         var moduleId = ResolveActiveModuleId();
@@ -4030,6 +4089,7 @@ public sealed partial class MainViewModel : ObservableObject
             try { action(); }
             catch (Exception exception) { errors.Add(exception); Debug.WriteLine(exception); }
         }
+        Cleanup(() => _moduleDiagnosticsCancellation?.Cancel());
         Cleanup(() => _downloadOperation?.Cancel());
         Cleanup(() => _scanCancellation?.Cancel());
         Cleanup(StopLiveCandidateRefresh);
