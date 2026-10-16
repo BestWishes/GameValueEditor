@@ -286,6 +286,7 @@ internal static class StabilityRegressionTests
                 using var manifest = JsonDocument.Parse(manifestSource);
                 var supportsUnlisted = manifest.RootElement.TryGetProperty("supportsUnlistedBuildValidation", out var declaration)
                     && declaration.GetBoolean();
+                Check(supportsUnlisted, "Official module disabled mandatory small-update validation: " + adapter.Id);
                 var name = manifest.RootElement.GetProperty("processNames")[0].GetString()!;
                 var directory = Path.Combine(root, Guid.NewGuid().ToString("N"));
                 Directory.CreateDirectory(directory);
@@ -293,19 +294,17 @@ internal static class StabilityRegressionTests
                 var named = context with { ProcessName = name, ExecutablePath = Path.Combine(directory, name + ".exe") };
                 // Identity is a cheap name check. This fixture is not a live process,
                 // and must never be treated as evidence that data is safe to read/write.
+                var identityCandidate = adapter.Supports(named, unknown);
                 foreach (var identity in new[] { unknown, new GameBuildIdentity("changed-exe", "", "changed-assembly", "changed-metadata") })
-                    Check(adapter.Supports(named, identity) == supportsUnlisted,
-                        "Unknown build support differs from the module declaration: " + adapter.Id);
+                    Check(adapter.Supports(named, identity) == identityCandidate,
+                        "Fingerprint changes bypass or block identical runtime validation: " + adapter.Id);
                 foreach (var identity in new[] { unknown, new GameBuildIdentity("changed-exe", "", "changed-assembly", "changed-metadata") })
                 {
                     var diagnostics = ((IGameCompatibilityDiagnosticsProvider)adapter).GetCompatibilityDiagnostics(named, identity);
-                    if (supportsUnlisted)
-                        Check(diagnostics.Any(item => item.Status == GameCompatibilityDiagnosticStatus.Information) &&
-                              !diagnostics.Any(item => item.Status == GameCompatibilityDiagnosticStatus.Failed),
-                            "Dynamic module static diagnostics reject a small update or assert runtime validation");
-                    else
-                        Check(diagnostics.Any(item => item.Status == GameCompatibilityDiagnosticStatus.Failed),
-                            "Exact-build module did not reject an unknown build in diagnostics: " + adapter.Id);
+                    Check(diagnostics.Any(item => item.Status == GameCompatibilityDiagnosticStatus.Information),
+                        "Unlisted build must explain local runtime validation: " + adapter.Id);
+                    // A nonexistent process may (and should) fail actual runtime
+                    // validation. Never require it to pass to prove hash fallback.
                 }
                 try { ((IInventoryGameAdapter)adapter).ReadInventory(named); throw new Exception("Direct entry accepted a nonexistent process"); }
                 catch (ArgumentException) { }
